@@ -7,5 +7,7 @@ members = [
     "consensus_service",
     "api_service",
     "mining_service",
-    "shared"
+    "shared",
+    "validation_service",
+    "overlay_service"
 ]
