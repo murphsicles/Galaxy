@@ -1,0 +1,11 @@
+[workspace]
+members = [
+    "network_service",
+    "transaction_service",
+    "block_service",
+    "storage_service",
+    "consensus_service",
+    "api_service",
+    "mining_service",
+    "shared"
+]
