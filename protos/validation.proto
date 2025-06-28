@@ -1,0 +1,24 @@
+syntax = "proto3";
+package validation;
+
+service Validation {
+    rpc GetSPVProof (MPVRequest) returns (SPVProofResponse);
+    rpc VerifyTransaction (VerifyTxRequest) returns (VerifyTxResponse);
+}
+
+message MPVRequest {
+    string transaction_id = 1;
+}
+
+message MPVResponse {
+    string merkle_path = 1;
+    repeated string block_headers = 2;
+}
+
+message VerifyTxRequest {
+    string transaction = 1;
+}
+
+message VerifyTxResponse {
+    bool is_valid = 1;
+}
