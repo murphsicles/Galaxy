@@ -1,0 +1,10 @@
+[package]
+name = "consensus_service"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] } # Async runtime
+tonic = "0.8"                                  # gRPC support
+prost = "0.11"                                 # Protocol Buffers
+shared = { path = "../shared" }                # Link to shared crate
