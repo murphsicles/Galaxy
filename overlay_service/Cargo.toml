@@ -1,0 +1,10 @@
+[package]
+name = "overlay_service"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+tonic = "0.8"
+prost = "0.11"
+shared = { path = "../shared" }
