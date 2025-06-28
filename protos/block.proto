@@ -1,7 +1,7 @@
 syntax = "proto3";
 package network;
 
-service NetworkService {
+service Block {
     rpc Ping (PingRequest) returns (PingResponse);
 }
 
