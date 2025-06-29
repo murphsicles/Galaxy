@@ -8,31 +8,48 @@ use sv::messages::{Message, NetworkMessage};
 use sv::network::{Network as BSVNetwork, Version};
 use sv::transaction::Transaction;
 use sv::block::Block;
-use tokio::net::TcpStream;
+use tokio::net::{TcpStream, TcpListener};
+use tokio::sync::mpsc;
+use futures::stream::StreamExt;
+use std::collections::HashMap;
+use std::sync::Arc;
+use tokio::sync::Mutex;
 use hex;
 
 tonic::include_proto!("network");
 
 #[derive(Debug)]
 struct NetworkServiceImpl {
-    peers: Vec<String>,
+    peers: Arc<Mutex<HashMap<String, mpsc::Sender<Message>>>>, // Peer address to message sender
 }
 
 impl NetworkServiceImpl {
-    fn new() -> Self {
-        // Initialize with known BSV testnet nodes
-        let peers = vec![
+    async fn new() -> Self {
+        let peers = Arc::new(Mutex::new(HashMap::new()));
+        let initial_peers = vec![
             "testnet-seed.bitcoin.sipa.be:18333".to_string(),
             "testnet-seed.bsv.io:18333".to_string(),
         ];
+
+        // Spawn a task to manage peer connections
+        let peers_clone = Arc::clone(&peers);
+        tokio::spawn(async move {
+            for peer in initial_peers {
+                if let Ok(stream) = TcpStream::connect(&peer).await {
+                    let (tx, mut rx) = mpsc::channel(100);
+                    {
+                        let mut peers = peers_clone.lock().await;
+                        peers.insert(peer.clone(), tx);
+                    }
+                    tokio::spawn(Self::handle_peer(stream, peer, peers_clone.clone()));
+                }
+            }
+        });
+
         NetworkServiceImpl { peers }
     }
 
-    async fn send_version_message(&self, addr: &str) -> Result<(), String> {
-        // Connect to a peer
-        let mut stream = TcpStream::connect(addr).await.map_err(|e| e.to_string())?;
-
-        // Create a BSV Version message
+    async fn send_version_message(stream: &mut TcpStream, addr: &str) -> Result<(), String> {
         let version = Version {
             version: 70015,
             services: 0,
@@ -52,12 +69,9 @@ impl NetworkServiceImpl {
             command: "version".to_string(),
             payload: version.serialize(),
         };
-
-        // Send the Version message
         let serialized = message.serialize(BSVNetwork::Testnet);
         stream.write_all(&serialized).await.map_err(|e| e.to_string())?;
 
-        // Wait for Verack (simplified)
         let mut buffer = vec![0u8; 1024];
         let n = stream.read(&mut buffer).await.map_err(|e| e.to_string())?;
         let response = Message::deserialize(&buffer[..n], BSVNetwork::Testnet)
@@ -67,6 +81,56 @@ impl NetworkServiceImpl {
         } else {
             Err("Expected Verack".to_string())
         }
+    }
+
+    async fn handle_peer(stream: TcpStream, addr: String, peers: Arc<Mutex<HashMap<String, mpsc::Sender<Message>>>>) {
+        let mut stream = stream;
+        if Self::send_version_message(&mut stream, &addr).await.is_err() {
+            let mut peers = peers.lock().await;
+            peers.remove(&addr);
+            return;
+        }
+
+        // Handle incoming messages (addr, inv, getdata)
+        let mut buffer = vec![0u8; 1024];
+        loop {
+            match stream.read(&mut buffer).await {
+                Ok(n) if n > 0 => {
+                    if let Ok(message) = Message::deserialize(&buffer[..n], BSVNetwork::Testnet) {
+                        match message.command.as_str() {
+                            "addr" => {
+                                // TODO: Process addr message to discover new peers
+                                println!("Received addr message from {}", addr);
+                            }
+                            "inv" => {
+                                // TODO: Process inv message, respond with getdata
+                                println!("Received inv message from {}", addr);
+                            }
+                            "getdata" => {
+                                // TODO: Send requested data (tx or block)
+                                println!("Received getdata message from {}", addr);
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                _ => {
+                    let mut peers = peers.lock().await;
+                    peers.remove(&addr);
+                    break;
+                }
+            }
+        }
+    }
+
+    async fn broadcast_message(&self, message: Message) -> Result<(), String> {
+        let peers = self.peers.lock().await;
+        for (addr, tx) in peers.iter() {
+            if let Err(e) = tx.send(message.clone()).await {
+                println!("Failed to send message to {}: {}", addr, e);
+            }
+        }
+        Ok(())
     }
 }
 
@@ -81,37 +145,28 @@ impl Network for NetworkServiceImpl {
     }
 
     async fn discover_peers(&self, _request: Request<DiscoverPeersRequest>) -> Result<Response<DiscoverPeersResponse>, Status> {
-        let peer = self.peers.get(0).ok_or_else(|| Status::internal("No peers available"))?;
-        match self.send_version_message(peer).await {
-            Ok(_) => {
-                let reply = DiscoverPeersResponse {
-                    peer_addresses: self.peers.clone(),
-                    error: "".to_string(),
-                };
-                Ok(Response::new(reply))
-            }
-            Err(e) => {
-                let reply = DiscoverPeersResponse {
-                    peer_addresses: vec![],
-                    error: e,
-                };
-                Ok(Response::new(reply))
-            }
-        }
+        let peers = self.peers.lock().await;
+        let peer_addresses: Vec<String> = peers.keys().cloned().collect();
+        let reply = DiscoverPeersResponse {
+            peer_addresses,
+            error: if peers.is_empty() { "No active peers".to_string() } else { "".to_string() },
+        };
+        Ok(Response::new(reply))
     }
 
     async fn broadcast_transaction(&self, request: Request<BroadcastTxRequest>) -> Result<Response<BroadcastTxResponse>, Status> {
         let req = request.into_inner();
-        // Parse hex-encoded transaction
         let tx_bytes = hex::decode(&req.tx_hex)
             .map_err(|e| Status::invalid_argument(format!("Invalid tx_hex: {}", e)))?;
         let tx: Transaction = sv::util::deserialize(&tx_bytes)
             .map_err(|e| Status::invalid_argument(format!("Invalid transaction: {}", e)))?;
 
-        // Simulate broadcasting to peers (to be expanded)
-        for peer in &self.peers {
-            println!("Broadcasting tx {} to {}", tx.txid(), peer);
-        }
+        let message = Message {
+            command: "tx".to_string(),
+            payload: tx.serialize(),
+        };
+        self.broadcast_message(message).await
+            .map_err(|e| Status::internal(format!("Broadcast failed: {}", e)))?;
 
         let reply = BroadcastTxResponse {
             success: true,
@@ -122,16 +177,17 @@ impl Network for NetworkServiceImpl {
 
     async fn broadcast_block(&self, request: Request<BroadcastBlockRequest>) -> Result<Response<BroadcastBlockResponse>, Status> {
         let req = request.into_inner();
-        // Parse hex-encoded block
         let block_bytes = hex::decode(&req.block_hex)
             .map_err(|e| Status::invalid_argument(format!("Invalid block_hex: {}", e)))?;
         let block: Block = sv::util::deserialize(&block_bytes)
             .map_err(|e| Status::invalid_argument(format!("Invalid block: {}", e)))?;
 
-        // Simulate broadcasting to peers (to be expanded)
-        for peer in &self.peers {
-            println!("Broadcasting block {} to {}", block.block_hash(), peer);
-        }
+        let message = Message {
+            command: "block".to_string(),
+            payload: block.serialize(),
+        };
+        self.broadcast_message(message).await
+            .map_err(|e| Status::internal(format!("Broadcast failed: {}", e)))?;
 
         let reply = BroadcastBlockResponse {
             success: true,
