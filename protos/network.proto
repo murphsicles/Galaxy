@@ -3,12 +3,34 @@ package network;
 
 service Network {
     rpc Ping (PingRequest) returns (PingResponse);
+    rpc DiscoverPeers (DiscoverPeersRequest) returns (DiscoverPeersResponse);
+    rpc BroadcastTransaction (BroadcastTxRequest) returns (BroadcastTxResponse);
+    rpc BroadcastBlock (BroadcastBlockRequest) returns (BroadcastBlockResponse);
 }
 
 message PingRequest {
     string message = 1;
 }
-
 message PingResponse {
     string reply = 1;
+}
+message DiscoverPeersRequest {
+    string node_id = 1;
+}
+message DiscoverPeersResponse {
+    repeated string peer_addresses = 1;
+}
+message BroadcastTxRequest {
+    string transaction = 1; // Hex-encoded transaction
+}
+message BroadcastTxResponse {
+    bool success = 1;
+    string error = 2;
+}
+message BroadcastBlockRequest {
+    string block = 1; // Hex-encoded block
+}
+message BroadcastBlockResponse {
+    bool success = 1;
+    string error = 2;
 }
