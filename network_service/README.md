@@ -1,6 +1,6 @@
 # Network Service
 
-This service implements a gRPC server for BSV P2P networking in the Galaxy project, using rust-sv for BSV-specific functionality.
+This service implements a gRPC server for BSV P2P networking in the Galaxy project, using rust-sv for BSV-specific functionality and a peer pool for managing connections.
 
 ## Running
 ```bash
@@ -9,7 +9,7 @@ cargo run
 ```
 
 ## Testing
-Use `grpcurl` to test the available methods. Note: Some methods require hex-encoded BSV transactions or blocks for testing.
+Use `grpcurl` to test the available methods. Note: Some methods require hex-encoded BSV transactions or blocks for testing. Ensure testnet nodes are accessible for peer discovery.
 
 ### Ping
 ```bash
