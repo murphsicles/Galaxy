@@ -1,9 +1,11 @@
-use tonic::{transport::Server, Request, Response, Status};
+use tonic::{transport::{Server, Channel}, Request, Response, Status};
 use network::network_server::{Network, NetworkServer};
 use network::{
     PingRequest, PingResponse, DiscoverPeersRequest, DiscoverPeersResponse,
     BroadcastTxRequest, BroadcastTxResponse, BroadcastBlockRequest, BroadcastBlockResponse
 };
+use transaction::transaction_client::TransactionClient;
+use transaction::ValidateTxRequest;
 use sv::messages::{Message, NetworkMessage};
 use sv::network::{Network as BSVNetwork, Version};
 use sv::transaction::Transaction;
@@ -17,10 +19,12 @@ use tokio::sync::Mutex;
 use hex;
 
 tonic::include_proto!("network");
+tonic::include_proto!("transaction");
 
 #[derive(Debug)]
 struct NetworkServiceImpl {
-    peers: Arc<Mutex<HashMap<String, mpsc::Sender<Message>>>>, // Peer address to message sender
+    peers: Arc<Mutex<HashMap<String, mpsc::Sender<Message>>>>,
+    transaction_client: TransactionClient<Channel>,
 }
 
 impl NetworkServiceImpl {
@@ -30,6 +34,11 @@ impl NetworkServiceImpl {
             "testnet-seed.bitcoin.sipa.be:18333".to_string(),
             "testnet-seed.bsv.io:18333".to_string(),
         ];
+
+        // Connect to transaction_service
+        let transaction_client = TransactionClient::connect("http://[::1]:50052")
+            .await
+            .expect("Failed to connect to transaction_service");
 
         // Spawn a task to manage peer connections
         let peers_clone = Arc::clone(&peers);
@@ -46,7 +55,7 @@ impl NetworkServiceImpl {
             }
         });
 
-        NetworkServiceImpl { peers }
+        NetworkServiceImpl { peers, transaction_client }
     }
 
     async fn send_version_message(stream: &mut TcpStream, addr: &str) -> Result<(), String> {
@@ -91,7 +100,6 @@ impl NetworkServiceImpl {
             return;
         }
 
-        // Handle incoming messages (addr, inv, getdata)
         let mut buffer = vec![0u8; 1024];
         loop {
             match stream.read(&mut buffer).await {
@@ -99,15 +107,12 @@ impl NetworkServiceImpl {
                     if let Ok(message) = Message::deserialize(&buffer[..n], BSVNetwork::Testnet) {
                         match message.command.as_str() {
                             "addr" => {
-                                // TODO: Process addr message to discover new peers
                                 println!("Received addr message from {}", addr);
                             }
                             "inv" => {
-                                // TODO: Process inv message, respond with getdata
                                 println!("Received inv message from {}", addr);
                             }
                             "getdata" => {
-                                // TODO: Send requested data (tx or block)
                                 println!("Received getdata message from {}", addr);
                             }
                             _ => {}
@@ -156,6 +161,24 @@ impl Network for NetworkServiceImpl {
 
     async fn broadcast_transaction(&self, request: Request<BroadcastTxRequest>) -> Result<Response<BroadcastTxResponse>, Status> {
         let req = request.into_inner();
+        // Validate transaction via transaction_service
+        let mut client = self.transaction_client.clone();
+        let validate_request = ValidateTxRequest {
+            tx_hex: req.tx_hex.clone(),
+        };
+        let validate_response = client.validate_transaction(validate_request)
+            .await
+            .map_err(|e| Status::internal(format!("Validation failed: {}", e)))?
+            .into_inner();
+
+        if !validate_response.is_valid {
+            return Ok(Response::new(BroadcastTxResponse {
+                success: false,
+                error: validate_response.error,
+            }));
+        }
+
+        // Parse and broadcast transaction
         let tx_bytes = hex::decode(&req.tx_hex)
             .map_err(|e| Status::invalid_argument(format!("Invalid tx_hex: {}", e)))?;
         let tx: Transaction = sv::util::deserialize(&tx_bytes)
@@ -200,7 +223,7 @@ impl Network for NetworkServiceImpl {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let addr = "[::1]:50051".parse().unwrap();
-    let network_service = NetworkServiceImpl::new();
+    let network_service = NetworkServiceImpl::new().await;
 
     println!("Network service listening on {}", addr);
 
