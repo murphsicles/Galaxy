@@ -12,6 +12,7 @@ hex = "0.4"                                    # Hex decoding
 async-std = "1.12"                             # Async utilities
 futures = "0.3"                                # Stream handling
 shared = { path = "../shared" }                # Link to shared crate
+transaction_service = { path = "../transaction_service" } # Link to transaction_service
 
 [build-dependencies]
 tonic-build = "0.8"                            # For compiling .proto files
