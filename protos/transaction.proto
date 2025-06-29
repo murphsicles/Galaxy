@@ -1,14 +1,22 @@
 syntax = "proto3";
-package network;
+package transaction;
 
 service Transaction {
-    rpc Ping (PingRequest) returns (PingResponse);
+    rpc ValidateTransaction (ValidateTxRequest) returns (ValidateTxResponse);
+    rpc ProcessTransaction (ProcessTxRequest) returns (ProcessTxResponse);
 }
 
-message PingRequest {
-    string message = 1;
+message ValidateTxRequest {
+    string tx_hex = 1; // Hex-encoded BSV transaction
 }
-
-message PingResponse {
-    string reply = 1;
+message ValidateTxResponse {
+    bool is_valid = 1;
+    string error = 2; // Error message if validation fails
+}
+message ProcessTxRequest {
+    string tx_hex = 1; // Hex-encoded BSV transaction
+}
+message ProcessTxResponse {
+    bool success = 1;
+    string error = 2; // Error message if processing fails
 }
