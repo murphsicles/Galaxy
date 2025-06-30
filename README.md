@@ -4,13 +4,13 @@
 ![Rust](https://img.shields.io/badge/Rust-1.80+-orange?logo=rust)
 ![Build Status](https://img.shields.io/badge/build-passing-brightgreen)
 ![Dependencies](https://img.shields.io/badge/dependencies-up%20to%20date-green)
-![License](https://img.shields.io/badge/license-MIT-blue)
+![License](https://img.shields.io/badge/license-Open%20BSV-blue)
 
 **Galaxy** is an ultra high-performance Bitcoin SV (BSV) node built in Rust, designed to unboundedly scale to asynchronously parallel process over **100,000,000 transactions per second (TPS)** per shard. It leverages a microservices architecture with gRPC for ultra-fast, asynchronous communication, Tiger Beetle DB for scalable UTXO storage, and Rust SV for BSV-specific libraries to power OP_RETURN data, private blockchain overlays, and Simplified Payment Verification (SPV) proofs.
 
 ## 🌟 Features
 
-- **High Throughput**: Targets over 100,000,000 TPS per with async gRPC and batch processing.
+- **High Throughput**: Targets over 100,000,000 TPS with async gRPC and batch processing.
 - **BSV-Specific**:
   - Supports unbounded block creation.
   - Handles OP_RETURN data for enterprise applications.
@@ -99,6 +99,17 @@ Example test for `network_service`:
 grpcurl -plaintext -d '{"message": "Hello"}' localhost:50051 network.Network/Ping
 ```
 
+### Testnet Integration
+Galaxy is configured to connect to BSV testnet nodes. See `tests/config.toml` for settings:
+- Testnet nodes for `network_service`
+- Tiger Beetle server address for `storage_service`
+- Test cases for all services
+
+Run tests with real BSV testnet data:
+```bash
+cargo test -- --nocapture
+```
+
 See individual service READMEs for detailed test commands.
 
 ## 📈 Performance Highlights
@@ -109,6 +120,8 @@ Galaxy is optimized for ultra-high performance:
 - **Tiger Beetle DB**: Scalable UTXO storage for BSV’s future dataset.
 - **Transaction Queuing**: Handles very high transaction volumes efficiently.
 - **Lean Messages**: Minimizes serialization overhead.
+
+These optimizations position Galaxy to surpass competitors like Teranode, targeting over 100,000,000 TPS per shard.
 
 ## 📚 Project Structure
 
@@ -125,6 +138,7 @@ The project is organized as a Rust workspace with the following structure:
 | `validation_service/`| SPV proof generation and verification|
 | `shared/`            | Shared utilities and types           |
 | `protos/`            | gRPC proto files for services        |
+| `tests/`             | Test configuration and cases         |
 | `Cargo.toml`         | Workspace configuration              |
 
 ## 🤝 Contributing
@@ -137,6 +151,6 @@ Licensed under the Open BSV License. See [LICENSE](LICENSE) for details.
 
 ## 📬 Contact
 
-For questions, reach out to **murphsciles** via GitHub issues.
+For questions, reach out to **murphsicles** via GitHub issues.
 
 🌌 **Galaxy: Powering the future of BSV with unmatched performance!**
