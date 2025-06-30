@@ -1,14 +1,29 @@
 syntax = "proto3";
-package network;
+package consensus;
 
 service Consensus {
-    rpc Ping (PingRequest) returns (PingResponse);
+    rpc ValidateBlockConsensus (ValidateBlockConsensusRequest) returns (ValidateBlockConsensusResponse);
+    rpc ValidateTransactionConsensus (ValidateTxConsensusRequest) returns (ValidateTxConsensusResponse);
+    rpc BatchValidateTransactionConsensus (BatchValidateTxConsensusRequest) returns (BatchValidateTxConsensusResponse);
 }
 
-message PingRequest {
-    string message = 1;
+message ValidateBlockConsensusRequest {
+    string block_hex = 1; // Hex-encoded BSV block
 }
-
-message PingResponse {
-    string reply = 1;
+message ValidateBlockConsensusResponse {
+    bool is_valid = 1;
+    string error = 2; // Error message if validation fails
+}
+message ValidateTxConsensusRequest {
+    string tx_hex = 1; // Hex-encoded BSV transaction
+}
+message ValidateTxConsensusResponse {
+    bool is_valid = 1;
+    string error = 2; // Error message if validation fails
+}
+message BatchValidateTxConsensusRequest {
+    repeated string tx_hexes = 1; // List of hex-encoded BSV transactions
+}
+message BatchValidateTxConsensusResponse {
+    repeated ValidateTxConsensusResponse results = 1; // Results for each transaction
 }
