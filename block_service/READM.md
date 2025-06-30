@@ -1,13 +1,13 @@
 # Block Service
 
-This service implements a gRPC server for BSV block validation and assembly in the Galaxy project, using rust-sv. It integrates with transaction_service and storage_service.
+This service implements a gRPC server for BSV block validation and assembly in the Galaxy project, using rust-sv. It integrates with transaction_service, storage_service, and consensus_service.
 
 ## Running
 ```bash
 cd block_service
 cargo run
 ```
-Note: Ensure transaction_service (localhost:50052) and storage_service (localhost:50053) are running.
+Note: Ensure transaction_service (localhost:50052), storage_service (localhost:50053), and consensus_service (localhost:50055) are running.
 
 ## Testing
 Use `grpcurl` to test the available methods. Note: Methods require hex-encoded BSV blocks or transactions.
@@ -19,8 +19,8 @@ grpcurl -plaintext -d '{"block_hex": "010000000000000000000000000000000000000000
 Expected response (example):
 ```json
 {
-  "is_valid": false,
-  "error": "Invalid block: ..."
+  "is_valid": true,
+  "error": ""
 }
 ```
 
