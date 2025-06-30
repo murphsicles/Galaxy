@@ -1,16 +1,16 @@
 # Transaction Service
 
-This service implements a gRPC server for BSV transaction validation and processing in the Galaxy project, using rust-sv. It integrates with storage_service for UTXO validation and supports transaction queuing and batch validation for high throughput.
+This service implements a gRPC server for BSV transaction validation and processing in the Galaxy project, using rust-sv. It integrates with storage_service for UTXO validation, consensus_service for consensus rules, and supports transaction queuing and batch validation.
 
 ## Running
 ```bash
 cd transaction_service
 cargo run
 ```
-Note: Ensure storage_service is running on localhost:50053.
+Note: Ensure storage_service (localhost:50053) and consensus_service (localhost:50055) are running.
 
 ## Testing
-Use `grpcurl` to test the available methods. Note: Methods require hex-encoded BSV transactions, and storage_service must be running for UTXO validation.
+Use `grpcurl` to test the available methods. Note: Methods require hex-encoded BSV transactions, and dependent services must be running.
 
 ### ValidateTransaction
 ```bash
@@ -19,8 +19,8 @@ grpcurl -plaintext -d '{"tx_hex": "010000000100000000000000000000000000000000000
 Expected response (example):
 ```json
 {
-  "is_valid": false,
-  "error": "UTXO not found"
+  "is_valid": true,
+  "error": ""
 }
 ```
 
@@ -31,8 +31,8 @@ grpcurl -plaintext -d '{"tx_hex": "010000000100000000000000000000000000000000000
 Expected response (example):
 ```json
 {
-  "success": false,
-  "error": "UTXO not found"
+  "success": true,
+  "error": ""
 }
 ```
 
@@ -45,12 +45,12 @@ Expected response (example):
 {
   "results": [
     {
-      "is_valid": false,
-      "error": "UTXO not found"
+      "is_valid": true,
+      "error": ""
     },
     {
-      "is_valid": false,
-      "error": "UTXO not found"
+      "is_valid": true,
+      "error": ""
     }
   ]
 }
