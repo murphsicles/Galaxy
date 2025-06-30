@@ -1,16 +1,16 @@
 # Network Service
 
-This service implements a gRPC server for BSV P2P networking in the Galaxy project, using rust-sv and a peer pool. It integrates with transaction_service for transaction validation.
+This service implements a gRPC server for BSV P2P networking in the Galaxy project, using rust-sv and a peer pool. It integrates with transaction_service for transaction validation and block_service for block validation.
 
 ## Running
 ```bash
 cd network_service
 cargo run
 ```
-Note: Ensure transaction_service is running on localhost:50052.
+Note: Ensure transaction_service (localhost:50052) and block_service (localhost:50054) are running.
 
 ## Testing
-Use `grpcurl` to test the available methods. Note: Some methods require hex-encoded BSV transactions or blocks, and transaction_service must be running.
+Use `grpcurl` to test the available methods. Note: Some methods require hex-encoded BSV transactions or blocks, and dependent services must be running.
 
 ### Ping
 ```bash
