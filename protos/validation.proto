@@ -2,23 +2,32 @@ syntax = "proto3";
 package validation;
 
 service Validation {
-    rpc GetSPVProof (MPVRequest) returns (SPVProofResponse);
-    rpc VerifyTransaction (VerifyTxRequest) returns (VerifyTxResponse);
+    rpc GenerateSPVProof (GenerateSPVProofRequest) returns (GenerateSPVProofResponse);
+    rpc VerifySPVProof (VerifySPVProofRequest) returns (VerifySPVProofResponse);
+    rpc BatchGenerateSPVProof (BatchGenerateSPVProofRequest) returns (BatchGenerateSPVProofResponse);
 }
 
-message MPVRequest {
-    string transaction_id = 1;
+message GenerateSPVProofRequest {
+    string txid = 1; // Transaction ID (hex)
 }
-
-message MPVResponse {
-    string merkle_path = 1;
-    repeated string block_headers = 2;
+message GenerateSPVProofResponse {
+    bool success = 1;
+    string merkle_path = 2; // Hex-encoded merkle path
+    repeated string block_headers = 3; // Hex-encoded block headers
+    string error = 4; // Error message if generation fails
 }
-
-message VerifyTxRequest {
-    string transaction = 1;
+message VerifySPVProofRequest {
+    string txid = 1; // Transaction ID (hex)
+    string merkle_path = 2; // Hex-encoded merkle path
+    repeated string block_headers = 3; // Hex-encoded block headers
 }
-
-message VerifyTxResponse {
+message VerifySPVProofResponse {
     bool is_valid = 1;
+    string error = 2; // Error message if verification fails
+}
+message BatchGenerateSPVProofRequest {
+    repeated string txids = 1; // List of transaction IDs (hex)
+}
+message BatchGenerateSPVProofResponse {
+    repeated GenerateSPVProofResponse results = 1; // Results for each proof
 }
