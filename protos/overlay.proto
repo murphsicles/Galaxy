@@ -3,32 +3,38 @@ package overlay;
 
 service Overlay {
     rpc CreateOverlay (CreateOverlayRequest) returns (CreateOverlayResponse);
-    rpc SubmitTransaction (SubmitTxRequest) returns (SubmitTxResponse);
-    rpc GetOverlayBlock (GetBlockRequest) returns (GetBlockResponse);
+    rpc SubmitOverlayTransaction (SubmitOverlayTxRequest) returns (SubmitOverlayTxResponse);
+    rpc GetOverlayBlock (GetOverlayBlockRequest) returns (GetOverlayBlockResponse);
+    rpc BatchSubmitOverlayTransaction (BatchSubmitOverlayTxRequest) returns (BatchSubmitOverlayTxResponse);
 }
 
 message CreateOverlayRequest {
-    string overlay_name = 1;
+    string overlay_id = 1; // Unique identifier for the overlay
 }
-
 message CreateOverlayResponse {
-    string overlay_id = 1;
+    bool success = 1;
+    string error = 2; // Error message if creation fails
 }
-
-message SubmitTxRequest {
-    string overlay_id = 1;
-    string transaction = 2;
+message SubmitOverlayTxRequest {
+    string overlay_id = 1; // Overlay identifier
+    string tx_hex = 2;     // Hex-encoded overlay transaction
 }
-
-message SubmitTxResponse {
-    string tx_id = 1;
+message SubmitOverlayTxResponse {
+    bool success = 1;
+    string error = 2; // Error message if submission fails
 }
-
-message GetBlockRequest {
-    string overlay_id = 1;
-    uint32 block_height = 2;
+message GetOverlayBlockRequest {
+    string overlay_id = 1; // Overlay identifier
+    uint32 block_height = 2; // Block height in the overlay
 }
-
-message GetBlockResponse {
-    string block_data = 1;
+message GetOverlayBlockResponse {
+    string block_hex = 1; // Hex-encoded overlay block
+    string error = 2;     // Error message if retrieval fails
+}
+message BatchSubmitOverlayTxRequest {
+    string overlay_id = 1; // Overlay identifier
+    repeated string tx_hexes = 2; // List of hex-encoded overlay transactions
+}
+message BatchSubmitOverlayTxResponse {
+    repeated SubmitOverlayTxResponse results = 1; // Results for each transaction
 }
