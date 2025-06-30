@@ -6,6 +6,8 @@ use network::{
 };
 use transaction::transaction_client::TransactionClient;
 use transaction::ValidateTxRequest;
+use block::block_client::BlockClient;
+use block::ValidateBlockRequest;
 use sv::messages::{Message, NetworkMessage};
 use sv::network::{Network as BSVNetwork, Version};
 use sv::transaction::Transaction;
@@ -20,11 +22,13 @@ use hex;
 
 tonic::include_proto!("network");
 tonic::include_proto!("transaction");
+tonic::include_proto!("block");
 
 #[derive(Debug)]
 struct NetworkServiceImpl {
     peers: Arc<Mutex<HashMap<String, mpsc::Sender<Message>>>>,
     transaction_client: TransactionClient<Channel>,
+    block_client: BlockClient<Channel>,
 }
 
 impl NetworkServiceImpl {
@@ -35,10 +39,13 @@ impl NetworkServiceImpl {
             "testnet-seed.bsv.io:18333".to_string(),
         ];
 
-        // Connect to transaction_service
+        // Connect to transaction_service and block_service
         let transaction_client = TransactionClient::connect("http://[::1]:50052")
             .await
             .expect("Failed to connect to transaction_service");
+        let block_client = BlockClient::connect("http://[::1]:50054")
+            .await
+            .expect("Failed to connect to block_service");
 
         // Spawn a task to manage peer connections
         let peers_clone = Arc::clone(&peers);
@@ -55,7 +62,7 @@ impl NetworkServiceImpl {
             }
         });
 
-        NetworkServiceImpl { peers, transaction_client }
+        NetworkServiceImpl { peers, transaction_client, block_client }
     }
 
     async fn send_version_message(stream: &mut TcpStream, addr: &str) -> Result<(), String> {
@@ -161,7 +168,6 @@ impl Network for NetworkServiceImpl {
 
     async fn broadcast_transaction(&self, request: Request<BroadcastTxRequest>) -> Result<Response<BroadcastTxResponse>, Status> {
         let req = request.into_inner();
-        // Validate transaction via transaction_service
         let mut client = self.transaction_client.clone();
         let validate_request = ValidateTxRequest {
             tx_hex: req.tx_hex.clone(),
@@ -178,7 +184,6 @@ impl Network for NetworkServiceImpl {
             }));
         }
 
-        // Parse and broadcast transaction
         let tx_bytes = hex::decode(&req.tx_hex)
             .map_err(|e| Status::invalid_argument(format!("Invalid tx_hex: {}", e)))?;
         let tx: Transaction = sv::util::deserialize(&tx_bytes)
@@ -200,6 +205,24 @@ impl Network for NetworkServiceImpl {
 
     async fn broadcast_block(&self, request: Request<BroadcastBlockRequest>) -> Result<Response<BroadcastBlockResponse>, Status> {
         let req = request.into_inner();
+        // Validate block via block_service
+        let mut client = self.block_client.clone();
+        let validate_request = ValidateBlockRequest {
+            block_hex: req.block_hex.clone(),
+        };
+        let validate_response = client.validate_block(validate_request)
+            .await
+            .map_err(|e| Status::internal(format!("Block validation failed: {}", e)))?
+            .into_inner();
+
+        if !validate_response.is_valid {
+            return Ok(Response::new(BroadcastBlockResponse {
+                success: false,
+                error: validate_response.error,
+            }));
+        }
+
+        // Parse and broadcast block
         let block_bytes = hex::decode(&req.block_hex)
             .map_err(|e| Status::invalid_argument(format!("Invalid block_hex: {}", e)))?;
         let block: Block = sv::util::deserialize(&block_bytes)
