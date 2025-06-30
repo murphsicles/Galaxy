@@ -9,6 +9,7 @@ tonic = "0.8"                                  # gRPC support
 prost = "0.11"                                 # Protocol Buffers
 rust-sv = { git = "https://github.com/murphsicles/rust-sv", tag = "v0.4.0" } # BSV-specific library
 hex = "0.4"                                    # Hex decoding
+async-channel = "2.3"                          # Async transaction queuing
 shared = { path = "../shared" }                # Link to shared crate
 storage_service = { path = "../storage_service" } # Link to storage_service
 
