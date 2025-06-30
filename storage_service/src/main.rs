@@ -2,7 +2,7 @@ use tonic::{transport::Server, Request, Response, Status};
 use storage::storage_server::{Storage, StorageServer};
 use storage::{
     QueryUtxoRequest, QueryUtxoResponse, AddUtxoRequest, AddUtxoResponse,
-    RemoveUtxoRequest, RemoveUtxoResponse
+    RemoveUtxoRequest, RemoveUtxoResponse, BatchAddUtxoRequest, BatchAddUtxoResponse
 };
 use tigerbeetle::client::{Client, Config};
 use std::collections::HashMap;
@@ -13,13 +13,19 @@ tonic::include_proto!("storage");
 
 #[derive(Debug)]
 struct StorageServiceImpl {
-    // Placeholder for Tiger Beetle client
-    utxo_db: Arc<Mutex<HashMap<(String, u32), (String, u64)>>>, // (txid, vout) -> (scriptPubKey, amount)
+    utxo_db: Arc<Mutex<HashMap<(String, u32), (String, u64)>>>, // Fallback HashMap
+    // TODO: Enable Tiger Beetle client when CLI access is available
+    // tb_client: Option<Client>,
 }
 
 impl StorageServiceImpl {
     async fn new() -> Self {
         // TODO: Initialize Tiger Beetle client when CLI access is available
+        // let tb_client = Client::new(Config {
+        //     cluster_id: 0,
+        //     replica_id: 0,
+        //     addresses: vec!["127.0.0.1:3000".to_string()],
+        // }).await.ok();
         let utxo_db = Arc::new(Mutex::new(HashMap::new()));
         StorageServiceImpl { utxo_db }
     }
@@ -81,11 +87,30 @@ impl Storage for StorageServiceImpl {
         };
         Ok(Response::new(reply))
     }
+
+    async fn batch_add_utxo(&self, request: Request<BatchAddUtxoRequest>) -> Result<Response<BatchAddUtxoResponse>, Status> {
+        let req = request.into_inner();
+        let mut utxo_db = self.utxo_db.lock().await;
+        let mut results = vec![];
+
+        // TODO: Replace with Tiger Beetle batch write
+        for utxo in req.utxos {
+            let key = (utxo.txid, utxo.vout);
+            utxo_db.insert(key, (utxo.script_pubkey, utxo.amount));
+            results.push(AddUtxoResponse {
+                success: true,
+                error: "".to_string(),
+            });
+        }
+
+        let reply = BatchAddUtxoResponse { results };
+        Ok(Response::new(reply))
+    }
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let addr = "[::1]:50053".parse().unwrap(); // Different port for storage_service
+    let addr = "[::1]:50053".parse().unwrap();
     let storage_service = StorageServiceImpl::new().await;
 
     println!("Storage service listening on {}", addr);
