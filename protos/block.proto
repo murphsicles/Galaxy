@@ -1,14 +1,22 @@
 syntax = "proto3";
-package network;
+package block;
 
 service Block {
-    rpc Ping (PingRequest) returns (PingResponse);
+    rpc ValidateBlock (ValidateBlockRequest) returns (ValidateBlockResponse);
+    rpc AssembleBlock (AssembleBlockRequest) returns (AssembleBlockResponse);
 }
 
-message PingRequest {
-    string message = 1;
+message ValidateBlockRequest {
+    string block_hex = 1; // Hex-encoded BSV block
 }
-
-message PingResponse {
-    string reply = 1;
+message ValidateBlockResponse {
+    bool is_valid = 1;
+    string error = 2; // Error message if validation fails
+}
+message AssembleBlockRequest {
+    repeated string tx_hexes = 1; // List of hex-encoded transactions
+}
+message AssembleBlockResponse {
+    string block_hex = 1; // Hex-encoded assembled block
+    string error = 2;     // Error message if assembly fails
 }
