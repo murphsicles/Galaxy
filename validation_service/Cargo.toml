@@ -4,7 +4,14 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-tokio = { version = "1", features = ["full"] }
-tonic = "0.8"
-prost = "0.11"
-shared = { path = "../shared" }
+tokio = { version = "1", features = ["full"] } # Async runtime
+tonic = "0.8"                                  # gRPC support
+prost = "0.11"                                 # Protocol Buffers
+rust-sv = { git = "https://github.com/murphsicles/rust-sv", tag = "v0.4.0" } # BSV-specific library
+hex = "0.4"                                    # Hex decoding
+shared = { path = "../shared" }                # Link to shared crate
+block_service = { path = "../block_service" }   # For block data
+storage_service = { path = "../storage_service" } # For transaction data
+
+[build-dependencies]
+tonic-build = "0.8"                            # For compiling .proto files
