@@ -1,12 +1,13 @@
 # Storage Service
 
-This service implements a gRPC server for UTXO storage in the Galaxy project, using Tiger Beetle (placeholder HashMap for now).
+This service implements a gRPC server for UTXO storage in the Galaxy project, using Tiger Beetle (currently a HashMap placeholder). It supports batch UTXO operations for high throughput.
 
 ## Running
 ```bash
 cd storage_service
 cargo run
 ```
+Note: Tiger Beetle integration requires a running server (e.g., `tigerbeetle start --cluster=0 --replica=0`).
 
 ## Testing
 Use `grpcurl` to test the available methods. Note: Methods require valid TXID and vout for UTXO operations.
@@ -46,5 +47,25 @@ Expected response:
 {
   "success": true,
   "error": ""
+}
+```
+
+### BatchAddUtxo
+```bash
+grpcurl -plaintext -d '{"utxos": [{"txid": "abc123", "vout": 0, "script_pubkey": "76a91488a5e4a4e6c4a4e0c7b0b4a4e4a4e4a4e4a4e4a488ac", "amount": 1000000}, {"txid": "def456", "vout": 1, "script_pubkey": "76a91488a5e4a4e6c4a4e0c7b0b4a4e4a4e4a4e4a4e4a488ac", "amount": 2000000}]}' localhost:50053 storage.Storage/BatchAddUtxo
+```
+Expected response:
+```json
+{
+  "results": [
+    {
+      "success": true,
+      "error": ""
+    },
+    {
+      "success": true,
+      "error": ""
+    }
+  ]
 }
 ```
