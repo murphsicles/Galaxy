@@ -5,6 +5,7 @@ service Storage {
     rpc QueryUtxo (QueryUtxoRequest) returns (QueryUtxoResponse);
     rpc AddUtxo (AddUtxoRequest) returns (AddUtxoResponse);
     rpc RemoveUtxo (RemoveUtxoRequest) returns (RemoveUtxoResponse);
+    rpc BatchAddUtxo (BatchAddUtxoRequest) returns (BatchAddUtxoResponse);
 }
 
 message QueryUtxoRequest {
@@ -34,4 +35,10 @@ message RemoveUtxoRequest {
 message RemoveUtxoResponse {
     bool success = 1;
     string error = 2; // Error message if remove fails
+}
+message BatchAddUtxoRequest {
+    repeated AddUtxoRequest utxos = 1; // List of UTXOs to add
+}
+message BatchAddUtxoResponse {
+    repeated AddUtxoResponse results = 1; // Results for each UTXO add
 }
