@@ -4,6 +4,7 @@ package transaction;
 service Transaction {
     rpc ValidateTransaction (ValidateTxRequest) returns (ValidateTxResponse);
     rpc ProcessTransaction (ProcessTxRequest) returns (ProcessTxResponse);
+    rpc BatchValidateTransaction (BatchValidateTxRequest) returns (BatchValidateTxResponse);
 }
 
 message ValidateTxRequest {
@@ -19,4 +20,10 @@ message ProcessTxRequest {
 message ProcessTxResponse {
     bool success = 1;
     string error = 2; // Error message if processing fails
+}
+message BatchValidateTxRequest {
+    repeated string tx_hexes = 1; // List of hex-encoded BSV transactions
+}
+message BatchValidateTxResponse {
+    repeated ValidateTxResponse results = 1; // Validation results for each transaction
 }
