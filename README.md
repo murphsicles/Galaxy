@@ -24,6 +24,7 @@
   - `consensus_service`: Enforces BSV consensus rules.
   - `overlay_service`: Manages private blockchains.
   - `validation_service`: Generates/verifies SPV proofs.
+  - `mining_service`: Supports block mining.
 - **Performance Optimizations**
   - Asynchronous gRPC calls for non-blocking operations.
   - Batching for transactions, blocks, and UTXOs to reduce network overhead.
@@ -76,6 +77,10 @@ cargo run
 cd validation_service
 cargo run
 ```
+```bash
+cd mining_service
+cargo run
+```
 
 ### Tiger Beetle Setup
 For `storage_service`, start a Tiger Beetle server:
@@ -93,11 +98,7 @@ Test services using `grpcurl`. Ensure all services are running on their respecti
 - `consensus_service`: `localhost:50055`
 - `overlay_service`: `localhost:50056`
 - `validation_service`: `localhost:50057`
-
-Example test for `network_service`:
-```bash
-grpcurl -plaintext -d '{"message": "Hello"}' localhost:50051 network.Network/Ping
-```
+- `mining_service`: `localhost:50058`
 
 ### Testnet Integration
 Galaxy is configured to connect to BSV testnet nodes. See `tests/config.toml` for settings:
@@ -105,9 +106,11 @@ Galaxy is configured to connect to BSV testnet nodes. See `tests/config.toml` fo
 - Tiger Beetle server address for `storage_service`
 - Test cases for all services
 
-Run tests with real BSV testnet data:
+Run the full pipeline test:
 ```bash
-cargo test -- --nocapture
+cd tests
+chmod +x run_tests.sh
+./run_tests.sh
 ```
 
 See individual service READMEs for detailed test commands.
@@ -136,9 +139,10 @@ The project is organized as a Rust workspace with the following structure:
 | `consensus_service/` | BSV consensus rule enforcement       |
 | `overlay_service/`   | Private blockchain overlays          |
 | `validation_service/`| SPV proof generation and verification|
+| `mining_service/`    | Block mining support                 |
 | `shared/`            | Shared utilities and types           |
 | `protos/`            | gRPC proto files for services        |
-| `tests/`             | Test configuration and cases         |
+| `tests/`             | Test configuration and scripts       |
 | `Cargo.toml`         | Workspace configuration              |
 
 ## 🤝 Contributing
