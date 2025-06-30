@@ -1,14 +1,37 @@
 syntax = "proto3";
-package network;
+package storage;
 
 service Storage {
-    rpc Ping (PingRequest) returns (PingResponse);
+    rpc QueryUtxo (QueryUtxoRequest) returns (QueryUtxoResponse);
+    rpc AddUtxo (AddUtxoRequest) returns (AddUtxoResponse);
+    rpc RemoveUtxo (RemoveUtxoRequest) returns (RemoveUtxoResponse);
 }
 
-message PingRequest {
-    string message = 1;
+message QueryUtxoRequest {
+    string txid = 1; // Transaction ID (hex)
+    uint32 vout = 2; // Output index
 }
-
-message PingResponse {
-    string reply = 1;
+message QueryUtxoResponse {
+    bool exists = 1;
+    string script_pubkey = 2; // Hex-encoded scriptPubKey
+    uint64 amount = 3;        // Amount in satoshis
+    string error = 4;         // Error message if query fails
+}
+message AddUtxoRequest {
+    string txid = 1;          // Transaction ID (hex)
+    uint32 vout = 2;          // Output index
+    string script_pubkey = 3; // Hex-encoded scriptPubKey
+    uint64 amount = 4;        // Amount in satoshis
+}
+message AddUtxoResponse {
+    bool success = 1;
+    string error = 2; // Error message if add fails
+}
+message RemoveUtxoRequest {
+    string txid = 1; // Transaction ID (hex)
+    uint32 vout = 2; // Output index
+}
+message RemoveUtxoResponse {
+    bool success = 1;
+    string error = 2; // Error message if remove fails
 }
