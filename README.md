@@ -2,7 +2,7 @@
 **The Ultra High-Performance BSV Node**
 
 ![Rust](https://img.shields.io/badge/Rust-1.80+-orange?logo=rust)
-![Build Status](https://img.shields.io/badge/build-passing-brightgreen)
+![Build Status](https://github.com/murphsicles/Galaxy/actions/workflows/ci.yml/badge.svg)
 ![Dependencies](https://img.shields.io/badge/dependencies-up%20to%20date-green)
 ![License](https://img.shields.io/badge/license-Open%20BSV-blue)
 
@@ -114,6 +114,16 @@ chmod +x run_tests.sh
 ```
 
 See individual service READMEs for detailed test commands.
+
+## 🔄 CI/CD
+
+Galaxy uses GitHub Actions for continuous integration and deployment:
+- **Build**: Compiles the project in release mode.
+- **Formatting**: Ensures code adheres to `rustfmt` standards.
+- **Linting**: Runs `clippy` for code quality.
+- **Dependency Checks**: Validates dependencies with `cargo outdated`.
+
+Check the [CI workflow](.github/workflows/ci.yml) for details.
 
 ## 📈 Performance Highlights
 
