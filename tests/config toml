@@ -13,15 +13,76 @@ block_service_port = 50054
 consensus_service_port = 50055
 overlay_service_port = 50056
 validation_service_port = 50057
+mining_service_port = 50058
 
 [test_cases]
-ping = { message = "Hello", expected_reply = "Pong: Hello" }
-discover_peers = { node_id = "galaxy_node", min_peers = 2 }
-broadcast_transaction = { tx_hex = "01000000010000000000000000000000000000000000000000000000000000000000000000ffffffff0100ffffffff0100ffffffff" }
-broadcast_block = { block_hex = "01000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000ffffffff" }
-validate_transaction = { tx_hex = "01000000010000000000000000000000000000000000000000000000000000000000000000ffffffff0100ffffffff0100ffffffff" }
-validate_block = { block_hex = "01000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000ffffffff" }
-add_utxo = { txid = "abc123", vout = 0, script_pubkey = "76a91488a5e4a4e6c4a4e0c7b0b4a4e4a4e4a4e4a4e4a488ac", amount = 1000000 }
-create_overlay = { overlay_id = "test_overlay" }
-submit_overlay_tx = { overlay_id = "test_overlay", tx_hex = "01000000010000000000000000000000000000000000000000000000000000000000000000ffffffff0100ffffffff0100ffffffff" }
-generate_spv_proof = { txid = "abc123" }
+[test_cases.ping]
+message = "Hello"
+expected_reply = "Pong: Hello"
+
+[test_cases.discover_peers]
+node_id = "galaxy_node"
+min_peers = 2
+
+[test_cases.broadcast_transaction]
+tx_hex = "01000000010000000000000000000000000000000000000000000000000000000000000000ffffffff0100ffffffff0100ffffffff"
+
+[test_cases.broadcast_block]
+block_hex = "01000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000ffffffff"
+
+[test_cases.validate_transaction]
+tx_hex = "01000000010000000000000000000000000000000000000000000000000000000000000000ffffffff0100ffffffff0100ffffffff"
+
+[test_cases.batch_validate_transaction]
+tx_hexes = [
+    "01000000010000000000000000000000000000000000000000000000000000000000000000ffffffff0100ffffffff0100ffffffff",
+    "01000000010000000000000000000000000000000000000000000000000000000000000000ffffffff0100ffffffff0100ffffffff"
+]
+
+[test_cases.validate_block]
+block_hex = "01000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000ffffffff"
+
+[test_cases.add_utxo]
+txid = "abc123"
+vout = 0
+script_pubkey = "76a91488a5e4a4e6c4a4e0c7b0b4a4e4a4e4a4e4a4e4a488ac"
+amount = 1000000
+
+[test_cases.batch_add_utxo]
+utxos = [
+    { txid = "abc123", vout = 0, script_pubkey = "76a91488a5e4a4e6c4a4e0c7b0b4a4e4a4e4a4e4a4e4a488ac", amount = 1000000 },
+    { txid = "def456", vout = 1, script_pubkey = "76a91488a5e4a4e6c4a4e0c7b0b4a4e4a4e4a4e4a4e4a488ac", amount = 2000000 }
+]
+
+[test_cases.create_overlay]
+overlay_id = "test_overlay"
+
+[test_cases.submit_overlay_transaction]
+overlay_id = "test_overlay"
+tx_hex = "01000000010000000000000000000000000000000000000000000000000000000000000000ffffffff0100ffffffff0100ffffffff"
+
+[test_cases.batch_submit_overlay_transaction]
+overlay_id = "test_overlay"
+tx_hexes = [
+    "01000000010000000000000000000000000000000000000000000000000000000000000000ffffffff0100ffffffff0100ffffffff",
+    "01000000010000000000000000000000000000000000000000000000000000000000000000ffffffff0100ffffffff0100ffffffff"
+]
+
+[test_cases.get_overlay_block]
+overlay_id = "test_overlay"
+block_height = 0
+
+[test_cases.generate_spv_proof]
+txid = "abc123"
+
+[test_cases.batch_generate_spv_proof]
+txids = ["abc123", "def456"]
+
+[test_cases.get_mining_work]
+miner_id = "miner1"
+
+[test_cases.submit_mined_block]
+block_hex = "01000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000ffffffff"
+
+[test_cases.batch_get_mining_work]
+miner_ids = ["miner1", "miner2"]
