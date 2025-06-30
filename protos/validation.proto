@@ -5,6 +5,7 @@ service Validation {
     rpc GenerateSPVProof (GenerateSPVProofRequest) returns (GenerateSPVProofResponse);
     rpc VerifySPVProof (VerifySPVProofRequest) returns (VerifySPVProofResponse);
     rpc BatchGenerateSPVProof (BatchGenerateSPVProofRequest) returns (BatchGenerateSPVProofResponse);
+    rpc StreamSPVProofs (stream StreamSPVProofsRequest) returns (stream StreamSPVProofsResponse);
 }
 
 message GenerateSPVProofRequest {
@@ -30,4 +31,14 @@ message BatchGenerateSPVProofRequest {
 }
 message BatchGenerateSPVProofResponse {
     repeated GenerateSPVProofResponse results = 1; // Results for each proof
+}
+message StreamSPVProofsRequest {
+    string txid = 1; // Transaction ID (hex) to monitor
+}
+message StreamSPVProofsResponse {
+    bool success = 1;
+    string txid = 2; // Transaction ID (hex)
+    string merkle_path = 3; // Hex-encoded merkle path
+    repeated string block_headers = 4; // Hex-encoded block headers
+    string error = 5; // Error message if generation fails
 }
