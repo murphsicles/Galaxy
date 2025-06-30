@@ -5,6 +5,8 @@ use transaction::transaction_client::TransactionClient;
 use transaction::ValidateTxRequest;
 use storage::storage_client::StorageClient;
 use storage::{AddUtxoRequest, RemoveUtxoRequest};
+use consensus::consensus_client::ConsensusClient;
+use consensus::ValidateBlockConsensusRequest;
 use sv::block::Block;
 use sv::transaction::Transaction;
 use sv::util::{deserialize, serialize};
@@ -13,11 +15,13 @@ use hex;
 tonic::include_proto!("block");
 tonic::include_proto!("transaction");
 tonic::include_proto!("storage");
+tonic::include_proto!("consensus");
 
 #[derive(Debug)]
 struct BlockServiceImpl {
     transaction_client: TransactionClient<Channel>,
     storage_client: StorageClient<Channel>,
+    consensus_client: ConsensusClient<Channel>,
 }
 
 impl BlockServiceImpl {
@@ -28,7 +32,10 @@ impl BlockServiceImpl {
         let storage_client = StorageClient::connect("http://[::1]:50053")
             .await
             .expect("Failed to connect to storage_service");
-        BlockServiceImpl { transaction_client, storage_client }
+        let consensus_client = ConsensusClient::connect("http://[::1]:50055")
+            .await
+            .expect("Failed to connect to consensus_service");
+        BlockServiceImpl { transaction_client, storage_client, consensus_client }
     }
 
     async fn validate_block_transactions(&self, block: &Block) -> Result<bool, String> {
@@ -50,7 +57,6 @@ impl BlockServiceImpl {
     async fn update_utxos(&self, block: &Block) -> Result<(), String> {
         let mut storage_client = self.storage_client.clone();
         for tx in &block.transactions {
-            // Remove spent UTXOs
             for input in &tx.inputs {
                 let request = RemoveUtxoRequest {
                     txid: input.previous_output.txid.to_string(),
@@ -64,7 +70,6 @@ impl BlockServiceImpl {
                     return Err(response.error);
                 }
             }
-            // Add new UTXOs
             for (vout, output) in tx.outputs.iter().enumerate() {
                 let request = AddUtxoRequest {
                     txid: tx.txid().to_string(),
@@ -102,6 +107,20 @@ impl Block for BlockServiceImpl {
             }));
         }
 
+        // Validate consensus rules
+        let mut consensus_client = self.consensus_client.clone();
+        let consensus_request = ValidateBlockConsensusRequest { block_hex: req.block_hex.clone() };
+        let consensus_response = consensus_client.validate_block_consensus(consensus_request)
+            .await
+            .map_err(|e| Status::internal(format!("Consensus validation failed: {}", e)))?
+            .into_inner();
+        if !consensus_response.is_valid {
+            return Ok(Response::new(ValidateBlockResponse {
+                is_valid: false,
+                error: consensus_response.error,
+            }));
+        }
+
         // Validate transactions
         let is_valid = match self.validate_block_transactions(&block).await {
             Ok(_) => true,
@@ -132,7 +151,6 @@ impl Block for BlockServiceImpl {
         let req = request.into_inner();
         let mut transactions = vec![];
 
-        // Validate and collect transactions
         let mut client = self.transaction_client.clone();
         for tx_hex in req.tx_hexes {
             let request = ValidateTxRequest { tx_hex: tx_hex.clone() };
@@ -153,7 +171,6 @@ impl Block for BlockServiceImpl {
             transactions.push(tx);
         }
 
-        // Assemble block (simplified)
         let block = Block {
             header: sv::block::BlockHeader {
                 version: 1,
@@ -177,7 +194,7 @@ impl Block for BlockServiceImpl {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let addr = "[::1]:50054".parse().unwrap(); // Different port for block_service
+    let addr = "[::1]:50054".parse().unwrap();
     let block_service = BlockServiceImpl::new().await;
 
     println!("Block service listening on {}", addr);
