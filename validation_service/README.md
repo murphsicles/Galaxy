@@ -1,6 +1,6 @@
 # Validation Service
 
-This service implements a gRPC server for SPV proof generation and verification in the Galaxy project, using rust-sv. It integrates with block_service and storage_service, supporting full merkle path and difficulty validation for BSV’s large blocks.
+This service implements a gRPC server for SPV proof generation and verification in the Galaxy project, using rust-sv. It integrates with block_service and storage_service, supporting full merkle path, difficulty validation, and streaming for continuous proof generation for BSV’s large blocks.
 
 ## Running
 ```bash
@@ -10,7 +10,7 @@ cargo run
 Note: Ensure block_service (localhost:50054) and storage_service (localhost:50053) are running.
 
 ## Testing
-Use `grpcurl` to test the available methods. Note: Methods require valid transaction IDs and block headers.
+Use `grpcurl` to test the available methods. Note: Methods require valid transaction IDs and block headers. Streaming requires a client capable of handling bidirectional streams.
 
 ### GenerateSPVProof
 ```bash
@@ -59,5 +59,21 @@ Expected response (example):
       "error": ""
     }
   ]
+}
+```
+
+### StreamSPVProofs
+```bash
+# Use a gRPC client supporting streaming (e.g., custom client or grpcurl with streaming support)
+grpcurl -plaintext -d '{"txid": "abc123"}' localhost:50057 validation.Validation/StreamSPVProofs
+```
+Expected response (example, streamed):
+```json
+{
+  "success": true,
+  "txid": "abc123",
+  "merkle_path": "...",
+  "block_headers": ["..."],
+  "error": ""
 }
 ```
