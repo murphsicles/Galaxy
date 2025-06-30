@@ -1,14 +1,30 @@
 syntax = "proto3";
-package network;
+package mining;
 
 service Mining {
-    rpc Ping (PingRequest) returns (PingResponse);
+    rpc GetMiningWork (GetMiningWorkRequest) returns (GetMiningWorkResponse);
+    rpc SubmitMinedBlock (SubmitMinedBlockRequest) returns (SubmitMinedBlockResponse);
+    rpc BatchGetMiningWork (BatchGetMiningWorkRequest) returns (BatchGetMiningWorkResponse);
 }
 
-message PingRequest {
-    string message = 1;
+message GetMiningWorkRequest {
+    string miner_id = 1; // Unique identifier for the miner
 }
-
-message PingResponse {
-    string reply = 1;
+message GetMiningWorkResponse {
+    string block_template = 1; // Hex-encoded block template
+    uint32 target_difficulty = 2; // Mining difficulty target
+    string error = 3; // Error message if work generation fails
+}
+message SubmitMinedBlockRequest {
+    string block_hex = 1; // Hex-encoded mined block
+}
+message SubmitMinedBlockResponse {
+    bool success = 1;
+    string error = 2; // Error message if submission fails
+}
+message BatchGetMiningWorkRequest {
+    repeated string miner_ids = 1; // List of miner IDs
+}
+message BatchGetMiningWorkResponse {
+    repeated GetMiningWorkResponse results = 1; // Results for each miner
 }
