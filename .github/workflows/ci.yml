@@ -1,0 +1,31 @@
+name: Galaxy CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+    - name: Set up Rust
+      uses: actions-rs/toolchain@v1
+      with:
+        toolchain: 1.80
+        override: true
+        components: rustfmt, clippy
+    - name: Check formatting
+      run: cargo fmt --all -- --check
+    - name: Run clippy
+      run: cargo clippy --all-targets --all-features -- -D warnings
+    - name: Build
+      run: cargo build --release
+    - name: Check dependencies
+      uses: actions-rs/cargo@v1
+      with:
+        command: outdated
+        args: --exit-code 1
