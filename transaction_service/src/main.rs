@@ -1,14 +1,52 @@
-use tonic::{transport::Server, Request, Response, Status};
+use tonic::{transport::{Server, Channel}, Request, Response, Status};
 use transaction::transaction_server::{Transaction, TransactionServer};
 use transaction::{ValidateTxRequest, ValidateTxResponse, ProcessTxRequest, ProcessTxResponse};
+use storage::storage_client::StorageClient;
+use storage::QueryUtxoRequest;
 use sv::transaction::Transaction;
 use sv::script::Script;
 use hex;
 
 tonic::include_proto!("transaction");
+tonic::include_proto!("storage");
 
-#[derive(Debug, Default)]
-struct TransactionServiceImpl;
+#[derive(Debug)]
+struct TransactionServiceImpl {
+    storage_client: StorageClient<Channel>,
+}
+
+impl TransactionServiceImpl {
+    async fn new() -> Self {
+        // Connect to storage_service
+        let storage_client = StorageClient::connect("http://[::1]:50053")
+            .await
+            .expect("Failed to connect to storage_service");
+        TransactionServiceImpl { storage_client }
+    }
+
+    async fn validate_inputs(&self, tx: &Transaction) -> Result<bool, String> {
+        let mut client = self.storage_client.clone();
+        for input in &tx.inputs {
+            // Query UTXO for each input
+            let request = QueryUtxoRequest {
+                txid: input.previous_output.txid.to_string(),
+                vout: input.previous_output.vout,
+            };
+            let response = client.query_utxo(request)
+                .await
+                .map_err(|e| format!("UTXO query failed: {}", e))?
+                .into_inner();
+
+            if !response.exists {
+                return Err(format!("UTXO not found: {}:{}", input.previous_output.txid, input.previous_output.vout));
+            }
+
+            // TODO: Verify scriptPubKey and signature
+            // Placeholder: Assume valid if UTXO exists
+        }
+        Ok(true)
+    }
+}
 
 #[tonic::async_trait]
 impl Transaction for TransactionServiceImpl {
@@ -20,17 +58,26 @@ impl Transaction for TransactionServiceImpl {
         let tx: Transaction = sv::util::deserialize(&tx_bytes)
             .map_err(|e| Status::invalid_argument(format!("Invalid transaction: {}", e)))?;
 
-        // Basic validation: check format and signatures
-        let is_valid = if tx.inputs.is_empty() || tx.outputs.is_empty() {
-            false
-        } else {
-            // TODO: Implement full signature and script validation
-            true // Placeholder
+        // Basic validation: check format
+        if tx.inputs.is_empty() || tx.outputs.is_empty() {
+            return Ok(Response::new(ValidateTxResponse {
+                is_valid: false,
+                error: "Invalid transaction format: empty inputs or outputs".to_string(),
+            }));
+        }
+
+        // Validate inputs against UTXO set
+        let is_valid = match self.validate_inputs(&tx).await {
+            Ok(_) => true,
+            Err(e) => return Ok(Response::new(ValidateTxResponse {
+                is_valid: false,
+                error: e,
+            })),
         };
 
         let reply = ValidateTxResponse {
             is_valid,
-            error: if is_valid { "".to_string() } else { "Invalid transaction format".to_string() },
+            error: if is_valid { "".to_string() } else { "Input validation failed".to_string() },
         };
         Ok(Response::new(reply))
     }
@@ -43,7 +90,20 @@ impl Transaction for TransactionServiceImpl {
         let tx: Transaction = sv::util::deserialize(&tx_bytes)
             .map_err(|e| Status::invalid_argument(format!("Invalid transaction: {}", e)))?;
 
-        // TODO: Process transaction (e.g., store or forward to network_service)
+        // Validate before processing
+        let validate_request = ValidateTxRequest { tx_hex: req.tx_hex };
+        let validate_response = self.validate_transaction(Request::new(validate_request))
+            .await?
+            .into_inner();
+
+        if !validate_response.is_valid {
+            return Ok(Response::new(ProcessTxResponse {
+                success: false,
+                error: validate_response.error,
+            }));
+        }
+
+        // TODO: Process transaction (e.g., forward to network_service or store)
         println!("Processing transaction {}", tx.txid());
 
         let reply = ProcessTxResponse {
@@ -56,8 +116,8 @@ impl Transaction for TransactionServiceImpl {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let addr = "[::1]:50052".parse().unwrap(); // Different port from network_service
-    let transaction_service = TransactionServiceImpl::default();
+    let addr = "[::1]:50052".parse().unwrap();
+    let transaction_service = TransactionServiceImpl::new().await;
 
     println!("Transaction service listening on {}", addr);
 
