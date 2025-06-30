@@ -11,7 +11,8 @@ rust-sv = { git = "https://github.com/murphsicles/rust-sv", tag = "v0.4.0" } # B
 hex = "0.4"                                    # Hex decoding
 async-channel = "2.3"                          # Async transaction queuing
 shared = { path = "../shared" }                # Link to shared crate
-storage_service = { path = "../storage_service" } # Link to storage_service
+storage_service = { path = "../storage_service" } # For UTXO validation
+consensus_service = { path = "../consensus_service" } # For consensus validation
 
 [build-dependencies]
 tonic-build = "0.8"                            # For compiling .proto files
