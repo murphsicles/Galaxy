@@ -8,23 +8,32 @@ use tigerbeetle::client::{Client, Config};
 use std::collections::HashMap;
 use tokio::sync::Mutex;
 use std::sync::Arc;
+use toml;
 
 tonic::include_proto!("storage");
 
 #[derive(Debug)]
 struct StorageServiceImpl {
-    utxo_db: Arc<Mutex<HashMap<(String, u32), (String, u64)>>>, // Fallback HashMap
+    utxo_db: Arc<Mutex<HashMap<(String, u32), (String, u64)>>>,
     // TODO: Enable Tiger Beetle client when CLI access is available
     // tb_client: Option<Client>,
 }
 
 impl StorageServiceImpl {
     async fn new() -> Self {
+        // Load Tiger Beetle address from config
+        let config_str = include_str!("../../tests/config.toml");
+        let config: toml::Value = toml::from_str(config_str).expect("Failed to parse config");
+        let tb_address = config["testnet"]["tigerbeetle_address"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
         // TODO: Initialize Tiger Beetle client when CLI access is available
         // let tb_client = Client::new(Config {
         //     cluster_id: 0,
         //     replica_id: 0,
-        //     addresses: vec!["127.0.0.1:3000".to_string()],
+        //     addresses: vec![tb_address],
         // }).await.ok();
         let utxo_db = Arc::new(Mutex::new(HashMap::new()));
         StorageServiceImpl { utxo_db }
@@ -38,7 +47,6 @@ impl Storage for StorageServiceImpl {
         let utxo_db = self.utxo_db.lock().await;
         let key = (req.txid, req.vout);
 
-        // TODO: Replace with Tiger Beetle query
         if let Some((script_pubkey, amount)) = utxo_db.get(&key) {
             let reply = QueryUtxoResponse {
                 exists: true,
@@ -63,7 +71,6 @@ impl Storage for StorageServiceImpl {
         let mut utxo_db = self.utxo_db.lock().await;
         let key = (req.txid, req.vout);
 
-        // TODO: Replace with Tiger Beetle write
         utxo_db.insert(key, (req.script_pubkey, req.amount));
 
         let reply = AddUtxoResponse {
@@ -78,7 +85,6 @@ impl Storage for StorageServiceImpl {
         let mut utxo_db = self.utxo_db.lock().await;
         let key = (req.txid, req.vout);
 
-        // TODO: Replace with Tiger Beetle delete
         let success = utxo_db.remove(&key).is_some();
 
         let reply = RemoveUtxoResponse {
@@ -93,7 +99,6 @@ impl Storage for StorageServiceImpl {
         let mut utxo_db = self.utxo_db.lock().await;
         let mut results = vec![];
 
-        // TODO: Replace with Tiger Beetle batch write
         for utxo in req.utxos {
             let key = (utxo.txid, utxo.vout);
             utxo_db.insert(key, (utxo.script_pubkey, utxo.amount));
