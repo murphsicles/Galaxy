@@ -41,6 +41,10 @@ grpcurl -plaintext -d '{"overlay_id": "test_overlay"}' localhost:50056 overlay.O
 echo "Testing validation_service: GenerateSPVProof"
 grpcurl -plaintext -d '{"txid": "abc123"}' localhost:50057 validation.Validation/GenerateSPVProof
 
+echo "Testing validation_service: StreamSPVProofs"
+# Note: Requires a streaming-capable client
+# grpcurl -plaintext -d '{"txid": "abc123"}' localhost:50057 validation.Validation/StreamSPVProofs
+
 echo "Testing mining_service: GetMiningWork"
 grpcurl -plaintext -d '{"miner_id": "miner1"}' localhost:50058 mining.Mining/GetMiningWork
 
