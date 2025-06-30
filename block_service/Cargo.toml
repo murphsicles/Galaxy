@@ -12,6 +12,7 @@ hex = "0.4"                                    # Hex decoding
 shared = { path = "../shared" }                # Link to shared crate
 transaction_service = { path = "../transaction_service" } # For transaction validation
 storage_service = { path = "../storage_service" } # For UTXO updates
+consensus_service = { path = "../consensus_service" } # For consensus validation
 
 [build-dependencies]
 tonic-build = "0.8"                            # For compiling .proto files
