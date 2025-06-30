@@ -1,0 +1,27 @@
+[testnet]
+nodes = [
+    "testnet-seed.bitcoin.sipa.be:18333",
+    "testnet-seed.bsv.io:18333"
+]
+tigerbeetle_address = "127.0.0.1:3000"
+
+[services]
+network_service_port = 50051
+transaction_service_port = 50052
+storage_service_port = 50053
+block_service_port = 50054
+consensus_service_port = 50055
+overlay_service_port = 50056
+validation_service_port = 50057
+
+[test_cases]
+ping = { message = "Hello", expected_reply = "Pong: Hello" }
+discover_peers = { node_id = "galaxy_node", min_peers = 2 }
+broadcast_transaction = { tx_hex = "01000000010000000000000000000000000000000000000000000000000000000000000000ffffffff0100ffffffff0100ffffffff" }
+broadcast_block = { block_hex = "01000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000ffffffff" }
+validate_transaction = { tx_hex = "01000000010000000000000000000000000000000000000000000000000000000000000000ffffffff0100ffffffff0100ffffffff" }
+validate_block = { block_hex = "01000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000ffffffff" }
+add_utxo = { txid = "abc123", vout = 0, script_pubkey = "76a91488a5e4a4e6c4a4e0c7b0b4a4e4a4e4a4e4a4e4a488ac", amount = 1000000 }
+create_overlay = { overlay_id = "test_overlay" }
+submit_overlay_tx = { overlay_id = "test_overlay", tx_hex = "01000000010000000000000000000000000000000000000000000000000000000000000000ffffffff0100ffffffff0100ffffffff" }
+generate_spv_proof = { txid = "abc123" }
