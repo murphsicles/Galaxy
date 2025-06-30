@@ -10,6 +10,7 @@ prost = "0.11"                                 # Protocol Buffers
 rust-sv = { git = "https://github.com/murphsicles/rust-sv", tag = "v0.4.0" } # BSV-specific library
 hex = "0.4"                                    # Hex decoding
 shared = { path = "../shared" }                # Link to shared crate
+storage_service = { path = "../storage_service" } # Link to storage_service
 
 [build-dependencies]
 tonic-build = "0.8"                            # For compiling .proto files
