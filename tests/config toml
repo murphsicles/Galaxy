@@ -78,6 +78,9 @@ txid = "abc123"
 [test_cases.batch_generate_spv_proof]
 txids = ["abc123", "def456"]
 
+[test_cases.stream_spv_proofs]
+txid = "abc123"
+
 [test_cases.get_mining_work]
 miner_id = "miner1"
 
