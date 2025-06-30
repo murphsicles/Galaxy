@@ -4,11 +4,12 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-tokio = { version = "1", features = ["full"] } # Async runtime
-tonic = "0.8"                                  # gRPC support
-prost = "0.11"                                 # Protocol Buffers
-tigerbeetle = { git = "https://github.com/tigerbeetle/tigerbeetle", branch = "main" } # Tiger Beetle client
-shared = { path = "../shared" }                # Link to shared crate
+tokio = { version = "1", features = ["full"] }
+tonic = "0.8"
+prost = "0.11"
+tigerbeetle = { git = "https://github.com/tigerbeetle/tigerbeetle", branch = "main" }
+toml = "0.8"                                  # Config parsing
+shared = { path = "../shared" }
 
 [build-dependencies]
-tonic-build = "0.8"                            # For compiling .proto files
+tonic-build = "0.8"
