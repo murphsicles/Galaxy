@@ -14,6 +14,11 @@ consensus_service_port = 50055
 overlay_service_port = 50056
 validation_service_port = 50057
 mining_service_port = 50058
+metrics_port = 50059
+
+[sharding]
+shard_id = 0
+shard_count = 4
 
 [test_cases]
 [test_cases.ping]
@@ -68,6 +73,10 @@ tx_hexes = [
     "01000000010000000000000000000000000000000000000000000000000000000000000000ffffffff0100ffffffff0100ffffffff"
 ]
 
+[test_cases.stream_overlay_transactions]
+overlay_id = "test_overlay"
+tx_hex = "01000000010000000000000000000000000000000000000000000000000000000000000000ffffffff0100ffffffff0100ffffffff"
+
 [test_cases.get_overlay_block]
 overlay_id = "test_overlay"
 block_height = 0
@@ -89,3 +98,9 @@ block_hex = "0100000000000000000000000000000000000000000000000000000000000000000
 
 [test_cases.batch_get_mining_work]
 miner_ids = ["miner1", "miner2"]
+
+[test_cases.stream_mining_work]
+miner_id = "miner1"
+
+[test_cases.get_metrics]
+service_name = "validation_service"
