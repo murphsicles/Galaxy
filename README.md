@@ -10,27 +10,30 @@
 
 ## 🌟 Features
 
-- **High Throughput**: Targets over 100,000,000 TPS with async gRPC and batch processing.
+- **High Throughput**: Targets over 100,000,000 TPS with async gRPC, batching, and sharding.
 - **BSV-Specific**:
-  - Supports unbounded block creation.
+  - Supports unbounded block creation (up to 4GB).
   - Handles OP_RETURN data for enterprise applications.
-  - Manages private blockchain overlays.
-  - Provides SPV proofs for lightweight clients.
+  - Manages private blockchain overlays with persistent storage.
+  - Provides SPV proofs with caching and streaming.
+  - Supports mining with dynamic difficulty and transaction selection.
 - **Microservices Architecture**:
   - `network_service`: P2P networking with peer pool management.
   - `transaction_service`: Transaction validation and queuing.
-  - `block_service`: Block validation and assembly.
-  - `storage_service`: UTXO management with Tiger Beetle.
+  - `block_service`: Block validation and assembly with merkle root computation.
+  - `storage_service`: UTXO management with Tiger Beetle and keep-alive.
   - `consensus_service`: Enforces BSV consensus rules.
-  - `overlay_service`: Manages private blockchains.
-  - `validation_service`: Generates/verifies SPV proofs.
-  - `mining_service`: Supports block mining.
-- **Performance Optimizations**
-  - Asynchronous gRPC calls for non-blocking operations.
-  - Batching for transactions, blocks, and UTXOs to reduce network overhead.
+  - `overlay_service`: Manages private blockchains with streaming and storage.
+  - `validation_service`: Generates/verifies SPV proofs with caching and streaming.
+  - `mining_service`: Supports block mining with streaming and transaction selection.
+- **Performance Optimizations**:
+  - Asynchronous gRPC calls with connection keep-alive.
+  - Batching for transactions, blocks, and UTXOs.
   - Lean Protocol Buffer messages for fast serialization.
-  - Transaction queuing for high-throughput processing.
+  - Transaction queuing and SPV proof caching.
   - Scalable UTXO storage with Tiger Beetle DB.
+  - Prometheus metrics for performance monitoring.
+  - Sharding preparation for distributed processing.
 
 ## 🛠️ Setup
 
@@ -39,6 +42,8 @@
 - Cargo
 - Tiger Beetle server (for `storage_service`, see [Tiger Beetle](https://github.com/tigerbeetle/tigerbeetle))
 - `grpcurl` for testing
+- `sled` for overlay storage
+- `prometheus` for metrics
 
 ### Installation
 ```bash
@@ -104,6 +109,7 @@ Test services using `grpcurl`. Ensure all services are running on their respecti
 Galaxy is configured to connect to BSV testnet nodes. See `tests/config.toml` for settings:
 - Testnet nodes for `network_service`
 - Tiger Beetle server address for `storage_service`
+- Sharding parameters for distributed processing
 - Test cases for all services
 
 Run the full pipeline test:
@@ -111,6 +117,12 @@ Run the full pipeline test:
 cd tests
 chmod +x run_tests.sh
 ./run_tests.sh
+```
+
+### Metrics
+Monitor performance using the `GetMetrics` endpoint on each service (e.g., `localhost:50057` for `validation_service`):
+```bash
+grpcurl -plaintext -d '{}' localhost:50057 validation.Validation/GetMetrics
 ```
 
 See individual service READMEs for detailed test commands.
@@ -128,11 +140,14 @@ Check the [CI workflow](.github/workflows/ci.yml) for details.
 ## 📈 Performance Highlights
 
 Galaxy is optimized for ultra-high performance:
-- **Asynchronous gRPC**: Non-blocking calls for maximum concurrency.
+- **Asynchronous gRPC**: Non-blocking calls with connection keep-alive.
 - **Batching**: Reduces network overhead for transactions, blocks, and UTXOs.
 - **Tiger Beetle DB**: Scalable UTXO storage for BSV’s future dataset.
-- **Transaction Queuing**: Handles very high transaction volumes efficiently.
-- **Lean Messages**: Minimizes serialization overhead.
+- **Transaction Queuing**: Handles high transaction volumes efficiently.
+- **SPV Proof Caching**: Optimizes proof generation.
+- **Streaming**: Supports continuous transaction and proof processing.
+- **Metrics**: Monitors TPS, latency, and errors with Prometheus.
+- **Sharding**: Prepares for distributed processing.
 
 These optimizations position Galaxy to surpass competitors like Teranode, targeting over 100,000,000 TPS per shard.
 
