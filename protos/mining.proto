@@ -5,6 +5,8 @@ service Mining {
     rpc GetMiningWork (GetMiningWorkRequest) returns (GetMiningWorkResponse);
     rpc SubmitMinedBlock (SubmitMinedBlockRequest) returns (SubmitMinedBlockResponse);
     rpc BatchGetMiningWork (BatchGetMiningWorkRequest) returns (BatchGetMiningWorkResponse);
+    rpc StreamMiningWork (stream StreamMiningWorkRequest) returns (stream StreamMiningWorkResponse);
+    rpc GetMetrics (GetMetricsRequest) returns (GetMetricsResponse);
 }
 
 message GetMiningWorkRequest {
@@ -27,4 +29,18 @@ message BatchGetMiningWorkRequest {
 }
 message BatchGetMiningWorkResponse {
     repeated GetMiningWorkResponse results = 1; // Results for each miner
+}
+message StreamMiningWorkRequest {
+    string miner_id = 1; // Miner ID to monitor
+}
+message StreamMiningWorkResponse {
+    string block_template = 1; // Hex-encoded block template
+    uint32 target_difficulty = 2; // Mining difficulty target
+    string error = 3; // Error message if work generation fails
+}
+message GetMetricsRequest {}
+message GetMetricsResponse {
+    uint64 work_requests = 1; // Total mining work requests
+    double avg_latency_ms = 2; // Average work generation latency
+    uint64 blocks_submitted = 3; // Total blocks submitted
 }
