@@ -6,6 +6,7 @@ service Validation {
     rpc VerifySPVProof (VerifySPVProofRequest) returns (VerifySPVProofResponse);
     rpc BatchGenerateSPVProof (BatchGenerateSPVProofRequest) returns (BatchGenerateSPVProofResponse);
     rpc StreamSPVProofs (stream StreamSPVProofsRequest) returns (stream StreamSPVProofsResponse);
+    rpc GetMetrics (GetMetricsRequest) returns (GetMetricsResponse);
 }
 
 message GenerateSPVProofRequest {
@@ -41,4 +42,10 @@ message StreamSPVProofsResponse {
     string merkle_path = 3; // Hex-encoded merkle path
     repeated string block_headers = 4; // Hex-encoded block headers
     string error = 5; // Error message if generation fails
+}
+message GetMetricsRequest {}
+message GetMetricsResponse {
+    uint64 proof_requests = 1; // Total SPV proof requests
+    double avg_latency_ms = 2; // Average proof generation latency
+    uint64 cache_hits = 3; // Cache hit count
 }
