@@ -10,6 +10,8 @@ use block::block_client::BlockClient;
 use block::ValidateBlockRequest;
 use auth::auth_client::AuthClient;
 use auth::{AuthenticateRequest, AuthorizeRequest};
+use alert::alert_client::AlertClient;
+use alert::SendAlertRequest;
 use metrics::metrics_client::MetricsClient;
 use metrics::{GetMetricsRequest, GetMetricsResponse};
 use sv::messages::{Message, NetworkMessage};
@@ -35,6 +37,7 @@ tonic::include_proto!("network");
 tonic::include_proto!("transaction");
 tonic::include_proto!("block");
 tonic::include_proto!("auth");
+tonic::include_proto!("alert");
 tonic::include_proto!("metrics");
 
 #[derive(Debug)]
@@ -43,6 +46,7 @@ struct NetworkServiceImpl {
     transaction_client: TransactionClient<Channel>,
     block_client: BlockClient<Channel>,
     auth_client: AuthClient<Channel>,
+    alert_client: AlertClient<Channel>,
     registry: Arc<Registry>,
     requests_total: Counter,
     latency_ms: Gauge,
@@ -72,6 +76,9 @@ impl NetworkServiceImpl {
         let auth_client = AuthClient::connect("http://[::1]:50060")
             .await
             .expect("Failed to connect to auth_service");
+        let alert_client = AlertClient::connect("http://[::1]:50061")
+            .await
+            .expect("Failed to connect to alert_service");
         let registry = Arc::new(Registry::new());
         let requests_total = Counter::new("network_requests_total", "Total network requests").unwrap();
         let latency_ms = Gauge::new("network_latency_ms", "Average request latency").unwrap();
@@ -99,6 +106,7 @@ impl NetworkServiceImpl {
             transaction_client,
             block_client,
             auth_client,
+            alert_client,
             registry,
             requests_total,
             latency_ms,
@@ -133,6 +141,27 @@ impl NetworkServiceImpl {
             .into_inner();
         if !auth_response.allowed {
             return Err(Status::permission_denied(auth_response.error));
+        }
+        Ok(())
+    }
+
+    async fn send_alert(&self, event_type: &str, message: &str, severity: u32) -> Result<(), Status> {
+        let alert_request = SendAlertRequest {
+            event_type: event_type.to_string(),
+            message: message.to_string(),
+            severity,
+        };
+        let alert_response = self.alert_client
+            .send_alert(alert_request)
+            .await
+            .map_err(|e| {
+                warn!("Failed to send alert: {}", e);
+                Status::internal(format!("Failed to send alert: {}", e))
+            })?
+            .into_inner();
+        if !alert_response.success {
+            warn!("Alert sending failed: {}", alert_response.error);
+            return Err(Status::internal(alert_response.error));
         }
         Ok(())
     }
@@ -256,10 +285,14 @@ impl Network for NetworkServiceImpl {
         let peers = self.peers.lock().await;
         let peer_addresses: Vec<String> = peers.keys().cloned().collect();
         self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
+        if peer_addresses.is_empty() {
+            let _ = self.send_alert("peer_discovery_failed", "No active peers found", 2).await;
+            warn!("No active peers found");
+        }
         info!("Discovered {} peers", peer_addresses.len());
         Ok(Response::new(DiscoverPeersResponse {
             peer_addresses,
-            error: if peers.is_empty() { "No active peers".to_string() } else { "".to_string() },
+            error: if peer_addresses.is_empty() { "No active peers".to_string() } else { "".to_string() },
         }))
     }
 
@@ -289,6 +322,7 @@ impl Network for NetworkServiceImpl {
         if !validate_response.is_valid {
             self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
             warn!("Invalid transaction: {}", validate_response.error);
+            let _ = self.send_alert("tx_broadcast_validation_failed", &format!("Transaction validation failed: {}", validate_response.error), 2).await;
             return Ok(Response::new(BroadcastTxResponse {
                 success: false,
                 error: validate_response.error,
@@ -350,6 +384,7 @@ impl Network for NetworkServiceImpl {
         if !validate_response.is_valid {
             self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
             warn!("Invalid block: {}", validate_response.error);
+            let _ = self.send_alert("block_broadcast_validation_failed", &format!("Block validation failed: {}", validate_response.error), 2).await;
             return Ok(Response::new(BroadcastBlockResponse {
                 success: false,
                 error: validate_response.error,
