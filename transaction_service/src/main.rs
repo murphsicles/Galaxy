@@ -1,12 +1,14 @@
 use tonic::{transport::{Server, Channel}, Request, Response, Status};
 use transaction::transaction_server::{Transaction, TransactionServer};
-use transaction::{ValidateTxRequest, ValidateTxResponse, ProcessTxRequest, ProcessTxResponse, BatchValidateTxRequest, BatchValidateTxResponse};
+use transaction::{ValidateTxRequest, ValidateTxResponse, ProcessTxRequest, ProcessTxResponse, BatchValidateTxRequest, BatchValidateTxResponse, IndexTransactionRequest, IndexTransactionResponse};
 use storage::storage_client::StorageClient;
 use storage::QueryUtxoRequest;
 use consensus::consensus_client::ConsensusClient;
 use consensus::ValidateTxConsensusRequest;
 use auth::auth_client::AuthClient;
 use auth::{AuthenticateRequest, AuthorizeRequest};
+use index::index_client::IndexClient;
+use index::IndexTransactionRequest as IndexIndexTransactionRequest;
 use metrics::metrics_client::MetricsClient;
 use metrics::{GetMetricsRequest, GetMetricsResponse};
 use sv::transaction::{Transaction, Input};
@@ -28,6 +30,7 @@ tonic::include_proto!("transaction");
 tonic::include_proto!("storage");
 tonic::include_proto!("consensus");
 tonic::include_proto!("auth");
+tonic::include_proto!("index");
 tonic::include_proto!("metrics");
 
 #[derive(Debug)]
@@ -35,6 +38,7 @@ struct TransactionServiceImpl {
     storage_client: StorageClient<Channel>,
     consensus_client: ConsensusClient<Channel>,
     auth_client: AuthClient<Channel>,
+    index_client: IndexClient<Channel>,
     tx_queue: Arc<Mutex<(Sender<String>, Receiver<String>)>>,
     registry: Arc<Registry>,
     requests_total: Counter,
@@ -58,6 +62,9 @@ impl TransactionServiceImpl {
         let auth_client = AuthClient::connect("http://[::1]:50060")
             .await
             .expect("Failed to connect to auth_service");
+        let index_client = IndexClient::connect("http://[::1]:50062")
+            .await
+            .expect("Failed to connect to index_service");
         let (tx, rx) = async_channel::bounded(1000);
         let tx_queue = Arc::new(Mutex::new((tx, rx)));
         let registry = Arc::new(Registry::new());
@@ -80,6 +87,7 @@ impl TransactionServiceImpl {
             storage_client,
             consensus_client,
             auth_client,
+            index_client,
             tx_queue,
             registry,
             requests_total,
@@ -242,6 +250,25 @@ impl Transaction for TransactionServiceImpl {
             }));
         }
 
+        let mut index_client = self.index_client.clone();
+        let index_request = IndexIndexTransactionRequest { tx_hex: req.tx_hex.clone() };
+        let index_response = index_client
+            .index_transaction(index_request)
+            .await
+            .map_err(|e| {
+                warn!("Transaction indexing failed: {}", e);
+                Status::internal(format!("Transaction indexing failed: {}", e))
+            })?
+            .into_inner();
+        if !index_response.success {
+            self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
+            warn!("Transaction indexing failed: {}", index_response.error);
+            return Ok(Response::new(ProcessTxResponse {
+                success: false,
+                error: index_response.error,
+            }));
+        }
+
         let tx_queue = self.tx_queue.lock().await;
         tx_queue
             .0
@@ -253,7 +280,7 @@ impl Transaction for TransactionServiceImpl {
             })?;
 
         self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
-        info!("Successfully queued transaction: {}", req.tx_hex);
+        info!("Successfully processed transaction: {}", req.tx_hex);
         Ok(Response::new(ProcessTxResponse {
             success: true,
             error: "".to_string(),
@@ -284,6 +311,35 @@ impl Transaction for TransactionServiceImpl {
         self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
         info!("Completed batch validation for {} transactions", results.len());
         Ok(Response::new(BatchValidateTxResponse { results }))
+    }
+
+    async fn index_transaction(&self, request: Request<IndexTransactionRequest>) -> Result<Response<IndexTransactionResponse>, Status> {
+        let token = request.metadata().get("authorization").ok_or_else(|| Status::unauthenticated("Missing token"))?;
+        let user_id = self.authenticate(token.to_str().map_err(|e| Status::invalid_argument("Invalid token format"))?).await?;
+        self.authorize(&user_id, "IndexTransaction").await?;
+        self.rate_limiter.until_ready().await;
+
+        self.requests_total.inc();
+        let start = Instant::now();
+        info!("Indexing transaction: {}", request.get_ref().tx_hex);
+        let req = request.into_inner();
+        let mut index_client = self.index_client.clone();
+        let index_request = IndexIndexTransactionRequest { tx_hex: req.tx_hex.clone() };
+        let index_response = index_client
+            .index_transaction(index_request)
+            .await
+            .map_err(|e| {
+                warn!("Transaction indexing failed: {}", e);
+                Status::internal(format!("Transaction indexing failed: {}", e))
+            })?
+            .into_inner();
+
+        self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
+        info!("Transaction indexing {}: {}", if index_response.success { "succeeded" } else { "failed" }, req.tx_hex);
+        Ok(Response::new(IndexTransactionResponse {
+            success: index_response.success,
+            error: index_response.error,
+        }))
     }
 
     async fn get_metrics(&self, request: Request<GetMetricsRequest>) -> Result<Response<GetMetricsResponse>, Status> {
