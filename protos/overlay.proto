@@ -6,6 +6,8 @@ service Overlay {
     rpc SubmitOverlayTransaction (SubmitOverlayTxRequest) returns (SubmitOverlayTxResponse);
     rpc GetOverlayBlock (GetOverlayBlockRequest) returns (GetOverlayBlockResponse);
     rpc BatchSubmitOverlayTransaction (BatchSubmitOverlayTxRequest) returns (BatchSubmitOverlayTxResponse);
+    rpc StreamOverlayTransactions (stream StreamOverlayTxRequest) returns (stream StreamOverlayTxResponse);
+    rpc GetMetrics (GetMetricsRequest) returns (GetMetricsResponse);
 }
 
 message CreateOverlayRequest {
@@ -17,7 +19,7 @@ message CreateOverlayResponse {
 }
 message SubmitOverlayTxRequest {
     string overlay_id = 1; // Overlay identifier
-    string tx_hex = 2;     // Hex-encoded overlay transaction
+    string tx_hex = 2; // Hex-encoded overlay transaction
 }
 message SubmitOverlayTxResponse {
     bool success = 1;
@@ -29,7 +31,7 @@ message GetOverlayBlockRequest {
 }
 message GetOverlayBlockResponse {
     string block_hex = 1; // Hex-encoded overlay block
-    string error = 2;     // Error message if retrieval fails
+    string error = 2; // Error message if retrieval fails
 }
 message BatchSubmitOverlayTxRequest {
     string overlay_id = 1; // Overlay identifier
@@ -37,4 +39,19 @@ message BatchSubmitOverlayTxRequest {
 }
 message BatchSubmitOverlayTxResponse {
     repeated SubmitOverlayTxResponse results = 1; // Results for each transaction
+}
+message StreamOverlayTxRequest {
+    string overlay_id = 1; // Overlay identifier
+    string tx_hex = 2; // Hex-encoded transaction to monitor
+}
+message StreamOverlayTxResponse {
+    bool success = 1;
+    string tx_hex = 2; // Hex-encoded transaction
+    string error = 3; // Error message if submission fails
+}
+message GetMetricsRequest {}
+message GetMetricsResponse {
+    uint64 tx_requests = 1; // Total transaction requests
+    double avg_latency_ms = 2; // Average transaction processing latency
+    uint64 block_count = 3; // Total overlay blocks created
 }
