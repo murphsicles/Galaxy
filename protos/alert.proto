@@ -1,0 +1,26 @@
+syntax = "proto3";
+package alert;
+
+service Alert {
+    rpc SendAlert (SendAlertRequest) returns (SendAlertResponse);
+    rpc SubscribeToAlerts (SubscribeToAlertsRequest) returns (stream AlertResponse);
+}
+
+message SendAlertRequest {
+    string event_type = 1; // Type of event (e.g., consensus_violation, performance_issue)
+    string message = 2; // Alert message
+    uint32 severity = 3; // Severity level (1=low, 2=medium, 3=high)
+}
+message SendAlertResponse {
+    bool success = 1;
+    string error = 2; // Error message if sending fails
+}
+message SubscribeToAlertsRequest {
+    string event_type = 1; // Filter by event type (optional, empty for all)
+}
+message AlertResponse {
+    string event_type = 1;
+    string message = 2;
+    uint32 severity = 3;
+    uint64 timestamp = 4; // Unix timestamp in seconds
+}
