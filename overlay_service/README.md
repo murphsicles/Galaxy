@@ -1,6 +1,6 @@
 # Overlay Service
 
-This service implements a gRPC server for managing private blockchains (overlays) on BSV in the Galaxy project, using rust-sv. It integrates with transaction_service, block_service, and network_service.
+This service implements a gRPC server for managing private blockchains (overlays) on BSV in the Galaxy project, using rust-sv. It integrates with transaction_service, block_service, and network_service, supporting block assembly for overlays.
 
 ## Running
 ```bash
