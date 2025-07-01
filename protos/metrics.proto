@@ -3,6 +3,7 @@ package metrics;
 
 service Metrics {
     rpc GetMetrics (GetMetricsRequest) returns (GetMetricsResponse);
+    rpc GetLogs (GetLogsRequest) returns (GetLogsResponse);
 }
 
 message GetMetricsRequest {}
@@ -11,4 +12,10 @@ message GetMetricsResponse {
     uint64 requests_total = 2; // Total requests processed
     double avg_latency_ms = 3; // Average request latency
     uint64 errors_total = 4; // Total errors encountered
+}
+message GetLogsRequest {
+    string level = 1; // Log level (e.g., INFO, DEBUG)
+}
+message GetLogsResponse {
+    repeated string logs = 1; // List of log messages
 }
