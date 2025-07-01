@@ -7,19 +7,27 @@ use storage::storage_client::StorageClient;
 use storage::{AddUtxoRequest, RemoveUtxoRequest};
 use consensus::consensus_client::ConsensusClient;
 use consensus::ValidateBlockConsensusRequest;
+use auth::auth_client::AuthClient;
+use auth::{AuthenticateRequest, AuthorizeRequest};
 use metrics::metrics_client::MetricsClient;
+use metrics::{GetMetricsRequest, GetMetricsResponse};
 use sv::block::Block;
 use sv::transaction::Transaction;
 use sv::util::{deserialize, serialize, hash::Sha256d};
 use hex;
 use std::time::Instant;
 use prometheus::{Counter, Gauge, Registry};
+use governor::{Quota, RateLimiter, Jitter};
+use std::num::NonZeroU32;
+use tracing::{info, warn};
+use shared::ShardManager;
 use toml;
 
 tonic::include_proto!("block");
 tonic::include_proto!("transaction");
 tonic::include_proto!("storage");
 tonic::include_proto!("consensus");
+tonic::include_proto!("auth");
 tonic::include_proto!("metrics");
 
 #[derive(Debug)]
@@ -27,9 +35,12 @@ struct BlockServiceImpl {
     transaction_client: TransactionClient<Channel>,
     storage_client: StorageClient<Channel>,
     consensus_client: ConsensusClient<Channel>,
+    auth_client: AuthClient<Channel>,
     registry: Arc<Registry>,
     requests_total: Counter,
     latency_ms: Gauge,
+    rate_limiter: Arc<RateLimiter<String, governor::state::direct::NotKeyed, governor::clock::DefaultClock>>,
+    shard_manager: Arc<ShardManager>,
 }
 
 impl BlockServiceImpl {
@@ -47,20 +58,58 @@ impl BlockServiceImpl {
         let consensus_client = ConsensusClient::connect("http://[::1]:50055")
             .await
             .expect("Failed to connect to consensus_service");
+        let auth_client = AuthClient::connect("http://[::1]:50060")
+            .await
+            .expect("Failed to connect to auth_service");
         let registry = Arc::new(Registry::new());
         let requests_total = Counter::new("block_requests_total", "Total block requests").unwrap();
         let latency_ms = Gauge::new("block_latency_ms", "Average block processing latency").unwrap();
         registry.register(Box::new(requests_total.clone())).unwrap();
         registry.register(Box::new(latency_ms.clone())).unwrap();
+        let rate_limiter = Arc::new(RateLimiter::direct(Quota::per_second(NonZeroU32::new(1000).unwrap())));
+        let shard_manager = Arc::new(ShardManager::new());
 
         BlockServiceImpl {
             transaction_client,
             storage_client,
             consensus_client,
+            auth_client,
             registry,
             requests_total,
             latency_ms,
+            rate_limiter,
+            shard_manager,
         }
+    }
+
+    async fn authenticate(&self, token: &str) -> Result<String, Status> {
+        let auth_request = AuthenticateRequest { token: token.to_string() };
+        let auth_response = self.auth_client
+            .authenticate(auth_request)
+            .await
+            .map_err(|e| Status::unauthenticated(format!("Authentication failed: {}", e)))?
+            .into_inner();
+        if !auth_response.success {
+            return Err(Status::unauthenticated(auth_response.error));
+        }
+        Ok(auth_response.user_id)
+    }
+
+    async fn authorize(&self, user_id: &str, method: &str) -> Result<(), Status> {
+        let auth_request = AuthorizeRequest {
+            user_id: user_id.to_string(),
+            service: "block_service".to_string(),
+            method: method.to_string(),
+        };
+        let auth_response = self.auth_client
+            .authorize(auth_request)
+            .await
+            .map_err(|e| Status::permission_denied(format!("Authorization failed: {}", e)))?
+            .into_inner();
+        if !auth_response.allowed {
+            return Err(Status::permission_denied(auth_response.error));
+        }
+        Ok(())
     }
 
     async fn validate_block_transactions(&self, block: &Block) -> Result<bool, String> {
@@ -121,16 +170,29 @@ impl BlockServiceImpl {
 #[tonic::async_trait]
 impl Block for BlockServiceImpl {
     async fn validate_block(&self, request: Request<ValidateBlockRequest>) -> Result<Response<ValidateBlockResponse>, Status> {
+        let token = request.metadata().get("authorization").ok_or_else(|| Status::unauthenticated("Missing token"))?;
+        let user_id = self.authenticate(token.to_str().map_err(|e| Status::invalid_argument("Invalid token format"))?).await?;
+        self.authorize(&user_id, "ValidateBlock").await?;
+        self.rate_limiter.until_ready().await;
+
         self.requests_total.inc();
         let start = Instant::now();
+        info!("Validating block: {}", request.get_ref().block_hex);
         let req = request.into_inner();
         let block_bytes = hex::decode(&req.block_hex)
-            .map_err(|e| Status::invalid_argument(format!("Invalid block_hex: {}", e)))?;
+            .map_err(|e| {
+                warn!("Invalid block_hex: {}", e);
+                Status::invalid_argument(format!("Invalid block_hex: {}", e))
+            })?;
         let block: Block = deserialize(&block_bytes)
-            .map_err(|e| Status::invalid_argument(format!("Invalid block: {}", e)))?;
+            .map_err(|e| {
+                warn!("Invalid block: {}", e);
+                Status::invalid_argument(format!("Invalid block: {}", e))
+            })?;
 
         if block.header.version < 1 {
             self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
+            warn!("Invalid block header version");
             return Ok(Response::new(ValidateBlockResponse {
                 is_valid: false,
                 error: "Invalid block header version".to_string(),
@@ -144,10 +206,14 @@ impl Block for BlockServiceImpl {
         let consensus_response = consensus_client
             .validate_block_consensus(consensus_request)
             .await
-            .map_err(|e| Status::internal(format!("Consensus validation failed: {}", e)))?
+            .map_err(|e| {
+                warn!("Consensus validation failed: {}", e);
+                Status::internal(format!("Consensus validation failed: {}", e))
+            })?
             .into_inner();
         if !consensus_response.is_valid {
             self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
+            warn!("Consensus validation failed: {}", consensus_response.error);
             return Ok(Response::new(ValidateBlockResponse {
                 is_valid: false,
                 error: consensus_response.error,
@@ -158,6 +224,7 @@ impl Block for BlockServiceImpl {
             Ok(_) => true,
             Err(e) => {
                 self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
+                warn!("Block transaction validation failed: {}", e);
                 return Ok(Response::new(ValidateBlockResponse {
                     is_valid: false,
                     error: e,
@@ -168,6 +235,7 @@ impl Block for BlockServiceImpl {
         if is_valid {
             if let Err(e) = self.update_utxos(&block).await {
                 self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
+                warn!("UTXO update failed: {}", e);
                 return Ok(Response::new(ValidateBlockResponse {
                     is_valid: false,
                     error: format!("UTXO update failed: {}", e),
@@ -176,6 +244,7 @@ impl Block for BlockServiceImpl {
         }
 
         self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
+        info!("Block validation {}: {}", if is_valid { "succeeded" } else { "failed" }, req.block_hex);
         Ok(Response::new(ValidateBlockResponse {
             is_valid,
             error: if is_valid { "".to_string() } else { "Block validation failed".to_string() },
@@ -183,8 +252,14 @@ impl Block for BlockServiceImpl {
     }
 
     async fn assemble_block(&self, request: Request<AssembleBlockRequest>) -> Result<Response<AssembleBlockResponse>, Status> {
+        let token = request.metadata().get("authorization").ok_or_else(|| Status::unauthenticated("Missing token"))?;
+        let user_id = self.authenticate(token.to_str().map_err(|e| Status::invalid_argument("Invalid token format"))?).await?;
+        self.authorize(&user_id, "AssembleBlock").await?;
+        self.rate_limiter.until_ready().await;
+
         self.requests_total.inc();
         let start = Instant::now();
+        info!("Assembling block with {} transactions", request.get_ref().tx_hexes.len());
         let req = request.into_inner();
         let mut transactions = vec![];
 
@@ -194,19 +269,29 @@ impl Block for BlockServiceImpl {
             let response = client
                 .validate_transaction(request)
                 .await
-                .map_err(|e| Status::internal(format!("Transaction validation failed: {}", e)))?
+                .map_err(|e| {
+                    warn!("Transaction validation failed: {}", e);
+                    Status::internal(format!("Transaction validation failed: {}", e))
+                })?
                 .into_inner();
             if !response.is_valid {
                 self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
+                warn!("Invalid transaction: {}", response.error);
                 return Ok(Response::new(AssembleBlockResponse {
                     block_hex: "".to_string(),
                     error: response.error,
                 }));
             }
             let tx_bytes = hex::decode(&tx_hex)
-                .map_err(|e| Status::invalid_argument(format!("Invalid tx_hex: {}", e)))?;
+                .map_err(|e| {
+                    warn!("Invalid tx_hex: {}", e);
+                    Status::invalid_argument(format!("Invalid tx_hex: {}", e))
+                })?;
             let tx: Transaction = deserialize(&tx_bytes)
-                .map_err(|e| Status::invalid_argument(format!("Invalid transaction: {}", e)))?;
+                .map_err(|e| {
+                    warn!("Invalid transaction: {}", e);
+                    Status::invalid_argument(format!("Invalid transaction: {}", e))
+                })?;
             transactions.push(tx);
         }
 
@@ -244,13 +329,18 @@ impl Block for BlockServiceImpl {
         };
 
         self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
+        info!("Assembled block with merkle root: {}", block.header.merkle_root);
         Ok(Response::new(AssembleBlockResponse {
             block_hex: hex::encode(serialize(&block)),
             error: "".to_string(),
         }))
     }
 
-    async fn get_metrics(&self, _request: Request<GetMetricsRequest>) -> Result<Response<GetMetricsResponse>, Status> {
+    async fn get_metrics(&self, request: Request<GetMetricsRequest>) -> Result<Response<GetMetricsResponse>, Status> {
+        let token = request.metadata().get("authorization").ok_or_else(|| Status::unauthenticated("Missing token"))?;
+        let user_id = self.authenticate(token.to_str().map_err(|e| Status::invalid_argument("Invalid token format"))?).await?;
+        self.authorize(&user_id, "GetMetrics").await?;
+
         Ok(Response::new(GetMetricsResponse {
             service_name: "block_service".to_string(),
             requests_total: self.requests_total.get() as u64,
@@ -262,6 +352,10 @@ impl Block for BlockServiceImpl {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::INFO)
+        .init();
+
     let addr = "[::1]:50054".parse().unwrap();
     let block_service = BlockServiceImpl::new().await;
 
