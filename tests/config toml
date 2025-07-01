@@ -15,10 +15,21 @@ overlay_service_port = 50056
 validation_service_port = 50057
 mining_service_port = 50058
 metrics_port = 50059
+auth_service_port = 50060
 
 [sharding]
 shard_id = 0
 shard_count = 4
+nodes = [
+    "node1.example.com:50051",
+    "node2.example.com:50051",
+    "node3.example.com:50051",
+    "node4.example.com:50051"
+]
+
+[auth]
+secret_key = "secret" # Replace with secure key in production
+log_level = "INFO"
 
 [test_cases]
 [test_cases.ping]
@@ -104,3 +115,6 @@ miner_id = "miner1"
 
 [test_cases.get_metrics]
 service_name = "validation_service"
+
+[test_cases.authenticate]
+token = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1c2VyMSIsInJvbGUiOiJjbGllbnQiLCJleHAiOjE5MjA2NzY1MDl9.8X8z7z3Y8Qz5z5z7z3Y8Qz5z5z7z3Y8Qz5z5z7z3Y8Q" # Placeholder JWT
