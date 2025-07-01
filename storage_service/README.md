@@ -1,6 +1,6 @@
 # Storage Service
 
-This service implements a gRPC server for UTXO storage in the Galaxy project, using Tiger Beetle (currently a HashMap placeholder). It supports batch UTXO operations for high throughput.
+This service implements a gRPC server for UTXO storage in the Galaxy project, using Tiger Beetle with connection keep-alive and batching for high throughput (currently a HashMap fallback for testing).
 
 ## Running
 ```bash
