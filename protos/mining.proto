@@ -3,44 +3,46 @@ package mining;
 
 service Mining {
     rpc GetMiningWork (GetMiningWorkRequest) returns (GetMiningWorkResponse);
-    rpc SubmitMinedBlock (SubmitMinedBlockRequest) returns (SubmitMinedBlockResponse);
+    rpc SubmitMinedBlock (SubmitMinedBlockRequest) returns (SubmitMinedBlockResponse) {
+        option (google.api.http) = { buffer_size_hint: 4000000000 }; // 4GB for large blocks
+    };
     rpc BatchGetMiningWork (BatchGetMiningWorkRequest) returns (BatchGetMiningWorkResponse);
     rpc StreamMiningWork (stream StreamMiningWorkRequest) returns (stream StreamMiningWorkResponse);
     rpc GetMetrics (GetMetricsRequest) returns (GetMetricsResponse);
 }
 
 message GetMiningWorkRequest {
-    string miner_id = 1; // Unique identifier for the miner
+    string miner_id = 1;
 }
 message GetMiningWorkResponse {
-    string block_template = 1; // Hex-encoded block template
-    uint32 target_difficulty = 2; // Mining difficulty target
-    string error = 3; // Error message if work generation fails
+    string block_template = 1;
+    uint32 target_difficulty = 2;
+    string error = 3;
 }
 message SubmitMinedBlockRequest {
-    string block_hex = 1; // Hex-encoded mined block
+    string block_hex = 1;
 }
 message SubmitMinedBlockResponse {
     bool success = 1;
-    string error = 2; // Error message if submission fails
+    string error = 2;
 }
 message BatchGetMiningWorkRequest {
-    repeated string miner_ids = 1; // List of miner IDs
+    repeated string miner_ids = 1;
 }
 message BatchGetMiningWorkResponse {
-    repeated GetMiningWorkResponse results = 1; // Results for each miner
+    repeated GetMiningWorkResponse results = 1;
 }
 message StreamMiningWorkRequest {
-    string miner_id = 1; // Miner ID to monitor
+    string miner_id = 1;
 }
 message StreamMiningWorkResponse {
-    string block_template = 1; // Hex-encoded block template
-    uint32 target_difficulty = 2; // Mining difficulty target
-    string error = 3; // Error message if work generation fails
+    string block_template = 1;
+    uint32 target_difficulty = 2;
+    string error = 3;
 }
 message GetMetricsRequest {}
 message GetMetricsResponse {
-    uint64 work_requests = 1; // Total mining work requests
-    double avg_latency_ms = 2; // Average work generation latency
-    uint64 blocks_submitted = 3; // Total blocks submitted
+    uint64 work_requests = 1;
+    double avg_latency_ms = 2;
+    uint64 blocks_submitted = 3;
 }
