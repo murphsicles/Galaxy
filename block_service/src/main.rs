@@ -1,6 +1,6 @@
 use tonic::{transport::{Server, Channel}, Request, Response, Status};
 use block::block_server::{Block, BlockServer};
-use block::{ValidateBlockRequest, ValidateBlockResponse, AssembleBlockRequest, AssembleBlockResponse};
+use block::{ValidateBlockRequest, ValidateBlockResponse, AssembleBlockRequest, AssembleBlockResponse, IndexBlockRequest, IndexBlockResponse};
 use transaction::transaction_client::TransactionClient;
 use transaction::ValidateTxRequest;
 use storage::storage_client::StorageClient;
@@ -9,6 +9,8 @@ use consensus::consensus_client::ConsensusClient;
 use consensus::ValidateBlockConsensusRequest;
 use auth::auth_client::AuthClient;
 use auth::{AuthenticateRequest, AuthorizeRequest};
+use index::index_client::IndexClient;
+use index::IndexBlockRequest as IndexIndexBlockRequest;
 use metrics::metrics_client::MetricsClient;
 use metrics::{GetMetricsRequest, GetMetricsResponse};
 use sv::block::Block;
@@ -28,6 +30,7 @@ tonic::include_proto!("transaction");
 tonic::include_proto!("storage");
 tonic::include_proto!("consensus");
 tonic::include_proto!("auth");
+tonic::include_proto!("index");
 tonic::include_proto!("metrics");
 
 #[derive(Debug)]
@@ -36,6 +39,7 @@ struct BlockServiceImpl {
     storage_client: StorageClient<Channel>,
     consensus_client: ConsensusClient<Channel>,
     auth_client: AuthClient<Channel>,
+    index_client: IndexClient<Channel>,
     registry: Arc<Registry>,
     requests_total: Counter,
     latency_ms: Gauge,
@@ -61,6 +65,9 @@ impl BlockServiceImpl {
         let auth_client = AuthClient::connect("http://[::1]:50060")
             .await
             .expect("Failed to connect to auth_service");
+        let index_client = IndexClient::connect("http://[::1]:50062")
+            .await
+            .expect("Failed to connect to index_service");
         let registry = Arc::new(Registry::new());
         let requests_total = Counter::new("block_requests_total", "Total block requests").unwrap();
         let latency_ms = Gauge::new("block_latency_ms", "Average block processing latency").unwrap();
@@ -74,6 +81,7 @@ impl BlockServiceImpl {
             storage_client,
             consensus_client,
             auth_client,
+            index_client,
             registry,
             requests_total,
             latency_ms,
@@ -241,6 +249,25 @@ impl Block for BlockServiceImpl {
                     error: format!("UTXO update failed: {}", e),
                 }));
             }
+
+            let mut index_client = self.index_client.clone();
+            let index_request = IndexIndexBlockRequest { block_hex: req.block_hex.clone() };
+            let index_response = index_client
+                .index_block(index_request)
+                .await
+                .map_err(|e| {
+                    warn!("Block indexing failed: {}", e);
+                    Status::internal(format!("Block indexing failed: {}", e))
+                })?
+                .into_inner();
+            if !index_response.success {
+                self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
+                warn!("Block indexing failed: {}", index_response.error);
+                return Ok(Response::new(ValidateBlockResponse {
+                    is_valid: false,
+                    error: index_response.error,
+                }));
+            }
         }
 
         self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
@@ -333,6 +360,35 @@ impl Block for BlockServiceImpl {
         Ok(Response::new(AssembleBlockResponse {
             block_hex: hex::encode(serialize(&block)),
             error: "".to_string(),
+        }))
+    }
+
+    async fn index_block(&self, request: Request<IndexBlockRequest>) -> Result<Response<IndexBlockResponse>, Status> {
+        let token = request.metadata().get("authorization").ok_or_else(|| Status::unauthenticated("Missing token"))?;
+        let user_id = self.authenticate(token.to_str().map_err(|e| Status::invalid_argument("Invalid token format"))?).await?;
+        self.authorize(&user_id, "IndexBlock").await?;
+        self.rate_limiter.until_ready().await;
+
+        self.requests_total.inc();
+        let start = Instant::now();
+        info!("Indexing block: {}", request.get_ref().block_hex);
+        let req = request.into_inner();
+        let mut index_client = self.index_client.clone();
+        let index_request = IndexIndexBlockRequest { block_hex: req.block_hex.clone() };
+        let index_response = index_client
+            .index_block(index_request)
+            .await
+            .map_err(|e| {
+                warn!("Block indexing failed: {}", e);
+                Status::internal(format!("Block indexing failed: {}", e))
+            })?
+            .into_inner();
+
+        self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
+        info!("Block indexing {}: {}", if index_response.success { "succeeded" } else { "failed" }, req.block_hex);
+        Ok(Response::new(IndexBlockResponse {
+            success: index_response.success,
+            error: index_response.error,
         }))
     }
 
