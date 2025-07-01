@@ -1,0 +1,53 @@
+syntax = "proto3";
+package index;
+
+service Index {
+    rpc IndexTransaction (IndexTransactionRequest) returns (IndexTransactionResponse);
+    rpc QueryTransaction (QueryTransactionRequest) returns (QueryTransactionResponse);
+    rpc BatchIndexTransactions (BatchIndexTransactionsRequest) returns (BatchIndexTransactionsResponse);
+    rpc IndexBlock (IndexBlockRequest) returns (IndexBlockResponse);
+    rpc QueryBlock (QueryBlockRequest) returns (QueryBlockResponse);
+    rpc BatchIndexBlocks (BatchIndexBlocksRequest) returns (BatchIndexBlocksResponse);
+}
+
+message IndexTransactionRequest {
+    string tx_hex = 1; // Hex-encoded transaction
+}
+message IndexTransactionResponse {
+    bool success = 1;
+    string error = 2; // Error message if indexing fails
+}
+message QueryTransactionRequest {
+    string txid = 1; // Transaction ID (hex)
+}
+message QueryTransactionResponse {
+    string tx_hex = 1; // Hex-encoded transaction
+    string error = 2; // Error message if query fails
+}
+message BatchIndexTransactionsRequest {
+    repeated string tx_hexes = 1; // List of hex-encoded transactions
+}
+message BatchIndexTransactionsResponse {
+    repeated IndexTransactionResponse results = 1; // Results for each transaction
+}
+message IndexBlockRequest {
+    string block_hex = 1; // Hex-encoded block
+}
+message IndexBlockResponse {
+    bool success = 1;
+    string error = 2; // Error message if indexing fails
+}
+message QueryBlockRequest {
+    string block_hash = 1; // Block hash (hex)
+    uint32 block_height = 2; // Optional block height
+}
+message QueryBlockResponse {
+    string block_hex = 1; // Hex-encoded block
+    string error = 2; // Error message if query fails
+}
+message BatchIndexBlocksRequest {
+    repeated string block_hexes = 1; // List of hex-encoded blocks
+}
+message BatchIndexBlocksResponse {
+    repeated IndexBlockResponse results = 1; // Results for each block
+}
