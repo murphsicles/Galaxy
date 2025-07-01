@@ -7,6 +7,8 @@ use consensus::{
 };
 use auth::auth_client::AuthClient;
 use auth::{AuthenticateRequest, AuthorizeRequest};
+use alert::alert_client::AlertClient;
+use alert::SendAlertRequest;
 use metrics::metrics_client::MetricsClient;
 use metrics::{GetMetricsRequest, GetMetricsResponse};
 use sv::block::Block;
@@ -23,11 +25,13 @@ use toml;
 
 tonic::include_proto!("consensus");
 tonic::include_proto!("auth");
+tonic::include_proto!("alert");
 tonic::include_proto!("metrics");
 
 #[derive(Debug)]
 struct ConsensusServiceImpl {
     auth_client: AuthClient<Channel>,
+    alert_client: AlertClient<Channel>,
     registry: Arc<Registry>,
     requests_total: Counter,
     latency_ms: Gauge,
@@ -44,6 +48,9 @@ impl ConsensusServiceImpl {
         let auth_client = AuthClient::connect("http://[::1]:50060")
             .await
             .expect("Failed to connect to auth_service");
+        let alert_client = AlertClient::connect("http://[::1]:50061")
+            .await
+            .expect("Failed to connect to alert_service");
         let registry = Arc::new(Registry::new());
         let requests_total = Counter::new("consensus_requests_total", "Total consensus requests").unwrap();
         let latency_ms = Gauge::new("consensus_latency_ms", "Average consensus request latency").unwrap();
@@ -54,6 +61,7 @@ impl ConsensusServiceImpl {
 
         ConsensusServiceImpl {
             auth_client,
+            alert_client,
             registry,
             requests_total,
             latency_ms,
@@ -92,10 +100,32 @@ impl ConsensusServiceImpl {
         Ok(())
     }
 
+    async fn send_alert(&self, event_type: &str, message: &str, severity: u32) -> Result<(), Status> {
+        let alert_request = SendAlertRequest {
+            event_type: event_type.to_string(),
+            message: message.to_string(),
+            severity,
+        };
+        let alert_response = self.alert_client
+            .send_alert(alert_request)
+            .await
+            .map_err(|e| {
+                warn!("Failed to send alert: {}", e);
+                Status::internal(format!("Failed to send alert: {}", e))
+            })?
+            .into_inner();
+        if !alert_response.success {
+            warn!("Alert sending failed: {}", alert_response.error);
+            return Err(Status::internal(alert_response.error));
+        }
+        Ok(())
+    }
+
     async fn validate_block_rules(&self, block: &Block) -> Result<bool, String> {
         let block_size = serialize(block).len() as u64;
         if block_size > 4_000_000_000 {
             warn!("Block size {} exceeds 4GB limit", block_size);
+            let _ = self.send_alert("block_size_exceeded", &format!("Block size {} exceeds 4GB limit", block_size), 3).await;
             return Err(format!("Block size {} exceeds 4GB limit", block_size));
         }
 
@@ -108,16 +138,19 @@ impl ConsensusServiceImpl {
         let tx_size = serialize(tx).len() as u64;
         if tx_size > 1_000_000_000 {
             warn!("Transaction size {} exceeds limit", tx_size);
+            let _ = self.send_alert("tx_size_exceeded", &format!("Transaction size {} exceeds limit", tx_size), 3).await;
             return Err(format!("Transaction size {} exceeds limit", tx_size));
         }
 
         for output in &tx.outputs {
             if output.script_pubkey.is_op_return() && output.script_pubkey.len() > 100_000 {
                 warn!("OP_RETURN data exceeds 100KB limit");
+                let _ = self.send_alert("op_return_size_exceeded", "OP_RETURN data exceeds 100KB limit", 3).await;
                 return Err("OP_RETURN data exceeds 100KB limit".to_string());
             }
             if !output.script_pubkey.is_standard() {
                 warn!("Non-standard script detected");
+                let _ = self.send_alert("non_standard_script", "Non-standard script detected", 2).await;
                 return Err("Non-standard script".to_string());
             }
         }
@@ -142,11 +175,13 @@ impl Consensus for ConsensusServiceImpl {
         let block_bytes = hex::decode(&req.block_hex)
             .map_err(|e| {
                 warn!("Invalid block_hex: {}", e);
+                let _ = self.send_alert("block_invalid_format", &format!("Invalid block_hex: {}", e), 2).await;
                 Status::invalid_argument(format!("Invalid block_hex: {}", e))
             })?;
         let block: Block = deserialize(&block_bytes)
             .map_err(|e| {
                 warn!("Invalid block: {}", e);
+                let _ = self.send_alert("block_invalid_format", &format!("Invalid block: {}", e), 2).await;
                 Status::invalid_argument(format!("Invalid block: {}", e))
             })?;
 
@@ -183,11 +218,13 @@ impl Consensus for ConsensusServiceImpl {
         let tx_bytes = hex::decode(&req.tx_hex)
             .map_err(|e| {
                 warn!("Invalid tx_hex: {}", e);
+                let _ = self.send_alert("tx_invalid_format", &format!("Invalid tx_hex: {}", e), 2).await;
                 Status::invalid_argument(format!("Invalid tx_hex: {}", e))
             })?;
         let tx: Transaction = deserialize(&tx_bytes)
             .map_err(|e| {
                 warn!("Invalid transaction: {}", e);
+                let _ = self.send_alert("tx_invalid_format", &format!("Invalid transaction: {}", e), 2).await;
                 Status::invalid_argument(format!("Invalid transaction: {}", e))
             })?;
 
