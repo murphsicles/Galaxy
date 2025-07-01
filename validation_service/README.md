@@ -1,20 +1,20 @@
 # Validation Service
 
-This service implements a gRPC server for SPV proof generation and verification in the Galaxy project, using rust-sv. It integrates with block_service and storage_service, supporting full merkle path, difficulty validation, streaming, caching, and metrics for continuous proof generation for BSV’s large blocks.
+This service implements a gRPC server for SPV proof generation and verification in the Galaxy project, using rust-sv. It integrates with block_service, storage_service, and auth_service, supporting full merkle path, difficulty validation, streaming, caching, rate limiting, logging, sharding, and metrics for continuous proof generation for BSV’s large blocks.
 
 ## Running
 ```bash
 cd validation_service
 cargo run
 ```
-Note: Ensure block_service (localhost:50054) and storage_service (localhost:50053) are running.
+Note: Ensure block_service (localhost:50054), storage_service (localhost:50053), and auth_service (localhost:50060) are running.
 
 ## Testing
-Use `grpcurl` to test the available methods. Note: Methods require valid transaction IDs and block headers. Streaming requires a client capable of handling bidirectional streams.
+Use `grpcurl` to test the available methods. Note: Methods require valid transaction IDs, block headers, and JWT tokens in the `authorization` header. Streaming requires a client capable of handling bidirectional streams.
 
 ### GenerateSPVProof
 ```bash
-grpcurl -plaintext -d '{"txid": "abc123"}' localhost:50057 validation.Validation/GenerateSPVProof
+grpcurl -plaintext -H "authorization: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1c2VyMSIsInJvbGUiOiJjbGllbnQiLCJleHAiOjE5MjA2NzY1MDl9.8X8z7z3Y8Qz5z5z7z3Y8Qz5z5z7z3Y8Qz5z5z7z3Y8Q" -d '{"txid": "abc123"}' localhost:50057 validation.Validation/GenerateSPVProof
 ```
 Expected response (example):
 ```json
@@ -28,7 +28,7 @@ Expected response (example):
 
 ### VerifySPVProof
 ```bash
-grpcurl -plaintext -d '{"txid": "abc123", "merkle_path": "...", "block_headers": ["..."]}' localhost:50057 validation.Validation/VerifySPVProof
+grpcurl -plaintext -H "authorization: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1c2VyMSIsInJvbGUiOiJjbGllbnQiLCJleHAiOjE5MjA2NzY1MDl9.8X8z7z3Y8Qz5z5z7z3Y8Qz5z5z7z3Y8Qz5z5z7z3Y8Q" -d '{"txid": "abc123", "merkle_path": "...", "block_headers": ["..."]}' localhost:50057 validation.Validation/VerifySPVProof
 ```
 Expected response (example):
 ```json
@@ -40,7 +40,7 @@ Expected response (example):
 
 ### BatchGenerateSPVProof
 ```bash
-grpcurl -plaintext -d '{"txids": ["abc123", "def456"]}' localhost:50057 validation.Validation/BatchGenerateSPVProof
+grpcurl -plaintext -H "authorization: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1c2VyMSIsInJvbGUiOiJjbGllbnQiLCJleHAiOjE5MjA2NzY1MDl9.8X8z7z3Y8Qz5z5z7z3Y8Qz5z5z7z3Y8Qz5z5z7z3Y8Q" -d '{"txids": ["abc123", "def456"]}' localhost:50057 validation.Validation/BatchGenerateSPVProof
 ```
 Expected response (example):
 ```json
@@ -65,7 +65,7 @@ Expected response (example):
 ### StreamSPVProofs
 ```bash
 # Use a gRPC client supporting streaming
-grpcurl -plaintext -d '{"txid": "abc123"}' localhost:50057 validation.Validation/StreamSPVProofs
+grpcurl -plaintext -H "authorization: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1c2VyMSIsInJvbGUiOiJjbGllbnQiLCJleHAiOjE5MjA2NzY1MDl9.8X8z7z3Y8Qz5z5z7z3Y8Qz5z5z7z3Y8Qz5z5z7z3Y8Q" -d '{"txid": "abc123"}' localhost:50057 validation.Validation/StreamSPVProofs
 ```
 Expected response (example, streamed):
 ```json
@@ -80,7 +80,7 @@ Expected response (example, streamed):
 
 ### GetMetrics
 ```bash
-grpcurl -plaintext -d '{}' localhost:50057 validation.Validation/GetMetrics
+grpcurl -plaintext -H "authorization: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1c2VyMSIsInJvbGUiOiJjbGllbnQiLCJleHAiOjE5MjA2NzY1MDl9.8X8z7z3Y8Qz5z5z7z3Y8Qz5z5z7z3Y8Qz5z5z7z3Y8Q" -d '{}' localhost:50057 validation.Validation/GetMetrics
 ```
 Expected response (example):
 ```json
