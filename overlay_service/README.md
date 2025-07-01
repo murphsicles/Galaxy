@@ -1,6 +1,6 @@
 # Overlay Service
 
-This service implements a gRPC server for managing private blockchains (overlays) on BSV in the Galaxy project, using rust-sv. It integrates with transaction_service, block_service, and network_service, supporting block assembly for overlays.
+This service implements a gRPC server for managing private blockchains (overlays) on BSV in the Galaxy project, using rust-sv. It integrates with transaction_service, block_service, and network_service, supporting block assembly, persistent storage with sled, streaming, and metrics.
 
 ## Running
 ```bash
@@ -43,8 +43,8 @@ grpcurl -plaintext -d '{"overlay_id": "test_overlay", "block_height": 0}' localh
 Expected response (example):
 ```json
 {
-  "block_hex": "",
-  "error": "Block height out of range"
+  "block_hex": "...",
+  "error": ""
 }
 ```
 
@@ -65,5 +65,32 @@ Expected response (example):
       "error": ""
     }
   ]
+}
+```
+
+### StreamOverlayTransactions
+```bash
+# Use a gRPC client supporting streaming
+grpcurl -plaintext -d '{"overlay_id": "test_overlay", "tx_hex": "01000000010000000000000000000000000000000000000000000000000000000000000000ffffffff0100ffffffff0100ffffffff"}' localhost:50056 overlay.Overlay/StreamOverlayTransactions
+```
+Expected response (example, streamed):
+```json
+{
+  "success": true,
+  "tx_hex": "...",
+  "error": ""
+}
+```
+
+### GetMetrics
+```bash
+grpcurl -plaintext -d '{}' localhost:50056 overlay.Overlay/GetMetrics
+```
+Expected response (example):
+```json
+{
+  "tx_requests": 200,
+  "avg_latency_ms": 15.0,
+  "block_count": 10
 }
 ```
