@@ -4,6 +4,8 @@ use storage::{
     QueryUtxoRequest, QueryUtxoResponse, AddUtxoRequest, AddUtxoResponse,
     RemoveUtxoRequest, RemoveUtxoResponse, BatchAddUtxoRequest, BatchAddUtxoResponse
 };
+use auth::auth_client::AuthClient;
+use auth::{AuthenticateRequest, AuthorizeRequest};
 use metrics::metrics_client::MetricsClient;
 use metrics::{GetMetricsRequest, GetMetricsResponse};
 use tigerbeetle::client::{Client, Config};
@@ -12,18 +14,26 @@ use tokio::sync::Mutex;
 use std::sync::Arc;
 use std::time::Instant;
 use prometheus::{Counter, Gauge, Registry};
+use governor::{Quota, RateLimiter, Jitter};
+use std::num::NonZeroU32;
+use tracing::{info, warn};
+use shared::ShardManager;
 use toml;
 
 tonic::include_proto!("storage");
+tonic::include_proto!("auth");
 tonic::include_proto!("metrics");
 
 #[derive(Debug)]
 struct StorageServiceImpl {
     utxo_db: Arc<Mutex<HashMap<(String, u32), (String, u64)>>>, // Fallback for testing
     tb_client: Option<Client>, // Tiger Beetle client
+    auth_client: AuthClient<Channel>,
     registry: Arc<Registry>,
     requests_total: Counter,
     latency_ms: Gauge,
+    rate_limiter: Arc<RateLimiter<String, governor::state::direct::NotKeyed, governor::clock::DefaultClock>>,
+    shard_manager: Arc<ShardManager>,
 }
 
 impl StorageServiceImpl {
@@ -45,52 +55,97 @@ impl StorageServiceImpl {
         .await
         .ok();
         let utxo_db = Arc::new(Mutex::new(HashMap::new()));
+        let auth_client = AuthClient::connect("http://[::1]:50060")
+            .await
+            .expect("Failed to connect to auth_service");
         let registry = Arc::new(Registry::new());
         let requests_total = Counter::new("storage_requests_total", "Total storage requests").unwrap();
         let latency_ms = Gauge::new("storage_latency_ms", "Average storage request latency").unwrap();
         registry.register(Box::new(requests_total.clone())).unwrap();
         registry.register(Box::new(latency_ms.clone())).unwrap();
+        let rate_limiter = Arc::new(RateLimiter::direct(Quota::per_second(NonZeroU32::new(1000).unwrap())));
+        let shard_manager = Arc::new(ShardManager::new());
 
         StorageServiceImpl {
             utxo_db,
             tb_client,
+            auth_client,
             registry,
             requests_total,
             latency_ms,
+            rate_limiter,
+            shard_manager,
         }
     }
 
+    async fn authenticate(&self, token: &str) -> Result<String, Status> {
+        let auth_request = AuthenticateRequest { token: token.to_string() };
+        let auth_response = self.auth_client
+            .authenticate(auth_request)
+            .await
+            .map_err(|e| Status::unauthenticated(format!("Authentication failed: {}", e)))?
+            .into_inner();
+        if !auth_response.success {
+            return Err(Status::unauthenticated(auth_response.error));
+        }
+        Ok(auth_response.user_id)
+    }
+
+    async fn authorize(&self, user_id: &str, method: &str) -> Result<(), Status> {
+        let auth_request = AuthorizeRequest {
+            user_id: user_id.to_string(),
+            service: "storage_service".to_string(),
+            method: method.to_string(),
+        };
+        let auth_response = self.auth_client
+            .authorize(auth_request)
+            .await
+            .map_err(|e| Status::permission_denied(format!("Authorization failed: {}", e)))?
+            .into_inner();
+        if !auth_response.allowed {
+            return Err(Status::permission_denied(auth_response.error));
+        }
+        Ok(())
+    }
+
     async fn query_utxo_tb(&self, txid: &str, vout: u32) -> Result<Option<(String, u64)>, String> {
-        // Placeholder for Tiger Beetle query
-        Ok(None)
+        info!("Querying UTXO in Tiger Beetle: {}:{}", txid, vout);
+        Ok(None) // Placeholder for real Tiger Beetle query
     }
 
     async fn add_utxo_tb(&self, txid: &str, vout: u32, script_pubkey: &str, amount: u64) -> Result<(), String> {
-        // Placeholder for Tiger Beetle write
-        Ok(())
+        info!("Adding UTXO to Tiger Beetle: {}:{}", txid, vout);
+        Ok(()) // Placeholder for real Tiger Beetle write
     }
 
     async fn remove_utxo_tb(&self, txid: &str, vout: u32) -> Result<(), String> {
-        // Placeholder for Tiger Beetle delete
-        Ok(())
+        info!("Removing UTXO from Tiger Beetle: {}:{}", txid, vout);
+        Ok(()) // Placeholder for real Tiger Beetle delete
     }
 
     async fn batch_add_utxo_tb(&self, utxos: Vec<(String, u32, String, u64)>) -> Result<Vec<bool>, String> {
-        // Placeholder for Tiger Beetle batch write
-        Ok(vec![true; utxos.len()])
+        info!("Batch adding {} UTXOs to Tiger Beetle", utxos.len());
+        Ok(vec![true; utxos.len()]) // Placeholder for real Tiger Beetle batch write
     }
 }
 
 #[tonic::async_trait]
 impl Storage for StorageServiceImpl {
     async fn query_utxo(&self, request: Request<QueryUtxoRequest>) -> Result<Response<QueryUtxoResponse>, Status> {
+        let token = request.metadata().get("authorization").ok_or_else(|| Status::unauthenticated("Missing token"))?;
+        let user_id = self.authenticate(token.to_str().map_err(|e| Status::invalid_argument("Invalid token format"))?).await?;
+        self.authorize(&user_id, "QueryUtxo").await?;
+        self.rate_limiter.until_ready().await;
+
         self.requests_total.inc();
         let start = Instant::now();
+        info!("Querying UTXO: {}:{}", request.get_ref().txid, request.get_ref().vout);
         let req = request.into_inner();
         if let Some(tb_client) = &self.tb_client {
             match self.query_utxo_tb(&req.txid, req.vout).await {
                 Ok(Some((script_pubkey, amount))) => {
                     self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
+                    info!("Found UTXO: {}:{}", req.txid, req.vout);
                     return Ok(Response::new(QueryUtxoResponse {
                         exists: true,
                         script_pubkey,
@@ -100,6 +155,7 @@ impl Storage for StorageServiceImpl {
                 }
                 Ok(None) => {
                     self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
+                    warn!("UTXO not found: {}:{}", req.txid, req.vout);
                     return Ok(Response::new(QueryUtxoResponse {
                         exists: false,
                         script_pubkey: "".to_string(),
@@ -109,6 +165,7 @@ impl Storage for StorageServiceImpl {
                 }
                 Err(e) => {
                     self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
+                    warn!("UTXO query failed: {}", e);
                     return Ok(Response::new(QueryUtxoResponse {
                         exists: false,
                         script_pubkey: "".to_string(),
@@ -137,22 +194,31 @@ impl Storage for StorageServiceImpl {
             }
         };
         self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
+        info!("Queried UTXO {}: {}:{}", if result.exists { "found" } else { "not found" }, key.0, key.1);
         Ok(Response::new(result))
     }
 
     async fn add_utxo(&self, request: Request<AddUtxoRequest>) -> Result<Response<AddUtxoResponse>, Status> {
+        let token = request.metadata().get("authorization").ok_or_else(|| Status::unauthenticated("Missing token"))?;
+        let user_id = self.authenticate(token.to_str().map_err(|e| Status::invalid_argument("Invalid token format"))?).await?;
+        self.authorize(&user_id, "AddUtxo").await?;
+        self.rate_limiter.until_ready().await;
+
         self.requests_total.inc();
         let start = Instant::now();
+        info!("Adding UTXO: {}:{}", request.get_ref().txid, request.get_ref().vout);
         let req = request.into_inner();
         if let Some(tb_client) = &self.tb_client {
             if let Err(e) = self.add_utxo_tb(&req.txid, req.vout, &req.script_pubkey, req.amount).await {
                 self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
+                warn!("Failed to add UTXO: {}", e);
                 return Ok(Response::new(AddUtxoResponse {
                     success: false,
                     error: e,
                 }));
             }
             self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
+            info!("Successfully added UTXO to Tiger Beetle: {}:{}", req.txid, req.vout);
             return Ok(Response::new(AddUtxoResponse {
                 success: true,
                 error: "".to_string(),
@@ -163,6 +229,7 @@ impl Storage for StorageServiceImpl {
         let key = (req.txid, req.vout);
         utxo_db.insert(key, (req.script_pubkey, req.amount));
         self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
+        info!("Successfully added UTXO to HashMap: {}:{}", key.0, key.1);
         Ok(Response::new(AddUtxoResponse {
             success: true,
             error: "".to_string(),
@@ -170,18 +237,26 @@ impl Storage for StorageServiceImpl {
     }
 
     async fn remove_utxo(&self, request: Request<RemoveUtxoRequest>) -> Result<Response<RemoveUtxoResponse>, Status> {
+        let token = request.metadata().get("authorization").ok_or_else(|| Status::unauthenticated("Missing token"))?;
+        let user_id = self.authenticate(token.to_str().map_err(|e| Status::invalid_argument("Invalid token format"))?).await?;
+        self.authorize(&user_id, "RemoveUtxo").await?;
+        self.rate_limiter.until_ready().await;
+
         self.requests_total.inc();
         let start = Instant::now();
+        info!("Removing UTXO: {}:{}", request.get_ref().txid, request.get_ref().vout);
         let req = request.into_inner();
         if let Some(tb_client) = &self.tb_client {
             if let Err(e) = self.remove_utxo_tb(&req.txid, req.vout).await {
                 self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
+                warn!("Failed to remove UTXO: {}", e);
                 return Ok(Response::new(RemoveUtxoResponse {
                     success: false,
                     error: e,
                 }));
             }
             self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
+            info!("Successfully removed UTXO from Tiger Beetle: {}:{}", req.txid, req.vout);
             return Ok(Response::new(RemoveUtxoResponse {
                 success: true,
                 error: "".to_string(),
@@ -192,6 +267,7 @@ impl Storage for StorageServiceImpl {
         let key = (req.txid, req.vout);
         let success = utxo_db.remove(&key).is_some();
         self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
+        info!("Remove UTXO {}: {}:{}", if success { "succeeded" } else { "failed" }, key.0, key.1);
         Ok(Response::new(RemoveUtxoResponse {
             success,
             error: if success { "".to_string() } else { "UTXO not found".to_string() },
@@ -199,8 +275,14 @@ impl Storage for StorageServiceImpl {
     }
 
     async fn batch_add_utxo(&self, request: Request<BatchAddUtxoRequest>) -> Result<Response<BatchAddUtxoResponse>, Status> {
+        let token = request.metadata().get("authorization").ok_or_else(|| Status::unauthenticated("Missing token"))?;
+        let user_id = self.authenticate(token.to_str().map_err(|e| Status::invalid_argument("Invalid token format"))?).await?;
+        self.authorize(&user_id, "BatchAddUtxo").await?;
+        self.rate_limiter.until_ready().await;
+
         self.requests_total.inc();
         let start = Instant::now();
+        info!("Batch adding {} UTXOs", request.get_ref().utxos.len());
         let req = request.into_inner();
         if let Some(tb_client) = &self.tb_client {
             let utxos = req
@@ -211,8 +293,12 @@ impl Storage for StorageServiceImpl {
             let results = self
                 .batch_add_utxo_tb(utxos)
                 .await
-                .map_err(|e| Status::internal(format!("Batch add failed: {}", e)))?;
+                .map_err(|e| {
+                    warn!("Batch add failed: {}", e);
+                    Status::internal(format!("Batch add failed: {}", e))
+                })?;
             self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
+            info!("Successfully batch added {} UTXOs to Tiger Beetle", results.len());
             return Ok(Response::new(BatchAddUtxoResponse {
                 results: results
                     .into_iter()
@@ -235,10 +321,15 @@ impl Storage for StorageServiceImpl {
             });
         }
         self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
+        info!("Successfully batch added {} UTXOs to HashMap", results.len());
         Ok(Response::new(BatchAddUtxoResponse { results }))
     }
 
-    async fn get_metrics(&self, _request: Request<GetMetricsRequest>) -> Result<Response<GetMetricsResponse>, Status> {
+    async fn get_metrics(&self, request: Request<GetMetricsRequest>) -> Result<Response<GetMetricsResponse>, Status> {
+        let token = request.metadata().get("authorization").ok_or_else(|| Status::unauthenticated("Missing token"))?;
+        let user_id = self.authenticate(token.to_str().map_err(|e| Status::invalid_argument("Invalid token format"))?).await?;
+        self.authorize(&user_id, "GetMetrics").await?;
+
         Ok(Response::new(GetMetricsResponse {
             service_name: "storage_service".to_string(),
             requests_total: self.requests_total.get() as u64,
@@ -250,6 +341,10 @@ impl Storage for StorageServiceImpl {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::INFO)
+        .init();
+
     let addr = "[::1]:50053".parse().unwrap();
     let storage_service = StorageServiceImpl::new().await;
 
@@ -261,4 +356,4 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await?;
 
     Ok(())
-}
+        }
