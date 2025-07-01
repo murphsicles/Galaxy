@@ -5,6 +5,8 @@ use consensus::{
     ValidateTxConsensusRequest, ValidateTxConsensusResponse,
     BatchValidateTxConsensusRequest, BatchValidateTxConsensusResponse
 };
+use auth::auth_client::AuthClient;
+use auth::{AuthenticateRequest, AuthorizeRequest};
 use metrics::metrics_client::MetricsClient;
 use metrics::{GetMetricsRequest, GetMetricsResponse};
 use sv::block::Block;
@@ -13,16 +15,24 @@ use sv::util::{deserialize, serialize};
 use hex;
 use std::time::Instant;
 use prometheus::{Counter, Gauge, Registry};
+use governor::{Quota, RateLimiter, Jitter};
+use std::num::NonZeroU32;
+use tracing::{info, warn};
+use shared::ShardManager;
 use toml;
 
 tonic::include_proto!("consensus");
+tonic::include_proto!("auth");
 tonic::include_proto!("metrics");
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct ConsensusServiceImpl {
+    auth_client: AuthClient<Channel>,
     registry: Arc<Registry>,
     requests_total: Counter,
     latency_ms: Gauge,
+    rate_limiter: Arc<RateLimiter<String, governor::state::direct::NotKeyed, governor::clock::DefaultClock>>,
+    shard_manager: Arc<ShardManager>,
 }
 
 impl ConsensusServiceImpl {
@@ -31,44 +41,88 @@ impl ConsensusServiceImpl {
         let config: toml::Value = toml::from_str(config_str).expect("Failed to parse config");
         let shard_id = config["sharding"]["shard_id"].as_integer().unwrap_or(0) as u32;
 
+        let auth_client = AuthClient::connect("http://[::1]:50060")
+            .await
+            .expect("Failed to connect to auth_service");
         let registry = Arc::new(Registry::new());
         let requests_total = Counter::new("consensus_requests_total", "Total consensus requests").unwrap();
         let latency_ms = Gauge::new("consensus_latency_ms", "Average consensus request latency").unwrap();
         registry.register(Box::new(requests_total.clone())).unwrap();
         registry.register(Box::new(latency_ms.clone())).unwrap();
+        let rate_limiter = Arc::new(RateLimiter::direct(Quota::per_second(NonZeroU32::new(1000).unwrap())));
+        let shard_manager = Arc::new(ShardManager::new());
 
         ConsensusServiceImpl {
+            auth_client,
             registry,
             requests_total,
             latency_ms,
+            rate_limiter,
+            shard_manager,
         }
+    }
+
+    async fn authenticate(&self, token: &str) -> Result<String, Status> {
+        let auth_request = AuthenticateRequest { token: token.to_string() };
+        let auth_response = self.auth_client
+            .authenticate(auth_request)
+            .await
+            .map_err(|e| Status::unauthenticated(format!("Authentication failed: {}", e)))?
+            .into_inner();
+        if !auth_response.success {
+            return Err(Status::unauthenticated(auth_response.error));
+        }
+        Ok(auth_response.user_id)
+    }
+
+    async fn authorize(&self, user_id: &str, method: &str) -> Result<(), Status> {
+        let auth_request = AuthorizeRequest {
+            user_id: user_id.to_string(),
+            service: "consensus_service".to_string(),
+            method: method.to_string(),
+        };
+        let auth_response = self.auth_client
+            .authorize(auth_request)
+            .await
+            .map_err(|e| Status::permission_denied(format!("Authorization failed: {}", e)))?
+            .into_inner();
+        if !auth_response.allowed {
+            return Err(Status::permission_denied(auth_response.error));
+        }
+        Ok(())
     }
 
     async fn validate_block_rules(&self, block: &Block) -> Result<bool, String> {
         let block_size = serialize(block).len() as u64;
         if block_size > 4_000_000_000 {
+            warn!("Block size {} exceeds 4GB limit", block_size);
             return Err(format!("Block size {} exceeds 4GB limit", block_size));
         }
 
         // TODO: Validate merkle root, difficulty, timestamp
+        info!("Validated block rules for block size: {}", block_size);
         Ok(true)
     }
 
     async fn validate_transaction_rules(&self, tx: &Transaction) -> Result<bool, String> {
         let tx_size = serialize(tx).len() as u64;
         if tx_size > 1_000_000_000 {
+            warn!("Transaction size {} exceeds limit", tx_size);
             return Err(format!("Transaction size {} exceeds limit", tx_size));
         }
 
         for output in &tx.outputs {
             if output.script_pubkey.is_op_return() && output.script_pubkey.len() > 100_000 {
+                warn!("OP_RETURN data exceeds 100KB limit");
                 return Err("OP_RETURN data exceeds 100KB limit".to_string());
             }
             if !output.script_pubkey.is_standard() {
+                warn!("Non-standard script detected");
                 return Err("Non-standard script".to_string());
             }
         }
 
+        info!("Validated transaction rules for txid: {}", tx.txid());
         Ok(true)
     }
 }
@@ -76,18 +130,31 @@ impl ConsensusServiceImpl {
 #[tonic::async_trait]
 impl Consensus for ConsensusServiceImpl {
     async fn validate_block_consensus(&self, request: Request<ValidateBlockConsensusRequest>) -> Result<Response<ValidateBlockConsensusResponse>, Status> {
+        let token = request.metadata().get("authorization").ok_or_else(|| Status::unauthenticated("Missing token"))?;
+        let user_id = self.authenticate(token.to_str().map_err(|e| Status::invalid_argument("Invalid token format"))?).await?;
+        self.authorize(&user_id, "ValidateBlockConsensus").await?;
+        self.rate_limiter.until_ready().await;
+
         self.requests_total.inc();
         let start = Instant::now();
+        info!("Validating block consensus: {}", request.get_ref().block_hex);
         let req = request.into_inner();
         let block_bytes = hex::decode(&req.block_hex)
-            .map_err(|e| Status::invalid_argument(format!("Invalid block_hex: {}", e)))?;
+            .map_err(|e| {
+                warn!("Invalid block_hex: {}", e);
+                Status::invalid_argument(format!("Invalid block_hex: {}", e))
+            })?;
         let block: Block = deserialize(&block_bytes)
-            .map_err(|e| Status::invalid_argument(format!("Invalid block: {}", e)))?;
+            .map_err(|e| {
+                warn!("Invalid block: {}", e);
+                Status::invalid_argument(format!("Invalid block: {}", e))
+            })?;
 
         let is_valid = match self.validate_block_rules(&block).await {
             Ok(_) => true,
             Err(e) => {
                 self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
+                warn!("Block consensus validation failed: {}", e);
                 return Ok(Response::new(ValidateBlockConsensusResponse {
                     is_valid: false,
                     error: e,
@@ -96,6 +163,7 @@ impl Consensus for ConsensusServiceImpl {
         };
 
         self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
+        info!("Block consensus validation {}: {}", if is_valid { "succeeded" } else { "failed" }, req.block_hex);
         Ok(Response::new(ValidateBlockConsensusResponse {
             is_valid,
             error: if is_valid { "".to_string() } else { "Block consensus validation failed".to_string() },
@@ -103,18 +171,31 @@ impl Consensus for ConsensusServiceImpl {
     }
 
     async fn validate_transaction_consensus(&self, request: Request<ValidateTxConsensusRequest>) -> Result<Response<ValidateTxConsensusResponse>, Status> {
+        let token = request.metadata().get("authorization").ok_or_else(|| Status::unauthenticated("Missing token"))?;
+        let user_id = self.authenticate(token.to_str().map_err(|e| Status::invalid_argument("Invalid token format"))?).await?;
+        self.authorize(&user_id, "ValidateTransactionConsensus").await?;
+        self.rate_limiter.until_ready().await;
+
         self.requests_total.inc();
         let start = Instant::now();
+        info!("Validating transaction consensus: {}", request.get_ref().tx_hex);
         let req = request.into_inner();
         let tx_bytes = hex::decode(&req.tx_hex)
-            .map_err(|e| Status::invalid_argument(format!("Invalid tx_hex: {}", e)))?;
+            .map_err(|e| {
+                warn!("Invalid tx_hex: {}", e);
+                Status::invalid_argument(format!("Invalid tx_hex: {}", e))
+            })?;
         let tx: Transaction = deserialize(&tx_bytes)
-            .map_err(|e| Status::invalid_argument(format!("Invalid transaction: {}", e)))?;
+            .map_err(|e| {
+                warn!("Invalid transaction: {}", e);
+                Status::invalid_argument(format!("Invalid transaction: {}", e))
+            })?;
 
         let is_valid = match self.validate_transaction_rules(&tx).await {
             Ok(_) => true,
             Err(e) => {
                 self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
+                warn!("Transaction consensus validation failed: {}", e);
                 return Ok(Response::new(ValidateTxConsensusResponse {
                     is_valid: false,
                     error: e,
@@ -123,6 +204,7 @@ impl Consensus for ConsensusServiceImpl {
         };
 
         self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
+        info!("Transaction consensus validation {}: {}", if is_valid { "succeeded" } else { "failed" }, tx.txid());
         Ok(Response::new(ValidateTxConsensusResponse {
             is_valid,
             error: if is_valid { "".to_string() } else { "Transaction consensus validation failed".to_string() },
@@ -130,8 +212,14 @@ impl Consensus for ConsensusServiceImpl {
     }
 
     async fn batch_validate_transaction_consensus(&self, request: Request<BatchValidateTxConsensusRequest>) -> Result<Response<BatchValidateTxConsensusResponse>, Status> {
+        let token = request.metadata().get("authorization").ok_or_else(|| Status::unauthenticated("Missing token"))?;
+        let user_id = self.authenticate(token.to_str().map_err(|e| Status::invalid_argument("Invalid token format"))?).await?;
+        self.authorize(&user_id, "BatchValidateTransactionConsensus").await?;
+        self.rate_limiter.until_ready().await;
+
         self.requests_total.inc();
         let start = Instant::now();
+        info!("Batch validating {} transactions for consensus", request.get_ref().tx_hexes.len());
         let req = request.into_inner();
         let mut results = vec![];
 
@@ -145,10 +233,15 @@ impl Consensus for ConsensusServiceImpl {
         }
 
         self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
+        info!("Completed batch validation for {} transactions", results.len());
         Ok(Response::new(BatchValidateTxConsensusResponse { results }))
     }
 
-    async fn get_metrics(&self, _request: Request<GetMetricsRequest>) -> Result<Response<GetMetricsResponse>, Status> {
+    async fn get_metrics(&self, request: Request<GetMetricsRequest>) -> Result<Response<GetMetricsResponse>, Status> {
+        let token = request.metadata().get("authorization").ok_or_else(|| Status::unauthenticated("Missing token"))?;
+        let user_id = self.authenticate(token.to_str().map_err(|e| Status::invalid_argument("Invalid token format"))?).await?;
+        self.authorize(&user_id, "GetMetrics").await?;
+
         Ok(Response::new(GetMetricsResponse {
             service_name: "consensus_service".to_string(),
             requests_total: self.requests_total.get() as u64,
@@ -160,6 +253,10 @@ impl Consensus for ConsensusServiceImpl {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::INFO)
+        .init();
+
     let addr = "[::1]:50055".parse().unwrap();
     let consensus_service = ConsensusServiceImpl::new().await;
 
