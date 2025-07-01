@@ -1,0 +1,25 @@
+syntax = "proto3";
+package auth;
+
+service Auth {
+    rpc Authenticate (AuthenticateRequest) returns (AuthenticateResponse);
+    rpc Authorize (AuthorizeRequest) returns (AuthorizeResponse);
+}
+
+message AuthenticateRequest {
+    string token = 1; // JWT or API token
+}
+message AuthenticateResponse {
+    bool success = 1;
+    string user_id = 2; // Unique user ID
+    string error = 3; // Error message if authentication fails
+}
+message AuthorizeRequest {
+    string user_id = 1; // User ID from authentication
+    string service = 2; // Service name (e.g., validation_service)
+    string method = 3; // Method name (e.g., GenerateSPVProof)
+}
+message AuthorizeResponse {
+    bool allowed = 1;
+    string error = 2; // Error message if authorization fails
+}
