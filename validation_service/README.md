@@ -1,6 +1,6 @@
 # Validation Service
 
-This service implements a gRPC server for SPV proof generation and verification in the Galaxy project, using rust-sv. It integrates with block_service and storage_service, supporting full merkle path, difficulty validation, and streaming for continuous proof generation for BSV’s large blocks.
+This service implements a gRPC server for SPV proof generation and verification in the Galaxy project, using rust-sv. It integrates with block_service and storage_service, supporting full merkle path, difficulty validation, streaming, and caching for continuous proof generation for BSV’s large blocks.
 
 ## Running
 ```bash
