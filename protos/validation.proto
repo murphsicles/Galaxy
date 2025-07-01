@@ -2,7 +2,9 @@ syntax = "proto3";
 package validation;
 
 service Validation {
-    rpc GenerateSPVProof (GenerateSPVProofRequest) returns (GenerateSPVProofResponse);
+    rpc GenerateSPVProof (GenerateSPVProofRequest) returns (GenerateSPVProofResponse) {
+        option (google.api.http) = { buffer_size_hint: 4000000000 }; // 4GB for large blocks
+    };
     rpc VerifySPVProof (VerifySPVProofRequest) returns (VerifySPVProofResponse);
     rpc BatchGenerateSPVProof (BatchGenerateSPVProofRequest) returns (BatchGenerateSPVProofResponse);
     rpc StreamSPVProofs (stream StreamSPVProofsRequest) returns (stream StreamSPVProofsResponse);
@@ -10,42 +12,42 @@ service Validation {
 }
 
 message GenerateSPVProofRequest {
-    string txid = 1; // Transaction ID (hex)
+    string txid = 1;
 }
 message GenerateSPVProofResponse {
     bool success = 1;
-    string merkle_path = 2; // Hex-encoded merkle path
-    repeated string block_headers = 3; // Hex-encoded block headers
-    string error = 4; // Error message if generation fails
+    string merkle_path = 2;
+    repeated string block_headers = 3;
+    string error = 4;
 }
 message VerifySPVProofRequest {
-    string txid = 1; // Transaction ID (hex)
-    string merkle_path = 2; // Hex-encoded merkle path
-    repeated string block_headers = 3; // Hex-encoded block headers
+    string txid = 1;
+    string merkle_path = 2;
+    repeated string block_headers = 3;
 }
 message VerifySPVProofResponse {
     bool is_valid = 1;
-    string error = 2; // Error message if verification fails
+    string error = 2;
 }
 message BatchGenerateSPVProofRequest {
-    repeated string txids = 1; // List of transaction IDs (hex)
+    repeated string txids = 1;
 }
 message BatchGenerateSPVProofResponse {
-    repeated GenerateSPVProofResponse results = 1; // Results for each proof
+    repeated GenerateSPVProofResponse results = 1;
 }
 message StreamSPVProofsRequest {
-    string txid = 1; // Transaction ID (hex) to monitor
+    string txid = 1;
 }
 message StreamSPVProofsResponse {
     bool success = 1;
-    string txid = 2; // Transaction ID (hex)
-    string merkle_path = 3; // Hex-encoded merkle path
-    repeated string block_headers = 4; // Hex-encoded block headers
-    string error = 5; // Error message if generation fails
+    string txid = 2;
+    string merkle_path = 3;
+    repeated string block_headers = 4;
+    string error = 5;
 }
 message GetMetricsRequest {}
 message GetMetricsResponse {
-    uint64 proof_requests = 1; // Total SPV proof requests
-    double avg_latency_ms = 2; // Average proof generation latency
-    uint64 cache_hits = 3; // Cache hit count
+    uint64 proof_requests = 1;
+    double avg_latency_ms = 2;
+    uint64 cache_hits = 3;
 }
