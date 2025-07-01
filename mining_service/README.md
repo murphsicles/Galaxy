@@ -1,6 +1,6 @@
 # Mining Service
 
-This service implements a gRPC server for BSV block mining in the Galaxy project, using rust-sv. It integrates with block_service and network_service, supporting full proof-of-work validation.
+This service implements a gRPC server for BSV block mining in the Galaxy project, using rust-sv. It integrates with block_service and network_service, supporting full proof-of-work validation, transaction selection, streaming, and metrics.
 
 ## Running
 ```bash
@@ -56,5 +56,32 @@ Expected response (example):
       "error": ""
     }
   ]
+}
+```
+
+### StreamMiningWork
+```bash
+# Use a gRPC client supporting streaming
+grpcurl -plaintext -d '{"miner_id": "miner1"}' localhost:50058 mining.Mining/StreamMiningWork
+```
+Expected response (example, streamed):
+```json
+{
+  "block_template": "...",
+  "target_difficulty": 486604799,
+  "error": ""
+}
+```
+
+### GetMetrics
+```bash
+grpcurl -plaintext -d '{}' localhost:50058 mining.Mining/GetMetrics
+```
+Expected response (example):
+```json
+{
+  "work_requests": 150,
+  "avg_latency_ms": 20.0,
+  "blocks_submitted": 5
 }
 ```
