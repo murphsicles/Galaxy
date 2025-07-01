@@ -11,6 +11,8 @@ use block::block_client::BlockClient;
 use block::AssembleBlockRequest;
 use network::network_client::NetworkClient;
 use network::BroadcastTxRequest;
+use auth::auth_client::AuthClient;
+use auth::{AuthenticateRequest, AuthorizeRequest};
 use sv::transaction::Transaction;
 use sv::block::Block;
 use sv::util::{deserialize, serialize, hash::Sha256d};
@@ -22,12 +24,17 @@ use tokio::sync::Mutex;
 use std::sync::Arc;
 use std::time::Instant;
 use prometheus::{Counter, Gauge, Registry};
+use governor::{Quota, RateLimiter, Jitter};
+use std::num::NonZeroU32;
+use tracing::{info, warn};
+use shared::ShardManager;
 use toml;
 
 tonic::include_proto!("overlay");
 tonic::include_proto!("transaction");
 tonic::include_proto!("block");
 tonic::include_proto!("network");
+tonic::include_proto!("auth");
 tonic::include_proto!("metrics");
 
 #[derive(Debug)]
@@ -35,12 +42,15 @@ struct OverlayServiceImpl {
     transaction_client: TransactionClient<Channel>,
     block_client: BlockClient<Channel>,
     network_client: NetworkClient<Channel>,
+    auth_client: AuthClient<Channel>,
     overlays: Arc<Mutex<HashMap<String, (Vec<Block>, Vec<Transaction>)>>>,
     db: Arc<Db>,
     registry: Arc<Registry>,
     tx_requests: Counter,
     latency_ms: Gauge,
     block_count: Counter,
+    rate_limiter: Arc<RateLimiter<String, governor::state::direct::NotKeyed, governor::clock::DefaultClock>>,
+    shard_manager: Arc<ShardManager>,
 }
 
 impl OverlayServiceImpl {
@@ -58,6 +68,9 @@ impl OverlayServiceImpl {
         let network_client = NetworkClient::connect("http://[::1]:50051")
             .await
             .expect("Failed to connect to network_service");
+        let auth_client = AuthClient::connect("http://[::1]:50060")
+            .await
+            .expect("Failed to connect to auth_service");
         let overlays = Arc::new(Mutex::new(HashMap::new()));
         let db = Arc::new(sled::open(format!("overlay_db_{}", shard_id)).expect("Failed to open sled DB"));
         let registry = Arc::new(Registry::new());
@@ -67,12 +80,58 @@ impl OverlayServiceImpl {
         registry.register(Box::new(tx_requests.clone())).unwrap();
         registry.register(Box::new(latency_ms.clone())).unwrap();
         registry.register(Box::new(block_count.clone())).unwrap();
-        OverlayServiceImpl { transaction_client, block_client, network_client, overlays, db, registry, tx_requests, latency_ms, block_count }
+        let rate_limiter = Arc::new(RateLimiter::direct(Quota::per_second(NonZeroU32::new(1000).unwrap())));
+        let shard_manager = Arc::new(ShardManager::new());
+
+        OverlayServiceImpl {
+            transaction_client,
+            block_client,
+            network_client,
+            auth_client,
+            overlays,
+            db,
+            registry,
+            tx_requests,
+            latency_ms,
+            block_count,
+            rate_limiter,
+            shard_manager,
+        }
+    }
+
+    async fn authenticate(&self, token: &str) -> Result<String, Status> {
+        let auth_request = AuthenticateRequest { token: token.to_string() };
+        let auth_response = self.auth_client
+            .authenticate(auth_request)
+            .await
+            .map_err(|e| Status::unauthenticated(format!("Authentication failed: {}", e)))?
+            .into_inner();
+        if !auth_response.success {
+            return Err(Status::unauthenticated(auth_response.error));
+        }
+        Ok(auth_response.user_id)
+    }
+
+    async fn authorize(&self, user_id: &str, method: &str) -> Result<(), Status> {
+        let auth_request = AuthorizeRequest {
+            user_id: user_id.to_string(),
+            service: "overlay_service".to_string(),
+            method: method.to_string(),
+        };
+        let auth_response = self.auth_client
+            .authorize(auth_request)
+            .await
+            .map_err(|e| Status::permission_denied(format!("Authorization failed: {}", e)))?
+            .into_inner();
+        if !auth_response.allowed {
+            return Err(Status::permission_denied(auth_response.error));
+        }
+        Ok(())
     }
 
     async fn assemble_overlay_block(&self, overlay_id: &str, transactions: Vec<Transaction>) -> Result<Block, String> {
         let txids: Vec<Sha256d> = transactions.iter().map(|tx| tx.txid()).collect();
-        let mut merkle_root = if txids.is_empty() {
+        let merkle_root = if txids.is_empty() {
             Sha256d::from_hex("0000000000000000000000000000000000000000000000000000000000000000").unwrap()
         } else {
             let mut current_level = txids;
@@ -104,7 +163,8 @@ impl OverlayServiceImpl {
             transactions,
         };
 
-        self.db.insert(format!("block_{}:{}", overlay_id, self.block_count.get()), serialize(&block))
+        self.db
+            .insert(format!("block_{}:{}", overlay_id, self.block_count.get()), serialize(&block))
             .map_err(|e| format!("Failed to store block: {}", e))?;
         self.block_count.inc();
         Ok(block)
@@ -114,12 +174,19 @@ impl OverlayServiceImpl {
 #[tonic::async_trait]
 impl Overlay for OverlayServiceImpl {
     async fn create_overlay(&self, request: Request<CreateOverlayRequest>) -> Result<Response<CreateOverlayResponse>, Status> {
+        let token = request.metadata().get("authorization").ok_or_else(|| Status::unauthenticated("Missing token"))?;
+        let user_id = self.authenticate(token.to_str().map_err(|e| Status::invalid_argument("Invalid token format"))?).await?;
+        self.authorize(&user_id, "CreateOverlay").await?;
+        self.rate_limiter.until_ready().await;
+
         self.tx_requests.inc();
         let start = Instant::now();
+        info!("Creating overlay: {}", request.get_ref().overlay_id);
         let req = request.into_inner();
         let mut overlays = self.overlays.lock().await;
         if overlays.contains_key(&req.overlay_id) {
             self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
+            warn!("Overlay already exists: {}", req.overlay_id);
             return Ok(Response::new(CreateOverlayResponse {
                 success: false,
                 error: "Overlay already exists".to_string(),
@@ -127,6 +194,7 @@ impl Overlay for OverlayServiceImpl {
         }
         overlays.insert(req.overlay_id, (vec![], vec![]));
         self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
+        info!("Created overlay: {}", req.overlay_id);
         Ok(Response::new(CreateOverlayResponse {
             success: true,
             error: "".to_string(),
@@ -134,21 +202,30 @@ impl Overlay for OverlayServiceImpl {
     }
 
     async fn submit_overlay_transaction(&self, request: Request<SubmitOverlayTxRequest>) -> Result<Response<SubmitOverlayTxResponse>, Status> {
+        let token = request.metadata().get("authorization").ok_or_else(|| Status::unauthenticated("Missing token"))?;
+        let user_id = self.authenticate(token.to_str().map_err(|e| Status::invalid_argument("Invalid token format"))?).await?;
+        self.authorize(&user_id, "SubmitOverlayTransaction").await?;
+        self.rate_limiter.until_ready().await;
+
         self.tx_requests.inc();
         let start = Instant::now();
+        info!("Submitting overlay transaction: {}", request.get_ref().tx_hex);
         let req = request.into_inner();
         let mut overlays = self.overlays.lock().await;
-        let (blocks, pending_txs) = overlays.get_mut(&req.overlay_id)
+        let (blocks, pending_txs) = overlays
+            .get_mut(&req.overlay_id)
             .ok_or_else(|| Status::not_found("Overlay not found"))?;
 
         let mut transaction_client = self.transaction_client.clone();
         let validate_request = ValidateTxRequest { tx_hex: req.tx_hex.clone() };
-        let validate_response = transaction_client.validate_transaction(validate_request)
+        let validate_response = transaction_client
+            .validate_transaction(validate_request)
             .await
             .map_err(|e| Status::internal(format!("Transaction validation failed: {}", e)))?
             .into_inner();
         if !validate_response.is_valid {
             self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
+            warn!("Transaction validation failed: {}", validate_response.error);
             return Ok(Response::new(SubmitOverlayTxResponse {
                 success: false,
                 error: validate_response.error,
@@ -162,12 +239,14 @@ impl Overlay for OverlayServiceImpl {
 
         let mut network_client = self.network_client.clone();
         let broadcast_request = BroadcastTxRequest { tx_hex: req.tx_hex.clone() };
-        let broadcast_response = network_client.broadcast_transaction(broadcast_request)
+        let broadcast_response = network_client
+            .broadcast_transaction(broadcast_request)
             .await
             .map_err(|e| Status::internal(format!("Broadcast failed: {}", e)))?
             .into_inner();
         if !broadcast_response.success {
             self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
+            warn!("Broadcast failed: {}", broadcast_response.error);
             return Ok(Response::new(SubmitOverlayTxResponse {
                 success: false,
                 error: broadcast_response.error,
@@ -176,13 +255,16 @@ impl Overlay for OverlayServiceImpl {
 
         pending_txs.push(tx);
         if pending_txs.len() >= 100 {
-            let block = self.assemble_overlay_block(&req.overlay_id, pending_txs.drain(..).collect())
+            let block = self
+                .assemble_overlay_block(&req.overlay_id, pending_txs.drain(..).collect())
                 .await
                 .map_err(|e| Status::internal(format!("Block assembly failed: {}", e)))?;
             blocks.push(block);
+            info!("Assembled overlay block for {}", req.overlay_id);
         }
 
         self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
+        info!("Submitted overlay transaction: {}", req.tx_hex);
         Ok(Response::new(SubmitOverlayTxResponse {
             success: true,
             error: "".to_string(),
@@ -190,17 +272,26 @@ impl Overlay for OverlayServiceImpl {
     }
 
     async fn get_overlay_block(&self, request: Request<GetOverlayBlockRequest>) -> Result<Response<GetOverlayBlockResponse>, Status> {
+        let token = request.metadata().get("authorization").ok_or_else(|| Status::unauthenticated("Missing token"))?;
+        let user_id = self.authenticate(token.to_str().map_err(|e| Status::invalid_argument("Invalid token format"))?).await?;
+        self.authorize(&user_id, "GetOverlayBlock").await?;
+        self.rate_limiter.until_ready().await;
+
         self.tx_requests.inc();
         let start = Instant::now();
+        info!("Getting overlay block: {}:{}", request.get_ref().overlay_id, request.get_ref().block_height);
         let req = request.into_inner();
         let block_key = format!("block_{}:{}", req.overlay_id, req.block_height);
-        let block_bytes = self.db.get(&block_key)
+        let block_bytes = self
+            .db
+            .get(&block_key)
             .map_err(|e| Status::internal(format!("Failed to retrieve block: {}", e)))?
             .ok_or_else(|| Status::not_found("Block not found"))?;
         let block: Block = deserialize(&block_bytes)
             .map_err(|e| Status::internal(format!("Invalid block: {}", e)))?;
 
         self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
+        info!("Retrieved overlay block: {}:{}", req.overlay_id, req.block_height);
         Ok(Response::new(GetOverlayBlockResponse {
             block_hex: hex::encode(serialize(&block)),
             error: "".to_string(),
@@ -208,11 +299,18 @@ impl Overlay for OverlayServiceImpl {
     }
 
     async fn batch_submit_overlay_transaction(&self, request: Request<BatchSubmitOverlayTxRequest>) -> Result<Response<BatchSubmitOverlayTxResponse>, Status> {
+        let token = request.metadata().get("authorization").ok_or_else(|| Status::unauthenticated("Missing token"))?;
+        let user_id = self.authenticate(token.to_str().map_err(|e| Status::invalid_argument("Invalid token format"))?).await?;
+        self.authorize(&user_id, "BatchSubmitOverlayTransaction").await?;
+        self.rate_limiter.until_ready().await;
+
         self.tx_requests.inc();
         let start = Instant::now();
+        info!("Batch submitting {} overlay transactions", request.get_ref().tx_hexes.len());
         let req = request.into_inner();
         let mut overlays = self.overlays.lock().await;
-        let (blocks, pending_txs) = overlays.get_mut(&req.overlay_id)
+        let (blocks, pending_txs) = overlays
+            .get_mut(&req.overlay_id)
             .ok_or_else(|| Status::not_found("Overlay not found"))?;
 
         let mut results = vec![];
@@ -221,7 +319,8 @@ impl Overlay for OverlayServiceImpl {
 
         for tx_hex in req.tx_hexes {
             let validate_request = ValidateTxRequest { tx_hex: tx_hex.clone() };
-            let validate_response = transaction_client.validate_transaction(validate_request)
+            let validate_response = transaction_client
+                .validate_transaction(validate_request)
                 .await
                 .map_err(|e| Status::internal(format!("Transaction validation failed: {}", e)))?
                 .into_inner();
@@ -230,11 +329,13 @@ impl Overlay for OverlayServiceImpl {
                     success: false,
                     error: validate_response.error,
                 });
+                warn!("Batch transaction validation failed: {}", validate_response.error);
                 continue;
             }
 
             let broadcast_request = BroadcastTxRequest { tx_hex: tx_hex.clone() };
-            let broadcast_response = network_client.broadcast_transaction(broadcast_request)
+            let broadcast_response = network_client
+                .broadcast_transaction(broadcast_request)
                 .await
                 .map_err(|e| Status::internal(format!("Broadcast failed: {}", e)))?
                 .into_inner();
@@ -243,6 +344,7 @@ impl Overlay for OverlayServiceImpl {
                     success: false,
                     error: broadcast_response.error,
                 });
+                warn!("Batch broadcast failed: {}", broadcast_response.error);
                 continue;
             }
 
@@ -259,19 +361,28 @@ impl Overlay for OverlayServiceImpl {
         }
 
         if pending_txs.len() >= 100 {
-            let block = self.assemble_overlay_block(&req.overlay_id, pending_txs.drain(..).collect())
+            let block = self
+                .assemble_overlay_block(&req.overlay_id, pending_txs.drain(..).collect())
                 .await
                 .map_err(|e| Status::internal(format!("Block assembly failed: {}", e)))?;
             blocks.push(block);
+            info!("Assembled batch overlay block for {}", req.overlay_id);
         }
 
         self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
+        info!("Completed batch submission for {} transactions", results.len());
         Ok(Response::new(BatchSubmitOverlayTxResponse { results }))
     }
 
     async fn stream_overlay_transactions(&self, request: Request<Streaming<StreamOverlayTxRequest>>) -> Result<Response<Self::StreamOverlayTxResponseStream>, Status> {
+        let token = request.metadata().get("authorization").ok_or_else(|| Status::unauthenticated("Missing token"))?;
+        let user_id = self.authenticate(token.to_str().map_err(|e| Status::invalid_argument("Invalid token format"))?).await?;
+        self.authorize(&user_id, "StreamOverlayTransactions").await?;
+        self.rate_limiter.until_ready().await;
+
         self.tx_requests.inc();
         let start = Instant::now();
+        info!("Streaming overlay transactions");
         let mut stream = request.into_inner();
         let overlays = Arc::clone(&self.overlays);
         let transaction_client = self.transaction_client.clone();
@@ -282,12 +393,15 @@ impl Overlay for OverlayServiceImpl {
         let output = async_stream::try_stream! {
             while let Some(req) = stream.next().await {
                 let req = req?;
+                info!("Streaming overlay transaction: {}", req.tx_hex);
                 let mut overlays = overlays.lock().await;
-                let (blocks, pending_txs) = overlays.get_mut(&req.overlay_id)
+                let (blocks, pending_txs) = overlays
+                    .get_mut(&req.overlay_id)
                     .ok_or_else(|| Status::not_found("Overlay not found"))?;
 
                 let validate_request = ValidateTxRequest { tx_hex: req.tx_hex.clone() };
-                let validate_response = transaction_client.clone().validate_transaction(validate_request)
+                let validate_response = transaction_client.clone()
+                    .validate_transaction(validate_request)
                     .await
                     .map_err(|e| Status::internal(format!("Transaction validation failed: {}", e)))?
                     .into_inner();
@@ -297,11 +411,13 @@ impl Overlay for OverlayServiceImpl {
                         tx_hex: req.tx_hex,
                         error: validate_response.error,
                     };
+                    warn!("Streamed transaction validation failed: {}", validate_response.error);
                     continue;
                 }
 
                 let broadcast_request = BroadcastTxRequest { tx_hex: req.tx_hex.clone() };
-                let broadcast_response = network_client.clone().broadcast_transaction(broadcast_request)
+                let broadcast_response = network_client.clone()
+                    .broadcast_transaction(broadcast_request)
                     .await
                     .map_err(|e| Status::internal(format!("Broadcast failed: {}", e)))?
                     .into_inner();
@@ -311,6 +427,7 @@ impl Overlay for OverlayServiceImpl {
                         tx_hex: req.tx_hex,
                         error: broadcast_response.error,
                     };
+                    warn!("Streamed broadcast failed: {}", broadcast_response.error);
                     continue;
                 }
 
@@ -321,11 +438,13 @@ impl Overlay for OverlayServiceImpl {
                 pending_txs.push(tx);
 
                 if pending_txs.len() >= 100 {
-                    let block = self.assemble_overlay_block(&req.overlay_id, pending_txs.drain(..).collect())
+                    let block = self
+                        .assemble_overlay_block(&req.overlay_id, pending_txs.drain(..).collect())
                         .await
                         .map_err(|e| Status::internal(format!("Block assembly failed: {}", e)))?;
                     blocks.push(block);
                     block_count.inc();
+                    info!("Assembled streamed overlay block for {}", req.overlay_id);
                 }
 
                 yield StreamOverlayTxResponse {
@@ -333,6 +452,7 @@ impl Overlay for OverlayServiceImpl {
                     tx_hex: req.tx_hex,
                     error: "".to_string(),
                 };
+                info!("Streamed overlay transaction: {}", req.tx_hex);
             }
         };
 
@@ -340,18 +460,26 @@ impl Overlay for OverlayServiceImpl {
         Ok(Response::new(Box::pin(output)))
     }
 
-    async fn get_metrics(&self, _request: Request<GetMetricsRequest>) -> Result<Response<GetMetricsResponse>, Status> {
+    async fn get_metrics(&self, request: Request<GetMetricsRequest>) -> Result<Response<GetMetricsResponse>, Status> {
+        let token = request.metadata().get("authorization").ok_or_else(|| Status::unauthenticated("Missing token"))?;
+        let user_id = self.authenticate(token.to_str().map_err(|e| Status::invalid_argument("Invalid token format"))?).await?;
+        self.authorize(&user_id, "GetMetrics").await?;
+
         Ok(Response::new(GetMetricsResponse {
             service_name: "overlay_service".to_string(),
             requests_total: self.tx_requests.get() as u64,
             avg_latency_ms: self.latency_ms.get(),
-            errors_total: 0, // Placeholder
+            errors_total: 0,
         }))
     }
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::INFO)
+        .init();
+
     let addr = "[::1]:50056".parse().unwrap();
     let overlay_service = OverlayServiceImpl::new().await;
 
@@ -363,4 +491,4 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await?;
 
     Ok(())
-                }
+}
