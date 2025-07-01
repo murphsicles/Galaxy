@@ -16,6 +16,8 @@ validation_service_port = 50057
 mining_service_port = 50058
 metrics_port = 50059
 auth_service_port = 50060
+alert_service_port = 50061
+index_service_port = 50062
 
 [sharding]
 shard_id = 0
@@ -30,6 +32,14 @@ nodes = [
 [auth]
 secret_key = "secret" # Replace with secure key in production
 log_level = "INFO"
+
+[alert]
+severity_threshold = 2 # Minimum severity for alerts
+event_types = ["consensus_violation", "performance_issue", "security_alert"]
+
+[index]
+tx_index_path = "tx_index_db"
+block_index_path = "block_index_db"
 
 [test_cases]
 [test_cases.ping]
@@ -92,6 +102,14 @@ tx_hex = "0100000001000000000000000000000000000000000000000000000000000000000000
 overlay_id = "test_overlay"
 block_height = 0
 
+[test_cases.index_overlay_transaction]
+overlay_id = "test_overlay"
+tx_hex = "01000000010000000000000000000000000000000000000000000000000000000000000000ffffffff0100ffffffff0100ffffffff"
+
+[test_cases.query_overlay_block]
+overlay_id = "test_overlay"
+block_height = 0
+
 [test_cases.generate_spv_proof]
 txid = "abc123"
 
@@ -118,3 +136,11 @@ service_name = "validation_service"
 
 [test_cases.authenticate]
 token = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1c2VyMSIsInJvbGUiOiJjbGllbnQiLCJleHAiOjE5MjA2NzY1MDl9.8X8z7z3Y8Qz5z5z7z3Y8Qz5z5z7z3Y8Qz5z5z7z3Y8Q" # Placeholder JWT
+
+[test_cases.send_alert]
+event_type = "consensus_violation"
+message = "Block size exceeds limit"
+severity = 3
+
+[test_cases.subscribe_to_alerts]
+event_type = "consensus_violation"
