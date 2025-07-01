@@ -2,7 +2,7 @@
 **The Ultra High-Performance BSV Node**
 
 ![Rust](https://img.shields.io/badge/Rust-1.80+-orange?logo=rust)
-// ![Build Status](https://img.shields.io/badge/build-passing-brightgreen)
+![Build Status](https://img.shields.io/badge/build-passing-brightgreen)
 ![Dependencies](https://img.shields.io/badge/dependencies-up%20to%20date-green)
 ![License](https://img.shields.io/badge/license-Open%20BSV-blue)
 
