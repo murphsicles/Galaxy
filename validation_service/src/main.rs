@@ -11,13 +11,14 @@ use block::block_client::BlockClient;
 use block::AssembleBlockRequest;
 use storage::storage_client::StorageClient;
 use storage::QueryUtxoRequest;
-use metrics::metrics_client::MetricsClient;
 use auth::auth_client::AuthClient;
 use auth::{AuthenticateRequest, AuthorizeRequest};
+use alert::alert_client::AlertClient;
+use alert::SendAlertRequest;
+use metrics::metrics_client::MetricsClient;
 use sv::block::Block;
 use sv::util::{deserialize, serialize, hash::Sha256d};
 use futures::StreamExt;
-use hex;
 use lru::LruCache;
 use std::collections::HashMap;
 use tokio::sync::Mutex;
@@ -32,14 +33,16 @@ use shared::ShardManager;
 tonic::include_proto!("validation");
 tonic::include_proto!("block");
 tonic::include_proto!("storage");
-tonic::include_proto!("metrics");
 tonic::include_proto!("auth");
+tonic::include_proto!("alert");
+tonic::include_proto!("metrics");
 
 #[derive(Debug)]
 struct ValidationServiceImpl {
     block_client: BlockClient<Channel>,
     storage_client: StorageClient<Channel>,
     auth_client: AuthClient<Channel>,
+    alert_client: AlertClient<Channel>,
     proof_cache: Arc<Mutex<LruCache<String, (String, Vec<String>)>>>,
     registry: Arc<Registry>,
     requests_total: Counter,
@@ -64,6 +67,9 @@ impl ValidationServiceImpl {
         let auth_client = AuthClient::connect("http://[::1]:50060")
             .await
             .expect("Failed to connect to auth_service");
+        let alert_client = AlertClient::connect("http://[::1]:50061")
+            .await
+            .expect("Failed to connect to alert_service");
         let proof_cache = Arc::new(Mutex::new(LruCache::new(1000)));
         let registry = Arc::new(Registry::new());
         let requests_total = Counter::new("validation_requests_total", "Total SPV proof requests").unwrap();
@@ -79,6 +85,7 @@ impl ValidationServiceImpl {
             block_client,
             storage_client,
             auth_client,
+            alert_client,
             proof_cache,
             registry,
             requests_total,
@@ -119,9 +126,30 @@ impl ValidationServiceImpl {
         Ok(())
     }
 
+    async fn send_alert(&self, event_type: &str, message: &str, severity: u32) -> Result<(), Status> {
+        let alert_request = SendAlertRequest {
+            event_type: event_type.to_string(),
+            message: message.to_string(),
+            severity,
+        };
+        let alert_response = self.alert_client
+            .send_alert(alert_request)
+            .await
+            .map_err(|e| {
+                warn!("Failed to send alert: {}", e);
+                Status::internal(format!("Failed to send alert: {}", e))
+            })?
+            .into_inner();
+        if !alert_response.success {
+            warn!("Alert sending failed: {}", alert_response.error);
+            return Err(Status::internal(alert_response.error));
+        }
+        Ok(())
+    }
+
     async fn fetch_block(&self, txid: &str) -> Result<Block, String> {
-        // TODO: Implement block retrieval logic with block_service
         info!("Fetching block for txid: {}", txid);
+        // Placeholder: Fetch block from block_service or storage
         Ok(Block {
             header: sv::block::BlockHeader {
                 version: 1,
@@ -143,7 +171,10 @@ impl ValidationServiceImpl {
         let mut path = vec![];
         let mut current_level = txids;
         let mut index = current_level.iter().position(|id| *id == target_txid)
-            .ok_or_else(|| "Transaction not found in block".to_string())?;
+            .ok_or_else(|| {
+                warn!("Transaction not found in block: {}", txid);
+                "Transaction not found in block".to_string()
+            })?;
 
         while current_level.len() > 1 {
             let mut next_level = vec![];
@@ -167,7 +198,7 @@ impl ValidationServiceImpl {
     }
 
     async fn validate_difficulty(&self, header: &sv::block::BlockHeader) -> Result<bool, String> {
-        let target_bits = 0x1d00ffff;
+        let target_bits = 0x1d00ffff; // Placeholder
         let target = Self::bits_to_target(target_bits);
         let hash = header.hash();
         Ok(hash <= target)
@@ -219,14 +250,23 @@ impl Validation for ValidationServiceImpl {
 
         let block = self.fetch_block(&req.txid)
             .await
-            .map_err(|e| Status::internal(format!("Failed to fetch block: {}", e)))?;
+            .map_err(|e| {
+                warn!("Failed to fetch block: {}", e);
+                let _ = self.send_alert("spv_proof_block_fetch_failed", &format!("Failed to fetch block: {}", e), 2).await;
+                Status::internal(format!("Failed to fetch block: {}", e))
+            })?;
         let (merkle_path, merkle_root) = self.generate_merkle_path(&req.txid, &block)
             .await
-            .map_err(|e| Status::internal(format!("Failed to generate merkle path: {}", e)))?;
+            .map_err(|e| {
+                warn!("Failed to generate merkle path: {}", e);
+                let _ = self.send_alert("spv_proof_merkle_path_failed", &format!("Failed to generate merkle path: {}", e), 2).await;
+                Status::internal(format!("Failed to generate merkle path: {}", e))
+            })?;
 
         if merkle_root != block.header.merkle_root {
             self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
             warn!("Merkle root mismatch for txid: {}", req.txid);
+            let _ = self.send_alert("spv_proof_merkle_root_mismatch", &format!("Merkle root mismatch for txid: {}", req.txid), 3).await;
             return Ok(Response::new(GenerateSPVProofResponse {
                 success: false,
                 merkle_path: "".to_string(),
@@ -240,7 +280,6 @@ impl Validation for ValidationServiceImpl {
         proof_cache.put(req.txid.clone(), (merkle_path_hex.clone(), block_headers.clone()));
         self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
         info!("Generated SPV proof for txid: {}", req.txid);
-
         Ok(Response::new(GenerateSPVProofResponse {
             success: true,
             merkle_path: merkle_path_hex,
@@ -260,22 +299,39 @@ impl Validation for ValidationServiceImpl {
         info!("Verifying SPV proof for txid: {}", request.get_ref().txid);
         let req = request.into_inner();
         let merkle_path = hex::decode(&req.merkle_path)
-            .map_err(|e| Status::invalid_argument(format!("Invalid merkle_path: {}", e)))?;
+            .map_err(|e| {
+                warn!("Invalid merkle_path: {}", e);
+                Status::invalid_argument(format!("Invalid merkle_path: {}", e))
+            })?;
         let txid = Sha256d::from_hex(&req.txid)
-            .map_err(|e| Status::invalid_argument(format!("Invalid txid: {}", e)))?;
+            .map_err(|e| {
+                warn!("Invalid txid: {}", e);
+                Status::invalid_argument(format!("Invalid txid: {}", e))
+            })?;
 
         let mut prev_hash = None;
         for header_hex in req.block_headers {
             let header_bytes = hex::decode(&header_hex)
-                .map_err(|e| Status::invalid_argument(format!("Invalid block header: {}", e)))?;
+                .map_err(|e| {
+                    warn!("Invalid block header: {}", e);
+                    Status::invalid_argument(format!("Invalid block header: {}", e))
+                })?;
             let header: sv::block::BlockHeader = deserialize(&header_bytes)
-                .map_err(|e| Status::invalid_argument(format!("Invalid block header: {}", e)))?;
+                .map_err(|e| {
+                    warn!("Invalid block header: {}", e);
+                    Status::invalid_argument(format!("Invalid block header: {}", e))
+                })?;
 
             if !self.validate_difficulty(&header).await
-                .map_err(|e| Status::internal(format!("Difficulty validation failed: {}", e)))?
+                .map_err(|e| {
+                    warn!("Difficulty validation failed: {}", e);
+                    let _ = self.send_alert("spv_proof_difficulty_failed", &format!("Difficulty validation failed: {}", e), 2).await;
+                    Status::internal(format!("Difficulty validation failed: {}", e))
+                })?
             {
                 self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
                 warn!("Invalid difficulty for txid: {}", req.txid);
+                let _ = self.send_alert("spv_proof_difficulty_failed", &format!("Invalid difficulty for txid: {}", req.txid), 2).await;
                 return Ok(Response::new(VerifySPVProofResponse {
                     is_valid: false,
                     error: "Invalid difficulty".to_string(),
@@ -286,6 +342,7 @@ impl Validation for ValidationServiceImpl {
                 if header.prev_blockhash != prev {
                     self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
                     warn!("Invalid header chain for txid: {}", req.txid);
+                    let _ = self.send_alert("spv_proof_header_chain_failed", &format!("Invalid header chain for txid: {}", req.txid), 3).await;
                     return Ok(Response::new(VerifySPVProofResponse {
                         is_valid: false,
                         error: "Invalid header chain".to_string(),
@@ -311,8 +368,10 @@ impl Validation for ValidationServiceImpl {
 
         let is_valid = current_hash == prev_hash.unwrap_or_default();
         self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
+        if !is_valid {
+            let _ = self.send_alert("spv_proof_verification_failed", &format!("Merkle path verification failed for txid: {}", req.txid), 3).await;
+        }
         info!("SPV proof verification {} for txid: {}", if is_valid { "succeeded" } else { "failed" }, req.txid);
-
         Ok(Response::new(VerifySPVProofResponse {
             is_valid,
             error: if is_valid { "".to_string() } else { "Merkle path verification failed".to_string() },
@@ -347,10 +406,18 @@ impl Validation for ValidationServiceImpl {
 
             let block = self.fetch_block(&txid)
                 .await
-                .map_err(|e| Status::internal(format!("Failed to fetch block: {}", e)))?;
+                .map_err(|e| {
+                    warn!("Failed to fetch block: {}", e);
+                    let _ = self.send_alert("spv_proof_block_fetch_failed", &format!("Failed to fetch block: {}", e), 2).await;
+                    Status::internal(format!("Failed to fetch block: {}", e))
+                })?;
             let (merkle_path, merkle_root) = self.generate_merkle_path(&txid, &block)
                 .await
-                .map_err(|e| Status::internal(format!("Failed to generate merkle path: {}", e)))?;
+                .map_err(|e| {
+                    warn!("Failed to generate merkle path: {}", e);
+                    let _ = self.send_alert("spv_proof_merkle_path_failed", &format!("Failed to generate merkle path: {}", e), 2).await;
+                    Status::internal(format!("Failed to generate merkle path: {}", e))
+                })?;
 
             if merkle_root != block.header.merkle_root {
                 results.push(GenerateSPVProofResponse {
@@ -359,6 +426,7 @@ impl Validation for ValidationServiceImpl {
                     block_headers: vec![],
                     error: "Merkle root mismatch".to_string(),
                 });
+                let _ = self.send_alert("spv_proof_merkle_root_mismatch", &format!("Merkle root mismatch for txid: {}", txid), 3).await;
                 warn!("Merkle root mismatch for txid: {}", txid);
                 continue;
             }
@@ -392,6 +460,7 @@ impl Validation for ValidationServiceImpl {
         let requests_total = self.requests_total.clone();
         let cache_hits = self.cache_hits.clone();
         let latency_ms = self.latency_ms.clone();
+        let alert_client = self.alert_client.clone();
 
         let output = async_stream::try_stream! {
             while let Some(req) = stream.next().await {
@@ -414,10 +483,28 @@ impl Validation for ValidationServiceImpl {
 
                 let block = self.fetch_block(&req.txid)
                     .await
-                    .map_err(|e| Status::internal(format!("Failed to fetch block: {}", e)))?;
+                    .map_err(|e| {
+                        let _ = alert_client.clone()
+                            .send_alert(SendAlertRequest {
+                                event_type: "spv_proof_block_fetch_failed".to_string(),
+                                message: format!("Failed to fetch block: {}", e),
+                                severity: 2,
+                            })
+                            .await;
+                        Status::internal(format!("Failed to fetch block: {}", e))
+                    })?;
                 let (merkle_path, merkle_root) = self.generate_merkle_path(&req.txid, &block)
                     .await
-                    .map_err(|e| Status::internal(format!("Failed to generate merkle path: {}", e)))?;
+                    .map_err(|e| {
+                        let _ = alert_client.clone()
+                            .send_alert(SendAlertRequest {
+                                event_type: "spv_proof_merkle_path_failed".to_string(),
+                                message: format!("Failed to generate merkle path: {}", e),
+                                severity: 2,
+                            })
+                            .await;
+                        Status::internal(format!("Failed to generate merkle path: {}", e))
+                    })?;
 
                 if merkle_root != block.header.merkle_root {
                     yield StreamSPVProofsResponse {
@@ -427,6 +514,13 @@ impl Validation for ValidationServiceImpl {
                         block_headers: vec![],
                         error: "Merkle root mismatch".to_string(),
                     };
+                    let _ = alert_client.clone()
+                        .send_alert(SendAlertRequest {
+                            event_type: "spv_proof_merkle_root_mismatch".to_string(),
+                            message: format!("Merkle root mismatch for txid: {}", req.txid),
+                            severity: 3,
+                        })
+                        .await;
                     warn!("Merkle root mismatch for streamed txid: {}", req.txid);
                     continue;
                 }
@@ -446,4 +540,38 @@ impl Validation for ValidationServiceImpl {
         };
 
         self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
-        Ok(Respo
+        Ok(Response::new(Box::pin(output)))
+    }
+
+    async fn get_metrics(&self, request: Request<GetMetricsRequest>) -> Result<Response<GetMetricsResponse>, Status> {
+        let token = request.metadata().get("authorization").ok_or_else(|| Status::unauthenticated("Missing token"))?;
+        let user_id = self.authenticate(token.to_str().map_err(|e| Status::invalid_argument("Invalid token format"))?).await?;
+        self.authorize(&user_id, "GetMetrics").await?;
+
+        Ok(Response::new(GetMetricsResponse {
+            service_name: "validation_service".to_string(),
+            requests_total: self.requests_total.get() as u64,
+            avg_latency_ms: self.latency_ms.get(),
+            errors_total: 0, // Placeholder
+        }))
+    }
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::INFO)
+        .init();
+
+    let addr = "[::1]:50057".parse().unwrap();
+    let validation_service = ValidationServiceImpl::new().await;
+
+    println!("Validation service listening on {}", addr);
+
+    Server::builder()
+        .add_service(ValidationServer::new(validation_service))
+        .serve(addr)
+        .await?;
+
+    Ok(())
+}
