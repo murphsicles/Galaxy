@@ -8,7 +8,10 @@ use transaction::transaction_client::TransactionClient;
 use transaction::ValidateTxRequest;
 use block::block_client::BlockClient;
 use block::ValidateBlockRequest;
+use auth::auth_client::AuthClient;
+use auth::{AuthenticateRequest, AuthorizeRequest};
 use metrics::metrics_client::MetricsClient;
+use metrics::{GetMetricsRequest, GetMetricsResponse};
 use sv::messages::{Message, NetworkMessage};
 use sv::network::{Network as BSVNetwork, Version};
 use sv::transaction::Transaction;
@@ -21,12 +24,17 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use std::time::Instant;
 use prometheus::{Counter, Gauge, Registry};
+use governor::{Quota, RateLimiter, Jitter};
+use std::num::NonZeroU32;
+use tracing::{info, warn};
+use shared::ShardManager;
 use hex;
 use toml;
 
 tonic::include_proto!("network");
 tonic::include_proto!("transaction");
 tonic::include_proto!("block");
+tonic::include_proto!("auth");
 tonic::include_proto!("metrics");
 
 #[derive(Debug)]
@@ -34,9 +42,12 @@ struct NetworkServiceImpl {
     peers: Arc<Mutex<HashMap<String, mpsc::Sender<Message>>>>,
     transaction_client: TransactionClient<Channel>,
     block_client: BlockClient<Channel>,
+    auth_client: AuthClient<Channel>,
     registry: Arc<Registry>,
     requests_total: Counter,
     latency_ms: Gauge,
+    rate_limiter: Arc<RateLimiter<String, governor::state::direct::NotKeyed, governor::clock::DefaultClock>>,
+    shard_manager: Arc<ShardManager>,
 }
 
 impl NetworkServiceImpl {
@@ -58,11 +69,16 @@ impl NetworkServiceImpl {
         let block_client = BlockClient::connect("http://[::1]:50054")
             .await
             .expect("Failed to connect to block_service");
+        let auth_client = AuthClient::connect("http://[::1]:50060")
+            .await
+            .expect("Failed to connect to auth_service");
         let registry = Arc::new(Registry::new());
         let requests_total = Counter::new("network_requests_total", "Total network requests").unwrap();
         let latency_ms = Gauge::new("network_latency_ms", "Average request latency").unwrap();
         registry.register(Box::new(requests_total.clone())).unwrap();
         registry.register(Box::new(latency_ms.clone())).unwrap();
+        let rate_limiter = Arc::new(RateLimiter::direct(Quota::per_second(NonZeroU32::new(1000).unwrap())));
+        let shard_manager = Arc::new(ShardManager::new());
 
         let peers_clone = Arc::clone(&peers);
         tokio::spawn(async move {
@@ -78,10 +94,51 @@ impl NetworkServiceImpl {
             }
         });
 
-        NetworkServiceImpl { peers, transaction_client, block_client, registry, requests_total, latency_ms }
+        NetworkServiceImpl {
+            peers,
+            transaction_client,
+            block_client,
+            auth_client,
+            registry,
+            requests_total,
+            latency_ms,
+            rate_limiter,
+            shard_manager,
+        }
+    }
+
+    async fn authenticate(&self, token: &str) -> Result<String, Status> {
+        let auth_request = AuthenticateRequest { token: token.to_string() };
+        let auth_response = self.auth_client
+            .authenticate(auth_request)
+            .await
+            .map_err(|e| Status::unauthenticated(format!("Authentication failed: {}", e)))?
+            .into_inner();
+        if !auth_response.success {
+            return Err(Status::unauthenticated(auth_response.error));
+        }
+        Ok(auth_response.user_id)
+    }
+
+    async fn authorize(&self, user_id: &str, method: &str) -> Result<(), Status> {
+        let auth_request = AuthorizeRequest {
+            user_id: user_id.to_string(),
+            service: "network_service".to_string(),
+            method: method.to_string(),
+        };
+        let auth_response = self.auth_client
+            .authorize(auth_request)
+            .await
+            .map_err(|e| Status::permission_denied(format!("Authorization failed: {}", e)))?
+            .into_inner();
+        if !auth_response.allowed {
+            return Err(Status::permission_denied(auth_response.error));
+        }
+        Ok(())
     }
 
     async fn send_version_message(stream: &mut TcpStream, addr: &str) -> Result<(), String> {
+        info!("Sending version message to peer: {}", addr);
         let version = Version {
             version: 70015,
             services: 0,
@@ -102,15 +159,26 @@ impl NetworkServiceImpl {
             payload: version.serialize(),
         };
         let serialized = message.serialize(BSVNetwork::Testnet);
-        stream.write_all(&serialized).await.map_err(|e| e.to_string())?;
+        stream.write_all(&serialized).await.map_err(|e| {
+            warn!("Failed to send version message to {}: {}", addr, e);
+            e.to_string()
+        })?;
 
         let mut buffer = vec![0u8; 1024];
-        let n = stream.read(&mut buffer).await.map_err(|e| e.to_string())?;
+        let n = stream.read(&mut buffer).await.map_err(|e| {
+            warn!("Failed to read from {}: {}", addr, e);
+            e.to_string()
+        })?;
         let response = Message::deserialize(&buffer[..n], BSVNetwork::Testnet)
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| {
+                warn!("Failed to deserialize response from {}: {}", addr, e);
+                e.to_string()
+            })?;
         if response.command == "verack" {
+            info!("Received verack from {}", addr);
             Ok(())
         } else {
+            warn!("Expected verack from {}, got {}", addr, response.command);
             Err("Expected Verack".to_string())
         }
     }
@@ -120,6 +188,7 @@ impl NetworkServiceImpl {
         if Self::send_version_message(&mut stream, &addr).await.is_err() {
             let mut peers = peers.lock().await;
             peers.remove(&addr);
+            warn!("Removed peer {} due to failed version handshake", addr);
             return;
         }
 
@@ -129,9 +198,9 @@ impl NetworkServiceImpl {
                 Ok(n) if n > 0 => {
                     if let Ok(message) = Message::deserialize(&buffer[..n], BSVNetwork::Testnet) {
                         match message.command.as_str() {
-                            "addr" => println!("Received addr message from {}", addr),
-                            "inv" => println!("Received inv message from {}", addr),
-                            "getdata" => println!("Received getdata message from {}", addr),
+                            "addr" => info!("Received addr message from {}", addr),
+                            "inv" => info!("Received inv message from {}", addr),
+                            "getdata" => info!("Received getdata message from {}", addr),
                             _ => {}
                         }
                     }
@@ -139,6 +208,7 @@ impl NetworkServiceImpl {
                 _ => {
                     let mut peers = peers.lock().await;
                     peers.remove(&addr);
+                    warn!("Removed peer {} due to connection error", addr);
                     break;
                 }
             }
@@ -149,7 +219,7 @@ impl NetworkServiceImpl {
         let peers = self.peers.lock().await;
         for (addr, tx) in peers.iter() {
             if let Err(e) = tx.send(message.clone()).await {
-                println!("Failed to send message to {}: {}", addr, e);
+                warn!("Failed to send message to {}: {}", addr, e);
             }
         }
         Ok(())
@@ -159,8 +229,14 @@ impl NetworkServiceImpl {
 #[tonic::async_trait]
 impl Network for NetworkServiceImpl {
     async fn ping(&self, request: Request<PingRequest>) -> Result<Response<PingResponse>, Status> {
+        let token = request.metadata().get("authorization").ok_or_else(|| Status::unauthenticated("Missing token"))?;
+        let user_id = self.authenticate(token.to_str().map_err(|e| Status::invalid_argument("Invalid token format"))?).await?;
+        self.authorize(&user_id, "Ping").await?;
+        self.rate_limiter.until_ready().await;
+
         self.requests_total.inc();
         let start = Instant::now();
+        info!("Processing ping request: {}", request.get_ref().message);
         let req = request.into_inner();
         self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
         Ok(Response::new(PingResponse {
@@ -168,12 +244,19 @@ impl Network for NetworkServiceImpl {
         }))
     }
 
-    async fn discover_peers(&self, _request: Request<DiscoverPeersRequest>) -> Result<Response<DiscoverPeersResponse>, Status> {
+    async fn discover_peers(&self, request: Request<DiscoverPeersRequest>) -> Result<Response<DiscoverPeersResponse>, Status> {
+        let token = request.metadata().get("authorization").ok_or_else(|| Status::unauthenticated("Missing token"))?;
+        let user_id = self.authenticate(token.to_str().map_err(|e| Status::invalid_argument("Invalid token format"))?).await?;
+        self.authorize(&user_id, "DiscoverPeers").await?;
+        self.rate_limiter.until_ready().await;
+
         self.requests_total.inc();
         let start = Instant::now();
+        info!("Discovering peers");
         let peers = self.peers.lock().await;
         let peer_addresses: Vec<String> = peers.keys().cloned().collect();
         self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
+        info!("Discovered {} peers", peer_addresses.len());
         Ok(Response::new(DiscoverPeersResponse {
             peer_addresses,
             error: if peers.is_empty() { "No active peers".to_string() } else { "".to_string() },
@@ -181,20 +264,31 @@ impl Network for NetworkServiceImpl {
     }
 
     async fn broadcast_transaction(&self, request: Request<BroadcastTxRequest>) -> Result<Response<BroadcastTxResponse>, Status> {
+        let token = request.metadata().get("authorization").ok_or_else(|| Status::unauthenticated("Missing token"))?;
+        let user_id = self.authenticate(token.to_str().map_err(|e| Status::invalid_argument("Invalid token format"))?).await?;
+        self.authorize(&user_id, "BroadcastTransaction").await?;
+        self.rate_limiter.until_ready().await;
+
         self.requests_total.inc();
         let start = Instant::now();
+        info!("Broadcasting transaction: {}", request.get_ref().tx_hex);
         let req = request.into_inner();
         let mut client = self.transaction_client.clone();
         let validate_request = ValidateTxRequest {
             tx_hex: req.tx_hex.clone(),
         };
-        let validate_response = client.validate_transaction(validate_request)
+        let validate_response = client
+            .validate_transaction(validate_request)
             .await
-            .map_err(|e| Status::internal(format!("Validation failed: {}", e)))?
+            .map_err(|e| {
+                warn!("Transaction validation failed: {}", e);
+                Status::internal(format!("Validation failed: {}", e))
+            })?
             .into_inner();
 
         if !validate_response.is_valid {
             self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
+            warn!("Invalid transaction: {}", validate_response.error);
             return Ok(Response::new(BroadcastTxResponse {
                 success: false,
                 error: validate_response.error,
@@ -202,18 +296,28 @@ impl Network for NetworkServiceImpl {
         }
 
         let tx_bytes = hex::decode(&req.tx_hex)
-            .map_err(|e| Status::invalid_argument(format!("Invalid tx_hex: {}", e)))?;
+            .map_err(|e| {
+                warn!("Invalid tx_hex: {}", e);
+                Status::invalid_argument(format!("Invalid tx_hex: {}", e))
+            })?;
         let tx: Transaction = sv::util::deserialize(&tx_bytes)
-            .map_err(|e| Status::invalid_argument(format!("Invalid transaction: {}", e)))?;
+            .map_err(|e| {
+                warn!("Invalid transaction: {}", e);
+                Status::invalid_argument(format!("Invalid transaction: {}", e))
+            })?;
 
         let message = Message {
             command: "tx".to_string(),
             payload: tx.serialize(),
         };
         self.broadcast_message(message).await
-            .map_err(|e| Status::internal(format!("Broadcast failed: {}", e)))?;
+            .map_err(|e| {
+                warn!("Broadcast failed: {}", e);
+                Status::internal(format!("Broadcast failed: {}", e))
+            })?;
 
         self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
+        info!("Successfully broadcast transaction: {}", req.tx_hex);
         Ok(Response::new(BroadcastTxResponse {
             success: true,
             error: "".to_string(),
@@ -221,20 +325,31 @@ impl Network for NetworkServiceImpl {
     }
 
     async fn broadcast_block(&self, request: Request<BroadcastBlockRequest>) -> Result<Response<BroadcastBlockResponse>, Status> {
+        let token = request.metadata().get("authorization").ok_or_else(|| Status::unauthenticated("Missing token"))?;
+        let user_id = self.authenticate(token.to_str().map_err(|e| Status::invalid_argument("Invalid token format"))?).await?;
+        self.authorize(&user_id, "BroadcastBlock").await?;
+        self.rate_limiter.until_ready().await;
+
         self.requests_total.inc();
         let start = Instant::now();
+        info!("Broadcasting block: {}", request.get_ref().block_hex);
         let req = request.into_inner();
         let mut client = self.block_client.clone();
         let validate_request = ValidateBlockRequest {
             block_hex: req.block_hex.clone(),
         };
-        let validate_response = client.validate_block(validate_request)
+        let validate_response = client
+            .validate_block(validate_request)
             .await
-            .map_err(|e| Status::internal(format!("Block validation failed: {}", e)))?
+            .map_err(|e| {
+                warn!("Block validation failed: {}", e);
+                Status::internal(format!("Block validation failed: {}", e))
+            })?
             .into_inner();
 
         if !validate_response.is_valid {
             self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
+            warn!("Invalid block: {}", validate_response.error);
             return Ok(Response::new(BroadcastBlockResponse {
                 success: false,
                 error: validate_response.error,
@@ -242,25 +357,39 @@ impl Network for NetworkServiceImpl {
         }
 
         let block_bytes = hex::decode(&req.block_hex)
-            .map_err(|e| Status::invalid_argument(format!("Invalid block_hex: {}", e)))?;
+            .map_err(|e| {
+                warn!("Invalid block_hex: {}", e);
+                Status::invalid_argument(format!("Invalid block_hex: {}", e))
+            })?;
         let block: Block = sv::util::deserialize(&block_bytes)
-            .map_err(|e| Status::invalid_argument(format!("Invalid block: {}", e)))?;
+            .map_err(|e| {
+                warn!("Invalid block: {}", e);
+                Status::invalid_argument(format!("Invalid block: {}", e))
+            })?;
 
         let message = Message {
             command: "block".to_string(),
             payload: block.serialize(),
         };
         self.broadcast_message(message).await
-            .map_err(|e| Status::internal(format!("Broadcast failed: {}", e)))?;
+            .map_err(|e| {
+                warn!("Broadcast failed: {}", e);
+                Status::internal(format!("Broadcast failed: {}", e))
+            })?;
 
         self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
+        info!("Successfully broadcast block: {}", req.block_hex);
         Ok(Response::new(BroadcastBlockResponse {
             success: true,
             error: "".to_string(),
         }))
     }
 
-    async fn get_metrics(&self, _request: Request<GetMetricsRequest>) -> Result<Response<GetMetricsResponse>, Status> {
+    async fn get_metrics(&self, request: Request<GetMetricsRequest>) -> Result<Response<GetMetricsResponse>, Status> {
+        let token = request.metadata().get("authorization").ok_or_else(|| Status::unauthenticated("Missing token"))?;
+        let user_id = self.authenticate(token.to_str().map_err(|e| Status::invalid_argument("Invalid token format"))?).await?;
+        self.authorize(&user_id, "GetMetrics").await?;
+
         Ok(Response::new(GetMetricsResponse {
             service_name: "network_service".to_string(),
             requests_total: self.requests_total.get() as u64,
@@ -272,6 +401,10 @@ impl Network for NetworkServiceImpl {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::INFO)
+        .init();
+
     let addr = "[::1]:50051".parse().unwrap();
     let network_service = NetworkServiceImpl::new().await;
 
