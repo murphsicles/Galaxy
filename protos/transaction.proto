@@ -1,29 +1,40 @@
 syntax = "proto3";
 package transaction;
 
+import "metrics.proto";
+
 service Transaction {
     rpc ValidateTransaction (ValidateTxRequest) returns (ValidateTxResponse);
     rpc ProcessTransaction (ProcessTxRequest) returns (ProcessTxResponse);
     rpc BatchValidateTransaction (BatchValidateTxRequest) returns (BatchValidateTxResponse);
+    rpc IndexTransaction (IndexTransactionRequest) returns (IndexTransactionResponse);
+    rpc GetMetrics (metrics.GetMetricsRequest) returns (metrics.GetMetricsResponse);
 }
 
 message ValidateTxRequest {
-    string tx_hex = 1; // Hex-encoded BSV transaction
+    string tx_hex = 1; // Hex-encoded transaction
 }
 message ValidateTxResponse {
     bool is_valid = 1;
     string error = 2; // Error message if validation fails
 }
 message ProcessTxRequest {
-    string tx_hex = 1; // Hex-encoded BSV transaction
+    string tx_hex = 1; // Hex-encoded transaction
 }
 message ProcessTxResponse {
     bool success = 1;
     string error = 2; // Error message if processing fails
 }
 message BatchValidateTxRequest {
-    repeated string tx_hexes = 1; // List of hex-encoded BSV transactions
+    repeated string tx_hexes = 1; // List of hex-encoded transactions
 }
 message BatchValidateTxResponse {
-    repeated ValidateTxResponse results = 1; // Validation results for each transaction
+    repeated ValidateTxResponse results = 1; // Results for each transaction
+}
+message IndexTransactionRequest {
+    string tx_hex = 1; // Hex-encoded transaction to index
+}
+message IndexTransactionResponse {
+    bool success = 1;
+    string error = 2; // Error message if indexing fails
 }
