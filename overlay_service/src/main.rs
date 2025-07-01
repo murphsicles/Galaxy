@@ -3,7 +3,8 @@ use overlay::overlay_server::{Overlay, OverlayServer};
 use overlay::{
     CreateOverlayRequest, CreateOverlayResponse, SubmitOverlayTxRequest, SubmitOverlayTxResponse,
     GetOverlayBlockRequest, GetOverlayBlockResponse, BatchSubmitOverlayTxRequest, BatchSubmitOverlayTxResponse,
-    StreamOverlayTxRequest, StreamOverlayTxResponse, GetMetricsRequest, GetMetricsResponse
+    StreamOverlayTxRequest, StreamOverlayTxResponse, IndexOverlayTransactionRequest, IndexOverlayTransactionResponse,
+    QueryOverlayBlockRequest, QueryOverlayBlockResponse, GetMetricsRequest, GetMetricsResponse
 };
 use transaction::transaction_client::TransactionClient;
 use transaction::ValidateTxRequest;
@@ -13,6 +14,10 @@ use network::network_client::NetworkClient;
 use network::BroadcastTxRequest;
 use auth::auth_client::AuthClient;
 use auth::{AuthenticateRequest, AuthorizeRequest};
+use index::index_client::IndexClient;
+use index::IndexTransactionRequest as IndexIndexTransactionRequest;
+use alert::alert_client::AlertClient;
+use alert::SendAlertRequest;
 use sv::transaction::Transaction;
 use sv::block::Block;
 use sv::util::{deserialize, serialize, hash::Sha256d};
@@ -35,6 +40,8 @@ tonic::include_proto!("transaction");
 tonic::include_proto!("block");
 tonic::include_proto!("network");
 tonic::include_proto!("auth");
+tonic::include_proto!("index");
+tonic::include_proto!("alert");
 tonic::include_proto!("metrics");
 
 #[derive(Debug)]
@@ -43,6 +50,8 @@ struct OverlayServiceImpl {
     block_client: BlockClient<Channel>,
     network_client: NetworkClient<Channel>,
     auth_client: AuthClient<Channel>,
+    index_client: IndexClient<Channel>,
+    alert_client: AlertClient<Channel>,
     overlays: Arc<Mutex<HashMap<String, (Vec<Block>, Vec<Transaction>)>>>,
     db: Arc<Db>,
     registry: Arc<Registry>,
@@ -71,6 +80,12 @@ impl OverlayServiceImpl {
         let auth_client = AuthClient::connect("http://[::1]:50060")
             .await
             .expect("Failed to connect to auth_service");
+        let index_client = IndexClient::connect("http://[::1]:50062")
+            .await
+            .expect("Failed to connect to index_service");
+        let alert_client = AlertClient::connect("http://[::1]:50061")
+            .await
+            .expect("Failed to connect to alert_service");
         let overlays = Arc::new(Mutex::new(HashMap::new()));
         let db = Arc::new(sled::open(format!("overlay_db_{}", shard_id)).expect("Failed to open sled DB"));
         let registry = Arc::new(Registry::new());
@@ -88,6 +103,8 @@ impl OverlayServiceImpl {
             block_client,
             network_client,
             auth_client,
+            index_client,
+            alert_client,
             overlays,
             db,
             registry,
@@ -129,6 +146,27 @@ impl OverlayServiceImpl {
         Ok(())
     }
 
+    async fn send_alert(&self, event_type: &str, message: &str, severity: u32) -> Result<(), Status> {
+        let alert_request = SendAlertRequest {
+            event_type: event_type.to_string(),
+            message: message.to_string(),
+            severity,
+        };
+        let alert_response = self.alert_client
+            .send_alert(alert_request)
+            .await
+            .map_err(|e| {
+                warn!("Failed to send alert: {}", e);
+                Status::internal(format!("Failed to send alert: {}", e))
+            })?
+            .into_inner();
+        if !alert_response.success {
+            warn!("Alert sending failed: {}", alert_response.error);
+            return Err(Status::internal(alert_response.error));
+        }
+        Ok(())
+    }
+
     async fn assemble_overlay_block(&self, overlay_id: &str, transactions: Vec<Transaction>) -> Result<Block, String> {
         let txids: Vec<Sha256d> = transactions.iter().map(|tx| tx.txid()).collect();
         let merkle_root = if txids.is_empty() {
@@ -157,16 +195,18 @@ impl OverlayServiceImpl {
                 prev_blockhash: Default::default(),
                 merkle_root,
                 time: 0,
-                bits: 0x1d00ffff,
+                bits: 0x1d00ffff, // Placeholder
                 nonce: 0,
             },
             transactions,
         };
 
+        let block_key = format!("block_{}:{}", overlay_id, self.block_count.get());
         self.db
-            .insert(format!("block_{}:{}", overlay_id, self.block_count.get()), serialize(&block))
+            .insert(&block_key, serialize(&block))
             .map_err(|e| format!("Failed to store block: {}", e))?;
         self.block_count.inc();
+        info!("Assembled overlay block for {}: {}", overlay_id, block_key);
         Ok(block)
     }
 }
@@ -187,12 +227,13 @@ impl Overlay for OverlayServiceImpl {
         if overlays.contains_key(&req.overlay_id) {
             self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
             warn!("Overlay already exists: {}", req.overlay_id);
+            let _ = self.send_alert("overlay_creation_failed", &format!("Overlay {} already exists", req.overlay_id), 2).await;
             return Ok(Response::new(CreateOverlayResponse {
                 success: false,
                 error: "Overlay already exists".to_string(),
             }));
         }
-        overlays.insert(req.overlay_id, (vec![], vec![]));
+        overlays.insert(req.overlay_id.clone(), (vec![], vec![]));
         self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
         info!("Created overlay: {}", req.overlay_id);
         Ok(Response::new(CreateOverlayResponse {
@@ -214,39 +255,76 @@ impl Overlay for OverlayServiceImpl {
         let mut overlays = self.overlays.lock().await;
         let (blocks, pending_txs) = overlays
             .get_mut(&req.overlay_id)
-            .ok_or_else(|| Status::not_found("Overlay not found"))?;
+            .ok_or_else(|| {
+                warn!("Overlay not found: {}", req.overlay_id);
+                Status::not_found("Overlay not found")
+            })?;
 
         let mut transaction_client = self.transaction_client.clone();
         let validate_request = ValidateTxRequest { tx_hex: req.tx_hex.clone() };
         let validate_response = transaction_client
             .validate_transaction(validate_request)
             .await
-            .map_err(|e| Status::internal(format!("Transaction validation failed: {}", e)))?
+            .map_err(|e| {
+                warn!("Transaction validation failed: {}", e);
+                Status::internal(format!("Transaction validation failed: {}", e))
+            })?
             .into_inner();
         if !validate_response.is_valid {
             self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
             warn!("Transaction validation failed: {}", validate_response.error);
+            let _ = self.send_alert("overlay_tx_validation_failed", &format!("Transaction validation failed: {}", validate_response.error), 2).await;
             return Ok(Response::new(SubmitOverlayTxResponse {
                 success: false,
                 error: validate_response.error,
             }));
         }
 
+        let mut index_client = self.index_client.clone();
+        let index_request = IndexIndexTransactionRequest { tx_hex: req.tx_hex.clone() };
+        let index_response = index_client
+            .index_transaction(index_request)
+            .await
+            .map_err(|e| {
+                warn!("Transaction indexing failed: {}", e);
+                Status::internal(format!("Transaction indexing failed: {}", e))
+            })?
+            .into_inner();
+        if !index_response.success {
+            self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
+            warn!("Transaction indexing failed: {}", index_response.error);
+            let _ = self.send_alert("overlay_tx_indexing_failed", &format!("Transaction indexing failed: {}", index_response.error), 2).await;
+            return Ok(Response::new(SubmitOverlayTxResponse {
+                success: false,
+                error: index_response.error,
+            }));
+        }
+
         let tx_bytes = hex::decode(&req.tx_hex)
-            .map_err(|e| Status::invalid_argument(format!("Invalid tx_hex: {}", e)))?;
+            .map_err(|e| {
+                warn!("Invalid tx_hex: {}", e);
+                Status::invalid_argument(format!("Invalid tx_hex: {}", e))
+            })?;
         let tx: Transaction = deserialize(&tx_bytes)
-            .map_err(|e| Status::invalid_argument(format!("Invalid transaction: {}", e)))?;
+            .map_err(|e| {
+                warn!("Invalid transaction: {}", e);
+                Status::invalid_argument(format!("Invalid transaction: {}", e))
+            })?;
 
         let mut network_client = self.network_client.clone();
         let broadcast_request = BroadcastTxRequest { tx_hex: req.tx_hex.clone() };
         let broadcast_response = network_client
             .broadcast_transaction(broadcast_request)
             .await
-            .map_err(|e| Status::internal(format!("Broadcast failed: {}", e)))?
+            .map_err(|e| {
+                warn!("Broadcast failed: {}", e);
+                Status::internal(format!("Broadcast failed: {}", e))
+            })?
             .into_inner();
         if !broadcast_response.success {
             self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
             warn!("Broadcast failed: {}", broadcast_response.error);
+            let _ = self.send_alert("overlay_tx_broadcast_failed", &format!("Broadcast failed: {}", broadcast_response.error), 2).await;
             return Ok(Response::new(SubmitOverlayTxResponse {
                 success: false,
                 error: broadcast_response.error,
@@ -258,13 +336,16 @@ impl Overlay for OverlayServiceImpl {
             let block = self
                 .assemble_overlay_block(&req.overlay_id, pending_txs.drain(..).collect())
                 .await
-                .map_err(|e| Status::internal(format!("Block assembly failed: {}", e)))?;
+                .map_err(|e| {
+                    warn!("Block assembly failed: {}", e);
+                    Status::internal(format!("Block assembly failed: {}", e))
+                })?;
             blocks.push(block);
             info!("Assembled overlay block for {}", req.overlay_id);
         }
 
         self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
-        info!("Submitted overlay transaction: {}", req.tx_hex);
+        info!("Successfully submitted overlay transaction: {}", req.tx_hex);
         Ok(Response::new(SubmitOverlayTxResponse {
             success: true,
             error: "".to_string(),
@@ -285,10 +366,19 @@ impl Overlay for OverlayServiceImpl {
         let block_bytes = self
             .db
             .get(&block_key)
-            .map_err(|e| Status::internal(format!("Failed to retrieve block: {}", e)))?
-            .ok_or_else(|| Status::not_found("Block not found"))?;
+            .map_err(|e| {
+                warn!("Failed to retrieve block {}: {}", block_key, e);
+                Status::internal(format!("Failed to retrieve block: {}", e))
+            })?
+            .ok_or_else(|| {
+                warn!("Block not found: {}", block_key);
+                Status::not_found("Block not found")
+            })?;
         let block: Block = deserialize(&block_bytes)
-            .map_err(|e| Status::internal(format!("Invalid block: {}", e)))?;
+            .map_err(|e| {
+                warn!("Invalid block: {}", e);
+                Status::internal(format!("Invalid block: {}", e))
+            })?;
 
         self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
         info!("Retrieved overlay block: {}:{}", req.overlay_id, req.block_height);
@@ -311,25 +401,52 @@ impl Overlay for OverlayServiceImpl {
         let mut overlays = self.overlays.lock().await;
         let (blocks, pending_txs) = overlays
             .get_mut(&req.overlay_id)
-            .ok_or_else(|| Status::not_found("Overlay not found"))?;
+            .ok_or_else(|| {
+                warn!("Overlay not found: {}", req.overlay_id);
+                Status::not_found("Overlay not found")
+            })?;
 
         let mut results = vec![];
         let mut transaction_client = self.transaction_client.clone();
         let mut network_client = self.network_client.clone();
+        let mut index_client = self.index_client.clone();
 
         for tx_hex in req.tx_hexes {
             let validate_request = ValidateTxRequest { tx_hex: tx_hex.clone() };
             let validate_response = transaction_client
                 .validate_transaction(validate_request)
                 .await
-                .map_err(|e| Status::internal(format!("Transaction validation failed: {}", e)))?
+                .map_err(|e| {
+                    warn!("Transaction validation failed: {}", e);
+                    Status::internal(format!("Transaction validation failed: {}", e))
+                })?
                 .into_inner();
             if !validate_response.is_valid {
                 results.push(SubmitOverlayTxResponse {
                     success: false,
-                    error: validate_response.error,
+                    error: validate_response.error.clone(),
                 });
+                let _ = self.send_alert("overlay_tx_validation_failed", &format!("Batch transaction validation failed: {}", validate_response.error), 2).await;
                 warn!("Batch transaction validation failed: {}", validate_response.error);
+                continue;
+            }
+
+            let index_request = IndexIndexTransactionRequest { tx_hex: tx_hex.clone() };
+            let index_response = index_client
+                .index_transaction(index_request)
+                .await
+                .map_err(|e| {
+                    warn!("Transaction indexing failed: {}", e);
+                    Status::internal(format!("Transaction indexing failed: {}", e))
+                })?
+                .into_inner();
+            if !index_response.success {
+                results.push(SubmitOverlayTxResponse {
+                    success: false,
+                    error: index_response.error.clone(),
+                });
+                let _ = self.send_alert("overlay_tx_indexing_failed", &format!("Batch transaction indexing failed: {}", index_response.error), 2).await;
+                warn!("Batch transaction indexing failed: {}", index_response.error);
                 continue;
             }
 
@@ -337,21 +454,31 @@ impl Overlay for OverlayServiceImpl {
             let broadcast_response = network_client
                 .broadcast_transaction(broadcast_request)
                 .await
-                .map_err(|e| Status::internal(format!("Broadcast failed: {}", e)))?
+                .map_err(|e| {
+                    warn!("Broadcast failed: {}", e);
+                    Status::internal(format!("Broadcast failed: {}", e))
+                })?
                 .into_inner();
             if !broadcast_response.success {
                 results.push(SubmitOverlayTxResponse {
                     success: false,
-                    error: broadcast_response.error,
+                    error: broadcast_response.error.clone(),
                 });
+                let _ = self.send_alert("overlay_tx_broadcast_failed", &format!("Batch broadcast failed: {}", broadcast_response.error), 2).await;
                 warn!("Batch broadcast failed: {}", broadcast_response.error);
                 continue;
             }
 
             let tx_bytes = hex::decode(&tx_hex)
-                .map_err(|e| Status::invalid_argument(format!("Invalid tx_hex: {}", e)))?;
+                .map_err(|e| {
+                    warn!("Invalid tx_hex: {}", e);
+                    Status::invalid_argument(format!("Invalid tx_hex: {}", e))
+                })?;
             let tx: Transaction = deserialize(&tx_bytes)
-                .map_err(|e| Status::invalid_argument(format!("Invalid transaction: {}", e)))?;
+                .map_err(|e| {
+                    warn!("Invalid transaction: {}", e);
+                    Status::invalid_argument(format!("Invalid transaction: {}", e))
+                })?;
             pending_txs.push(tx);
 
             results.push(SubmitOverlayTxResponse {
@@ -364,7 +491,10 @@ impl Overlay for OverlayServiceImpl {
             let block = self
                 .assemble_overlay_block(&req.overlay_id, pending_txs.drain(..).collect())
                 .await
-                .map_err(|e| Status::internal(format!("Block assembly failed: {}", e)))?;
+                .map_err(|e| {
+                    warn!("Block assembly failed: {}", e);
+                    Status::internal(format!("Block assembly failed: {}", e))
+                })?;
             blocks.push(block);
             info!("Assembled batch overlay block for {}", req.overlay_id);
         }
@@ -387,6 +517,8 @@ impl Overlay for OverlayServiceImpl {
         let overlays = Arc::clone(&self.overlays);
         let transaction_client = self.transaction_client.clone();
         let network_client = self.network_client.clone();
+        let index_client = self.index_client.clone();
+        let alert_client = self.alert_client.clone();
         let block_count = self.block_count.clone();
         let latency_ms = self.latency_ms.clone();
 
@@ -397,15 +529,28 @@ impl Overlay for OverlayServiceImpl {
                 let mut overlays = overlays.lock().await;
                 let (blocks, pending_txs) = overlays
                     .get_mut(&req.overlay_id)
-                    .ok_or_else(|| Status::not_found("Overlay not found"))?;
+                    .ok_or_else(|| {
+                        warn!("Overlay not found: {}", req.overlay_id);
+                        Status::not_found("Overlay not found")
+                    })?;
 
                 let validate_request = ValidateTxRequest { tx_hex: req.tx_hex.clone() };
                 let validate_response = transaction_client.clone()
                     .validate_transaction(validate_request)
                     .await
-                    .map_err(|e| Status::internal(format!("Transaction validation failed: {}", e)))?
+                    .map_err(|e| {
+                        warn!("Transaction validation failed: {}", e);
+                        Status::internal(format!("Transaction validation failed: {}", e))
+                    })?
                     .into_inner();
                 if !validate_response.is_valid {
+                    let _ = alert_client.clone()
+                        .send_alert(SendAlertRequest {
+                            event_type: "overlay_tx_validation_failed".to_string(),
+                            message: format!("Streamed transaction validation failed: {}", validate_response.error),
+                            severity: 2,
+                        })
+                        .await;
                     yield StreamOverlayTxResponse {
                         success: false,
                         tx_hex: req.tx_hex,
@@ -415,13 +560,49 @@ impl Overlay for OverlayServiceImpl {
                     continue;
                 }
 
+                let index_request = IndexIndexTransactionRequest { tx_hex: req.tx_hex.clone() };
+                let index_response = index_client.clone()
+                    .index_transaction(index_request)
+                    .await
+                    .map_err(|e| {
+                        warn!("Transaction indexing failed: {}", e);
+                        Status::internal(format!("Transaction indexing failed: {}", e))
+                    })?
+                    .into_inner();
+                if !index_response.success {
+                    let _ = alert_client.clone()
+                        .send_alert(SendAlertRequest {
+                            event_type: "overlay_tx_indexing_failed".to_string(),
+                            message: format!("Streamed transaction indexing failed: {}", index_response.error),
+                            severity: 2,
+                        })
+                        .await;
+                    yield StreamOverlayTxResponse {
+                        success: false,
+                        tx_hex: req.tx_hex,
+                        error: index_response.error,
+                    };
+                    warn!("Streamed transaction indexing failed: {}", index_response.error);
+                    continue;
+                }
+
                 let broadcast_request = BroadcastTxRequest { tx_hex: req.tx_hex.clone() };
                 let broadcast_response = network_client.clone()
                     .broadcast_transaction(broadcast_request)
                     .await
-                    .map_err(|e| Status::internal(format!("Broadcast failed: {}", e)))?
+                    .map_err(|e| {
+                        warn!("Broadcast failed: {}", e);
+                        Status::internal(format!("Broadcast failed: {}", e))
+                    })?
                     .into_inner();
                 if !broadcast_response.success {
+                    let _ = alert_client.clone()
+                        .send_alert(SendAlertRequest {
+                            event_type: "overlay_tx_broadcast_failed".to_string(),
+                            message: format!("Streamed broadcast failed: {}", broadcast_response.error),
+                            severity: 2,
+                        })
+                        .await;
                     yield StreamOverlayTxResponse {
                         success: false,
                         tx_hex: req.tx_hex,
@@ -432,16 +613,25 @@ impl Overlay for OverlayServiceImpl {
                 }
 
                 let tx_bytes = hex::decode(&req.tx_hex)
-                    .map_err(|e| Status::invalid_argument(format!("Invalid tx_hex: {}", e)))?;
+                    .map_err(|e| {
+                        warn!("Invalid tx_hex: {}", e);
+                        Status::invalid_argument(format!("Invalid tx_hex: {}", e))
+                    })?;
                 let tx: Transaction = deserialize(&tx_bytes)
-                    .map_err(|e| Status::invalid_argument(format!("Invalid transaction: {}", e)))?;
+                    .map_err(|e| {
+                        warn!("Invalid transaction: {}", e);
+                        Status::invalid_argument(format!("Invalid transaction: {}", e))
+                    })?;
                 pending_txs.push(tx);
 
                 if pending_txs.len() >= 100 {
                     let block = self
                         .assemble_overlay_block(&req.overlay_id, pending_txs.drain(..).collect())
                         .await
-                        .map_err(|e| Status::internal(format!("Block assembly failed: {}", e)))?;
+                        .map_err(|e| {
+                            warn!("Block assembly failed: {}", e);
+                            Status::internal(format!("Block assembly failed: {}", e))
+                        })?;
                     blocks.push(block);
                     block_count.inc();
                     info!("Assembled streamed overlay block for {}", req.overlay_id);
@@ -460,6 +650,80 @@ impl Overlay for OverlayServiceImpl {
         Ok(Response::new(Box::pin(output)))
     }
 
+    async fn index_overlay_transaction(&self, request: Request<IndexOverlayTransactionRequest>) -> Result<Response<IndexOverlayTransactionResponse>, Status> {
+        let token = request.metadata().get("authorization").ok_or_else(|| Status::unauthenticated("Missing token"))?;
+        let user_id = self.authenticate(token.to_str().map_err(|e| Status::invalid_argument("Invalid token format"))?).await?;
+        self.authorize(&user_id, "IndexOverlayTransaction").await?;
+        self.rate_limiter.until_ready().await;
+
+        self.tx_requests.inc();
+        let start = Instant::now();
+        info!("Indexing overlay transaction: {} for overlay: {}", request.get_ref().tx_hex, request.get_ref().overlay_id);
+        let req = request.into_inner();
+        let mut index_client = self.index_client.clone();
+        let index_request = IndexIndexTransactionRequest { tx_hex: req.tx_hex.clone() };
+        let index_response = index_client
+            .index_transaction(index_request)
+            .await
+            .map_err(|e| {
+                warn!("Transaction indexing failed: {}", e);
+                Status::internal(format!("Transaction indexing failed: {}", e))
+            })?
+            .into_inner();
+
+        if !index_response.success {
+            self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
+            warn!("Overlay transaction indexing failed: {}", index_response.error);
+            let _ = self.send_alert("overlay_tx_indexing_failed", &format!("Overlay transaction indexing failed: {}", index_response.error), 2).await;
+            return Ok(Response::new(IndexOverlayTransactionResponse {
+                success: false,
+                error: index_response.error,
+            }));
+        }
+
+        self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
+        info!("Successfully indexed overlay transaction: {}", req.tx_hex);
+        Ok(Response::new(IndexOverlayTransactionResponse {
+            success: true,
+            error: "".to_string(),
+        }))
+    }
+
+    async fn query_overlay_block(&self, request: Request<QueryOverlayBlockRequest>) -> Result<Response<QueryOverlayBlockResponse>, Status> {
+        let token = request.metadata().get("authorization").ok_or_else(|| Status::unauthenticated("Missing token"))?;
+        let user_id = self.authenticate(token.to_str().map_err(|e| Status::invalid_argument("Invalid token format"))?).await?;
+        self.authorize(&user_id, "QueryOverlayBlock").await?;
+        self.rate_limiter.until_ready().await;
+
+        self.tx_requests.inc();
+        let start = Instant::now();
+        info!("Querying overlay block: {}:{}", request.get_ref().overlay_id, request.get_ref().block_height);
+        let req = request.into_inner();
+        let block_key = format!("block_{}:{}", req.overlay_id, req.block_height);
+        let result = self.db
+            .get(&block_key)
+            .map_err(|e| {
+                warn!("Failed to query block {}: {}", block_key, e);
+                Status::internal(format!("Failed to query block: {}", e))
+            })?;
+
+        self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
+        if let Some(block_bytes) = result {
+            info!("Found overlay block: {}:{}", req.overlay_id, req.block_height);
+            Ok(Response::new(QueryOverlayBlockResponse {
+                block_hex: hex::encode(block_bytes),
+                error: "".to_string(),
+            }))
+        } else {
+            warn!("Overlay block not found: {}:{}", req.overlay_id, req.block_height);
+            let _ = self.send_alert("overlay_block_query_failed", &format!("Overlay block not found: {}:{}", req.overlay_id, req.block_height), 2).await;
+            Ok(Response::new(QueryOverlayBlockResponse {
+                block_hex: "".to_string(),
+                error: "Block not found".to_string(),
+            }))
+        }
+    }
+
     async fn get_metrics(&self, request: Request<GetMetricsRequest>) -> Result<Response<GetMetricsResponse>, Status> {
         let token = request.metadata().get("authorization").ok_or_else(|| Status::unauthenticated("Missing token"))?;
         let user_id = self.authenticate(token.to_str().map_err(|e| Status::invalid_argument("Invalid token format"))?).await?;
@@ -469,7 +733,7 @@ impl Overlay for OverlayServiceImpl {
             service_name: "overlay_service".to_string(),
             requests_total: self.tx_requests.get() as u64,
             avg_latency_ms: self.latency_ms.get(),
-            errors_total: 0,
+            errors_total: 0, // Placeholder
         }))
     }
 }
