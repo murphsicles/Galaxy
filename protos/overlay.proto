@@ -4,54 +4,56 @@ package overlay;
 service Overlay {
     rpc CreateOverlay (CreateOverlayRequest) returns (CreateOverlayResponse);
     rpc SubmitOverlayTransaction (SubmitOverlayTxRequest) returns (SubmitOverlayTxResponse);
-    rpc GetOverlayBlock (GetOverlayBlockRequest) returns (GetOverlayBlockResponse);
+    rpc GetOverlayBlock (GetOverlayBlockRequest) returns (GetOverlayBlockResponse) {
+        option (google.api.http) = { buffer_size_hint: 4000000000 }; // 4GB for large blocks
+    };
     rpc BatchSubmitOverlayTransaction (BatchSubmitOverlayTxRequest) returns (BatchSubmitOverlayTxResponse);
     rpc StreamOverlayTransactions (stream StreamOverlayTxRequest) returns (stream StreamOverlayTxResponse);
     rpc GetMetrics (GetMetricsRequest) returns (GetMetricsResponse);
 }
 
 message CreateOverlayRequest {
-    string overlay_id = 1; // Unique identifier for the overlay
+    string overlay_id = 1;
 }
 message CreateOverlayResponse {
     bool success = 1;
-    string error = 2; // Error message if creation fails
+    string error = 2;
 }
 message SubmitOverlayTxRequest {
-    string overlay_id = 1; // Overlay identifier
-    string tx_hex = 2; // Hex-encoded overlay transaction
+    string overlay_id = 1;
+    string tx_hex = 2;
 }
 message SubmitOverlayTxResponse {
     bool success = 1;
-    string error = 2; // Error message if submission fails
+    string error = 2;
 }
 message GetOverlayBlockRequest {
-    string overlay_id = 1; // Overlay identifier
-    uint32 block_height = 2; // Block height in the overlay
+    string overlay_id = 1;
+    uint32 block_height = 2;
 }
 message GetOverlayBlockResponse {
-    string block_hex = 1; // Hex-encoded overlay block
-    string error = 2; // Error message if retrieval fails
+    string block_hex = 1;
+    string error = 2;
 }
 message BatchSubmitOverlayTxRequest {
-    string overlay_id = 1; // Overlay identifier
-    repeated string tx_hexes = 2; // List of hex-encoded overlay transactions
+    string overlay_id = 1;
+    repeated string tx_hexes = 2;
 }
 message BatchSubmitOverlayTxResponse {
-    repeated SubmitOverlayTxResponse results = 1; // Results for each transaction
+    repeated SubmitOverlayTxResponse results = 1;
 }
 message StreamOverlayTxRequest {
-    string overlay_id = 1; // Overlay identifier
-    string tx_hex = 2; // Hex-encoded transaction to monitor
+    string overlay_id = 1;
+    string tx_hex = 2;
 }
 message StreamOverlayTxResponse {
     bool success = 1;
-    string tx_hex = 2; // Hex-encoded transaction
-    string error = 3; // Error message if submission fails
+    string tx_hex = 2;
+    string error = 3;
 }
 message GetMetricsRequest {}
 message GetMetricsResponse {
-    uint64 tx_requests = 1; // Total transaction requests
-    double avg_latency_ms = 2; // Average transaction processing latency
-    uint64 block_count = 3; // Total overlay blocks created
+    uint64 tx_requests = 1;
+    double avg_latency_ms = 2;
+    uint64 block_count = 3;
 }
