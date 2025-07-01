@@ -28,7 +28,7 @@ struct OverlayServiceImpl {
     transaction_client: TransactionClient<Channel>,
     block_client: BlockClient<Channel>,
     network_client: NetworkClient<Channel>,
-    overlays: Arc<Mutex<HashMap<String, Vec<Block>>>>, // Overlay ID to block list
+    overlays: Arc<Mutex<HashMap<String, (Vec<Block>, Vec<Transaction>)>>>, // Overlay ID to (blocks, pending txs)
 }
 
 impl OverlayServiceImpl {
@@ -45,6 +45,27 @@ impl OverlayServiceImpl {
         let overlays = Arc::new(Mutex::new(HashMap::new()));
         OverlayServiceImpl { transaction_client, block_client, network_client, overlays }
     }
+
+    async fn assemble_overlay_block(&self, overlay_id: &str, transactions: Vec<Transaction>) -> Result<Block, String> {
+        let mut block_client = self.block_client.clone();
+        let tx_hexes = transactions.iter()
+            .map(|tx| hex::encode(serialize(tx)))
+            .collect();
+        let request = AssembleBlockRequest { tx_hexes };
+        let response = block_client.assemble_block(request)
+            .await
+            .map_err(|e| format!("Block assembly failed: {}", e))?
+            .into_inner();
+
+        if !response.error.is_empty() {
+            return Err(response.error);
+        }
+
+        let block: Block = deserialize(&hex::decode(&response.block_hex)
+            .map_err(|e| format!("Invalid block_hex: {}", e))?)
+            .map_err(|e| format!("Invalid block: {}", e))?;
+        Ok(block)
+    }
 }
 
 #[tonic::async_trait]
@@ -58,7 +79,7 @@ impl Overlay for OverlayServiceImpl {
                 error: "Overlay already exists".to_string(),
             }));
         }
-        overlays.insert(req.overlay_id, vec![]);
+        overlays.insert(req.overlay_id, (vec![], vec![]));
         Ok(Response::new(CreateOverlayResponse {
             success: true,
             error: "".to_string(),
@@ -68,14 +89,9 @@ impl Overlay for OverlayServiceImpl {
     async fn submit_overlay_transaction(&self, request: Request<SubmitOverlayTxRequest>) -> Result<Response<SubmitOverlayTxResponse>, Status> {
         let req = request.into_inner();
         let mut overlays = self.overlays.lock().await;
-        if !overlays.contains_key(&req.overlay_id) {
-            return Ok(Response::new(SubmitOverlayTxResponse {
-                success: false,
-                error: "Overlay not found".to_string(),
-            }));
-        }
+        let (blocks, pending_txs) = overlays.get_mut(&req.overlay_id)
+            .ok_or_else(|| Status::not_found("Overlay not found"))?;
 
-        // Validate transaction
         let mut transaction_client = self.transaction_client.clone();
         let validate_request = ValidateTxRequest { tx_hex: req.tx_hex.clone() };
         let validate_response = transaction_client.validate_transaction(validate_request)
@@ -89,13 +105,11 @@ impl Overlay for OverlayServiceImpl {
             }));
         }
 
-        // Parse transaction
         let tx_bytes = hex::decode(&req.tx_hex)
             .map_err(|e| Status::invalid_argument(format!("Invalid tx_hex: {}", e)))?;
         let tx: Transaction = deserialize(&tx_bytes)
             .map_err(|e| Status::invalid_argument(format!("Invalid transaction: {}", e)))?;
 
-        // Broadcast to BSV network (anchor to main chain)
         let mut network_client = self.network_client.clone();
         let broadcast_request = BroadcastTxRequest { tx_hex: req.tx_hex.clone() };
         let broadcast_response = network_client.broadcast_transaction(broadcast_request)
@@ -109,8 +123,13 @@ impl Overlay for OverlayServiceImpl {
             }));
         }
 
-        // TODO: Store transaction in overlay (e.g., add to pending block)
-        println!("Submitted transaction {} to overlay {}", tx.txid(), req.overlay_id);
+        pending_txs.push(tx);
+        if pending_txs.len() >= 100 { // Arbitrary threshold for block assembly
+            let block = self.assemble_overlay_block(&req.overlay_id, pending_txs.drain(..).collect())
+                .await
+                .map_err(|e| Status::internal(format!("Block assembly failed: {}", e)))?;
+            blocks.push(block);
+        }
 
         Ok(Response::new(SubmitOverlayTxResponse {
             success: true,
@@ -121,7 +140,7 @@ impl Overlay for OverlayServiceImpl {
     async fn get_overlay_block(&self, request: Request<GetOverlayBlockRequest>) -> Result<Response<GetOverlayBlockResponse>, Status> {
         let req = request.into_inner();
         let overlays = self.overlays.lock().await;
-        let blocks = overlays.get(&req.overlay_id)
+        let (blocks, _) = overlays.get(&req.overlay_id)
             .ok_or_else(|| Status::not_found("Overlay not found"))?;
 
         if req.block_height as usize >= blocks.len() {
@@ -142,14 +161,8 @@ impl Overlay for OverlayServiceImpl {
     async fn batch_submit_overlay_transaction(&self, request: Request<BatchSubmitOverlayTxRequest>) -> Result<Response<BatchSubmitOverlayTxResponse>, Status> {
         let req = request.into_inner();
         let mut overlays = self.overlays.lock().await;
-        if !overlays.contains_key(&req.overlay_id) {
-            return Ok(Response::new(BatchSubmitOverlayTxResponse {
-                results: vec![SubmitOverlayTxResponse {
-                    success: false,
-                    error: "Overlay not found".to_string(),
-                }; req.tx_hexes.len()],
-            }));
-        }
+        let (blocks, pending_txs) = overlays.get_mut(&req.overlay_id)
+            .ok_or_else(|| Status::not_found("Overlay not found"))?;
 
         let mut results = vec![];
         let mut transaction_client = self.transaction_client.clone();
@@ -182,11 +195,23 @@ impl Overlay for OverlayServiceImpl {
                 continue;
             }
 
-            // TODO: Store transaction in overlay
+            let tx_bytes = hex::decode(&tx_hex)
+                .map_err(|e| Status::invalid_argument(format!("Invalid tx_hex: {}", e)))?;
+            let tx: Transaction = deserialize(&tx_bytes)
+                .map_err(|e| Status::invalid_argument(format!("Invalid transaction: {}", e)))?;
+            pending_txs.push(tx);
+
             results.push(SubmitOverlayTxResponse {
                 success: true,
                 error: "".to_string(),
             });
+        }
+
+        if pending_txs.len() >= 100 {
+            let block = self.assemble_overlay_block(&req.overlay_id, pending_txs.drain(..).collect())
+                .await
+                .map_err(|e| Status::internal(format!("Block assembly failed: {}", e)))?;
+            blocks.push(block);
         }
 
         Ok(Response::new(BatchSubmitOverlayTxResponse { results }))
@@ -195,7 +220,7 @@ impl Overlay for OverlayServiceImpl {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let addr = "[::1]:50056".parse().unwrap(); // Different port for overlay_service
+    let addr = "[::1]:50056".parse().unwrap();
     let overlay_service = OverlayServiceImpl::new().await;
 
     println!("Overlay service listening on {}", addr);
