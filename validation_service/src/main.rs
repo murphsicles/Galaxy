@@ -12,6 +12,8 @@ use block::AssembleBlockRequest;
 use storage::storage_client::StorageClient;
 use storage::QueryUtxoRequest;
 use metrics::metrics_client::MetricsClient;
+use auth::auth_client::AuthClient;
+use auth::{AuthenticateRequest, AuthorizeRequest};
 use sv::block::Block;
 use sv::util::{deserialize, serialize, hash::Sha256d};
 use futures::StreamExt;
@@ -22,32 +24,47 @@ use tokio::sync::Mutex;
 use std::sync::Arc;
 use std::time::Instant;
 use prometheus::{Counter, Gauge, Registry};
+use governor::{Quota, RateLimiter, Jitter};
+use std::num::NonZeroU32;
+use tracing::{info, warn};
+use shared::ShardManager;
 
 tonic::include_proto!("validation");
 tonic::include_proto!("block");
 tonic::include_proto!("storage");
 tonic::include_proto!("metrics");
+tonic::include_proto!("auth");
 
 #[derive(Debug)]
 struct ValidationServiceImpl {
     block_client: BlockClient<Channel>,
     storage_client: StorageClient<Channel>,
-    proof_cache: Arc<Mutex<LruCache<String, (String, Vec<String>)>>>, // txid -> (merkle_path, block_headers)
+    auth_client: AuthClient<Channel>,
+    proof_cache: Arc<Mutex<LruCache<String, (String, Vec<String>)>>>,
     registry: Arc<Registry>,
     requests_total: Counter,
     latency_ms: Gauge,
     cache_hits: Counter,
+    rate_limiter: Arc<RateLimiter<String, governor::state::direct::NotKeyed, governor::clock::DefaultClock>>,
+    shard_manager: Arc<ShardManager>,
 }
 
 impl ValidationServiceImpl {
     async fn new() -> Self {
+        let config_str = include_str!("../../tests/config.toml");
+        let config: toml::Value = toml::from_str(config_str).expect("Failed to parse config");
+        let shard_id = config["sharding"]["shard_id"].as_integer().unwrap_or(0) as u32;
+
         let block_client = BlockClient::connect("http://[::1]:50054")
             .await
             .expect("Failed to connect to block_service");
         let storage_client = StorageClient::connect("http://[::1]:50053")
             .await
             .expect("Failed to connect to storage_service");
-        let proof_cache = Arc::new(Mutex::new(LruCache::new(1000))); // Cache 1000 proofs
+        let auth_client = AuthClient::connect("http://[::1]:50060")
+            .await
+            .expect("Failed to connect to auth_service");
+        let proof_cache = Arc::new(Mutex::new(LruCache::new(1000)));
         let registry = Arc::new(Registry::new());
         let requests_total = Counter::new("validation_requests_total", "Total SPV proof requests").unwrap();
         let latency_ms = Gauge::new("validation_latency_ms", "Average proof generation latency").unwrap();
@@ -55,11 +72,56 @@ impl ValidationServiceImpl {
         registry.register(Box::new(requests_total.clone())).unwrap();
         registry.register(Box::new(latency_ms.clone())).unwrap();
         registry.register(Box::new(cache_hits.clone())).unwrap();
-        ValidationServiceImpl { block_client, storage_client, proof_cache, registry, requests_total, latency_ms, cache_hits }
+        let rate_limiter = Arc::new(RateLimiter::direct(Quota::per_second(NonZeroU32::new(1000).unwrap())));
+        let shard_manager = Arc::new(ShardManager::new());
+
+        ValidationServiceImpl {
+            block_client,
+            storage_client,
+            auth_client,
+            proof_cache,
+            registry,
+            requests_total,
+            latency_ms,
+            cache_hits,
+            rate_limiter,
+            shard_manager,
+        }
+    }
+
+    async fn authenticate(&self, token: &str) -> Result<String, Status> {
+        let auth_request = AuthenticateRequest { token: token.to_string() };
+        let auth_response = self.auth_client
+            .authenticate(auth_request)
+            .await
+            .map_err(|e| Status::unauthenticated(format!("Authentication failed: {}", e)))?
+            .into_inner();
+        if !auth_response.success {
+            return Err(Status::unauthenticated(auth_response.error));
+        }
+        Ok(auth_response.user_id)
+    }
+
+    async fn authorize(&self, user_id: &str, method: &str) -> Result<(), Status> {
+        let auth_request = AuthorizeRequest {
+            user_id: user_id.to_string(),
+            service: "validation_service".to_string(),
+            method: method.to_string(),
+        };
+        let auth_response = self.auth_client
+            .authorize(auth_request)
+            .await
+            .map_err(|e| Status::permission_denied(format!("Authorization failed: {}", e)))?
+            .into_inner();
+        if !auth_response.allowed {
+            return Err(Status::permission_denied(auth_response.error));
+        }
+        Ok(())
     }
 
     async fn fetch_block(&self, txid: &str) -> Result<Block, String> {
         // TODO: Implement block retrieval logic with block_service
+        info!("Fetching block for txid: {}", txid);
         Ok(Block {
             header: sv::block::BlockHeader {
                 version: 1,
@@ -105,7 +167,7 @@ impl ValidationServiceImpl {
     }
 
     async fn validate_difficulty(&self, header: &sv::block::BlockHeader) -> Result<bool, String> {
-        let target_bits = 0x1d00ffff; // Placeholder
+        let target_bits = 0x1d00ffff;
         let target = Self::bits_to_target(target_bits);
         let hash = header.hash();
         Ok(hash <= target)
@@ -133,13 +195,20 @@ impl ValidationServiceImpl {
 #[tonic::async_trait]
 impl Validation for ValidationServiceImpl {
     async fn generate_spv_proof(&self, request: Request<GenerateSPVProofRequest>) -> Result<Response<GenerateSPVProofResponse>, Status> {
+        let token = request.metadata().get("authorization").ok_or_else(|| Status::unauthenticated("Missing token"))?;
+        let user_id = self.authenticate(token.to_str().map_err(|e| Status::invalid_argument("Invalid token format"))?).await?;
+        self.authorize(&user_id, "GenerateSPVProof").await?;
+        self.rate_limiter.until_ready().await;
+
         self.requests_total.inc();
         let start = Instant::now();
+        info!("Generating SPV proof for txid: {}", request.get_ref().txid);
         let req = request.into_inner();
         let mut proof_cache = self.proof_cache.lock().await;
         if let Some((merkle_path, block_headers)) = proof_cache.get(&req.txid) {
             self.cache_hits.inc();
             self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
+            info!("Cache hit for txid: {}", req.txid);
             return Ok(Response::new(GenerateSPVProofResponse {
                 success: true,
                 merkle_path: merkle_path.clone(),
@@ -156,6 +225,8 @@ impl Validation for ValidationServiceImpl {
             .map_err(|e| Status::internal(format!("Failed to generate merkle path: {}", e)))?;
 
         if merkle_root != block.header.merkle_root {
+            self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
+            warn!("Merkle root mismatch for txid: {}", req.txid);
             return Ok(Response::new(GenerateSPVProofResponse {
                 success: false,
                 merkle_path: "".to_string(),
@@ -168,6 +239,7 @@ impl Validation for ValidationServiceImpl {
         let merkle_path_hex = hex::encode(&merkle_path);
         proof_cache.put(req.txid.clone(), (merkle_path_hex.clone(), block_headers.clone()));
         self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
+        info!("Generated SPV proof for txid: {}", req.txid);
 
         Ok(Response::new(GenerateSPVProofResponse {
             success: true,
@@ -178,8 +250,14 @@ impl Validation for ValidationServiceImpl {
     }
 
     async fn verify_spv_proof(&self, request: Request<VerifySPVProofRequest>) -> Result<Response<VerifySPVProofResponse>, Status> {
+        let token = request.metadata().get("authorization").ok_or_else(|| Status::unauthenticated("Missing token"))?;
+        let user_id = self.authenticate(token.to_str().map_err(|e| Status::invalid_argument("Invalid token format"))?).await?;
+        self.authorize(&user_id, "VerifySPVProof").await?;
+        self.rate_limiter.until_ready().await;
+
         self.requests_total.inc();
         let start = Instant::now();
+        info!("Verifying SPV proof for txid: {}", request.get_ref().txid);
         let req = request.into_inner();
         let merkle_path = hex::decode(&req.merkle_path)
             .map_err(|e| Status::invalid_argument(format!("Invalid merkle_path: {}", e)))?;
@@ -197,6 +275,7 @@ impl Validation for ValidationServiceImpl {
                 .map_err(|e| Status::internal(format!("Difficulty validation failed: {}", e)))?
             {
                 self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
+                warn!("Invalid difficulty for txid: {}", req.txid);
                 return Ok(Response::new(VerifySPVProofResponse {
                     is_valid: false,
                     error: "Invalid difficulty".to_string(),
@@ -206,6 +285,7 @@ impl Validation for ValidationServiceImpl {
             if let Some(prev) = prev_hash {
                 if header.prev_blockhash != prev {
                     self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
+                    warn!("Invalid header chain for txid: {}", req.txid);
                     return Ok(Response::new(VerifySPVProofResponse {
                         is_valid: false,
                         error: "Invalid header chain".to_string(),
@@ -220,17 +300,18 @@ impl Validation for ValidationServiceImpl {
             let sibling = &merkle_path[i..i + 32];
             let mut combined = [0u8; 64];
             if i % 64 == 0 {
-                combined[..32].copy_from_slice(¤t_hash[..]);
+                combined[..32].copy_from_slice(&current_hash[..]);
                 combined[32..].copy_from_slice(sibling);
             } else {
                 combined[..32].copy_from_slice(sibling);
-                combined[32..].copy_from_slice(¤t_hash[..]);
+                combined[32..].copy_from_slice(&current_hash[..]);
             }
             current_hash = Sha256d::double_sha256(&combined);
         }
 
-        let is_valid = current_hash == prev_hash.unwrap_or_default(); // Compare with block merkle root
+        let is_valid = current_hash == prev_hash.unwrap_or_default();
         self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
+        info!("SPV proof verification {} for txid: {}", if is_valid { "succeeded" } else { "failed" }, req.txid);
 
         Ok(Response::new(VerifySPVProofResponse {
             is_valid,
@@ -239,8 +320,14 @@ impl Validation for ValidationServiceImpl {
     }
 
     async fn batch_generate_spv_proof(&self, request: Request<BatchGenerateSPVProofRequest>) -> Result<Response<BatchGenerateSPVProofResponse>, Status> {
+        let token = request.metadata().get("authorization").ok_or_else(|| Status::unauthenticated("Missing token"))?;
+        let user_id = self.authenticate(token.to_str().map_err(|e| Status::invalid_argument("Invalid token format"))?).await?;
+        self.authorize(&user_id, "BatchGenerateSPVProof").await?;
+        self.rate_limiter.until_ready().await;
+
         self.requests_total.inc();
         let start = Instant::now();
+        info!("Batch generating SPV proofs for {} txids", request.get_ref().txids.len());
         let req = request.into_inner();
         let mut results = vec![];
         let mut proof_cache = self.proof_cache.lock().await;
@@ -254,6 +341,7 @@ impl Validation for ValidationServiceImpl {
                     block_headers: block_headers.clone(),
                     error: "".to_string(),
                 });
+                info!("Cache hit for txid: {}", txid);
                 continue;
             }
 
@@ -271,6 +359,7 @@ impl Validation for ValidationServiceImpl {
                     block_headers: vec![],
                     error: "Merkle root mismatch".to_string(),
                 });
+                warn!("Merkle root mismatch for txid: {}", txid);
                 continue;
             }
 
@@ -283,6 +372,7 @@ impl Validation for ValidationServiceImpl {
                 block_headers,
                 error: "".to_string(),
             });
+            info!("Generated SPV proof for txid: {}", txid);
         }
 
         self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
@@ -290,6 +380,11 @@ impl Validation for ValidationServiceImpl {
     }
 
     async fn stream_spv_proofs(&self, request: Request<Streaming<StreamSPVProofsRequest>>) -> Result<Response<Self::StreamSPVProofsStream>, Status> {
+        let token = request.metadata().get("authorization").ok_or_else(|| Status::unauthenticated("Missing token"))?;
+        let user_id = self.authenticate(token.to_str().map_err(|e| Status::invalid_argument("Invalid token format"))?).await?;
+        self.authorize(&user_id, "StreamSPVProofs").await?;
+        self.rate_limiter.until_ready().await;
+
         self.requests_total.inc();
         let start = Instant::now();
         let mut stream = request.into_inner();
@@ -302,6 +397,7 @@ impl Validation for ValidationServiceImpl {
             while let Some(req) = stream.next().await {
                 requests_total.inc();
                 let req = req?;
+                info!("Streaming SPV proof for txid: {}", req.txid);
                 let mut proof_cache = proof_cache.lock().await;
                 if let Some((merkle_path, block_headers)) = proof_cache.get(&req.txid) {
                     cache_hits.inc();
@@ -312,6 +408,7 @@ impl Validation for ValidationServiceImpl {
                         block_headers: block_headers.clone(),
                         error: "".to_string(),
                     };
+                    info!("Cache hit for streamed txid: {}", req.txid);
                     continue;
                 }
 
@@ -330,6 +427,7 @@ impl Validation for ValidationServiceImpl {
                         block_headers: vec![],
                         error: "Merkle root mismatch".to_string(),
                     };
+                    warn!("Merkle root mismatch for streamed txid: {}", req.txid);
                     continue;
                 }
 
@@ -343,34 +441,9 @@ impl Validation for ValidationServiceImpl {
                     block_headers,
                     error: "".to_string(),
                 };
+                info!("Generated streamed SPV proof for txid: {}", req.txid);
             }
         };
 
         self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
-        Ok(Response::new(Box::pin(output)))
-    }
-
-    async fn get_metrics(&self, _request: Request<GetMetricsRequest>) -> Result<Response<GetMetricsResponse>, Status> {
-        Ok(Response::new(GetMetricsResponse {
-            service_name: "validation_service".to_string(),
-            requests_total: self.requests_total.get() as u64,
-            avg_latency_ms: self.latency_ms.get(),
-            errors_total: 0, // Placeholder
-        }))
-    }
-}
-
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let addr = "[::1]:50057".parse().unwrap();
-    let validation_service = ValidationServiceImpl::new().await;
-
-    println!("Validation service listening on {}", addr);
-
-    Server::builder()
-        .add_service(ValidationServer::new(validation_service))
-        .serve(addr)
-        .await?;
-
-    Ok(())
-}
+        Ok(Respo
