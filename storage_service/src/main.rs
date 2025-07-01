@@ -4,18 +4,26 @@ use storage::{
     QueryUtxoRequest, QueryUtxoResponse, AddUtxoRequest, AddUtxoResponse,
     RemoveUtxoRequest, RemoveUtxoResponse, BatchAddUtxoRequest, BatchAddUtxoResponse
 };
+use metrics::metrics_client::MetricsClient;
+use metrics::{GetMetricsRequest, GetMetricsResponse};
 use tigerbeetle::client::{Client, Config};
 use std::collections::HashMap;
 use tokio::sync::Mutex;
 use std::sync::Arc;
+use std::time::Instant;
+use prometheus::{Counter, Gauge, Registry};
 use toml;
 
 tonic::include_proto!("storage");
+tonic::include_proto!("metrics");
 
 #[derive(Debug)]
 struct StorageServiceImpl {
     utxo_db: Arc<Mutex<HashMap<(String, u32), (String, u64)>>>, // Fallback for testing
     tb_client: Option<Client>, // Tiger Beetle client
+    registry: Arc<Registry>,
+    requests_total: Counter,
+    latency_ms: Gauge,
 }
 
 impl StorageServiceImpl {
@@ -26,17 +34,30 @@ impl StorageServiceImpl {
             .as_str()
             .unwrap()
             .to_string();
+        let shard_id = config["sharding"]["shard_id"].as_integer().unwrap_or(0) as u32;
 
-        // Initialize Tiger Beetle client with keep-alive
         let tb_client = Client::new(Config {
             cluster_id: 0,
             replica_id: 0,
             addresses: vec![tb_address],
             keep_alive: true, // Enable connection keep-alive
-        }).await.ok();
-
+        })
+        .await
+        .ok();
         let utxo_db = Arc::new(Mutex::new(HashMap::new()));
-        StorageServiceImpl { utxo_db, tb_client }
+        let registry = Arc::new(Registry::new());
+        let requests_total = Counter::new("storage_requests_total", "Total storage requests").unwrap();
+        let latency_ms = Gauge::new("storage_latency_ms", "Average storage request latency").unwrap();
+        registry.register(Box::new(requests_total.clone())).unwrap();
+        registry.register(Box::new(latency_ms.clone())).unwrap();
+
+        StorageServiceImpl {
+            utxo_db,
+            tb_client,
+            registry,
+            requests_total,
+            latency_ms,
+        }
     }
 
     async fn query_utxo_tb(&self, txid: &str, vout: u32) -> Result<Option<(String, u64)>, String> {
@@ -63,10 +84,13 @@ impl StorageServiceImpl {
 #[tonic::async_trait]
 impl Storage for StorageServiceImpl {
     async fn query_utxo(&self, request: Request<QueryUtxoRequest>) -> Result<Response<QueryUtxoResponse>, Status> {
+        self.requests_total.inc();
+        let start = Instant::now();
         let req = request.into_inner();
         if let Some(tb_client) = &self.tb_client {
             match self.query_utxo_tb(&req.txid, req.vout).await {
                 Ok(Some((script_pubkey, amount))) => {
+                    self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
                     return Ok(Response::new(QueryUtxoResponse {
                         exists: true,
                         script_pubkey,
@@ -75,6 +99,7 @@ impl Storage for StorageServiceImpl {
                     }));
                 }
                 Ok(None) => {
+                    self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
                     return Ok(Response::new(QueryUtxoResponse {
                         exists: false,
                         script_pubkey: "".to_string(),
@@ -83,6 +108,7 @@ impl Storage for StorageServiceImpl {
                     }));
                 }
                 Err(e) => {
+                    self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
                     return Ok(Response::new(QueryUtxoResponse {
                         exists: false,
                         script_pubkey: "".to_string(),
@@ -95,32 +121,38 @@ impl Storage for StorageServiceImpl {
 
         let utxo_db = self.utxo_db.lock().await;
         let key = (req.txid, req.vout);
-        if let Some((script_pubkey, amount)) = utxo_db.get(&key) {
-            Ok(Response::new(QueryUtxoResponse {
+        let result = if let Some((script_pubkey, amount)) = utxo_db.get(&key) {
+            QueryUtxoResponse {
                 exists: true,
                 script_pubkey: script_pubkey.clone(),
                 amount: *amount,
                 error: "".to_string(),
-            }))
+            }
         } else {
-            Ok(Response::new(QueryUtxoResponse {
+            QueryUtxoResponse {
                 exists: false,
                 script_pubkey: "".to_string(),
                 amount: 0,
                 error: "UTXO not found".to_string(),
-            }))
-        }
+            }
+        };
+        self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
+        Ok(Response::new(result))
     }
 
     async fn add_utxo(&self, request: Request<AddUtxoRequest>) -> Result<Response<AddUtxoResponse>, Status> {
+        self.requests_total.inc();
+        let start = Instant::now();
         let req = request.into_inner();
         if let Some(tb_client) = &self.tb_client {
             if let Err(e) = self.add_utxo_tb(&req.txid, req.vout, &req.script_pubkey, req.amount).await {
+                self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
                 return Ok(Response::new(AddUtxoResponse {
                     success: false,
                     error: e,
                 }));
             }
+            self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
             return Ok(Response::new(AddUtxoResponse {
                 success: true,
                 error: "".to_string(),
@@ -130,6 +162,7 @@ impl Storage for StorageServiceImpl {
         let mut utxo_db = self.utxo_db.lock().await;
         let key = (req.txid, req.vout);
         utxo_db.insert(key, (req.script_pubkey, req.amount));
+        self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
         Ok(Response::new(AddUtxoResponse {
             success: true,
             error: "".to_string(),
@@ -137,14 +170,18 @@ impl Storage for StorageServiceImpl {
     }
 
     async fn remove_utxo(&self, request: Request<RemoveUtxoRequest>) -> Result<Response<RemoveUtxoResponse>, Status> {
+        self.requests_total.inc();
+        let start = Instant::now();
         let req = request.into_inner();
         if let Some(tb_client) = &self.tb_client {
             if let Err(e) = self.remove_utxo_tb(&req.txid, req.vout).await {
+                self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
                 return Ok(Response::new(RemoveUtxoResponse {
                     success: false,
                     error: e,
                 }));
             }
+            self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
             return Ok(Response::new(RemoveUtxoResponse {
                 success: true,
                 error: "".to_string(),
@@ -154,6 +191,7 @@ impl Storage for StorageServiceImpl {
         let mut utxo_db = self.utxo_db.lock().await;
         let key = (req.txid, req.vout);
         let success = utxo_db.remove(&key).is_some();
+        self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
         Ok(Response::new(RemoveUtxoResponse {
             success,
             error: if success { "".to_string() } else { "UTXO not found".to_string() },
@@ -161,18 +199,28 @@ impl Storage for StorageServiceImpl {
     }
 
     async fn batch_add_utxo(&self, request: Request<BatchAddUtxoRequest>) -> Result<Response<BatchAddUtxoResponse>, Status> {
+        self.requests_total.inc();
+        let start = Instant::now();
         let req = request.into_inner();
         if let Some(tb_client) = &self.tb_client {
-            let utxos = req.utxos.into_iter()
+            let utxos = req
+                .utxos
+                .into_iter()
                 .map(|u| (u.txid, u.vout, u.script_pubkey, u.amount))
                 .collect();
-            let results = self.batch_add_utxo_tb(utxos).await
+            let results = self
+                .batch_add_utxo_tb(utxos)
+                .await
                 .map_err(|e| Status::internal(format!("Batch add failed: {}", e)))?;
+            self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
             return Ok(Response::new(BatchAddUtxoResponse {
-                results: results.into_iter().map(|success| AddUtxoResponse {
-                    success,
-                    error: if success { "".to_string() } else { "Failed to add UTXO".to_string() },
-                }).collect(),
+                results: results
+                    .into_iter()
+                    .map(|success| AddUtxoResponse {
+                        success,
+                        error: if success { "".to_string() } else { "Failed to add UTXO".to_string() },
+                    })
+                    .collect(),
             }));
         }
 
@@ -186,7 +234,17 @@ impl Storage for StorageServiceImpl {
                 error: "".to_string(),
             });
         }
+        self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
         Ok(Response::new(BatchAddUtxoResponse { results }))
+    }
+
+    async fn get_metrics(&self, _request: Request<GetMetricsRequest>) -> Result<Response<GetMetricsResponse>, Status> {
+        Ok(Response::new(GetMetricsResponse {
+            service_name: "storage_service".to_string(),
+            requests_total: self.requests_total.get() as u64,
+            avg_latency_ms: self.latency_ms.get(),
+            errors_total: 0, // Placeholder
+        }))
     }
 }
 
