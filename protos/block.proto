@@ -1,13 +1,19 @@
 syntax = "proto3";
 package block;
 
+import "metrics.proto";
+
 service Block {
     rpc ValidateBlock (ValidateBlockRequest) returns (ValidateBlockResponse);
-    rpc AssembleBlock (AssembleBlockRequest) returns (AssembleBlockResponse);
+    rpc AssembleBlock (AssembleBlockRequest) returns (AssembleBlockResponse) {
+        option (google.api.http) = { buffer_size_hint: 4000000000 }; // 4GB for large blocks
+    };
+    rpc IndexBlock (IndexBlockRequest) returns (IndexBlockResponse);
+    rpc GetMetrics (metrics.GetMetricsRequest) returns (metrics.GetMetricsResponse);
 }
 
 message ValidateBlockRequest {
-    string block_hex = 1; // Hex-encoded BSV block
+    string block_hex = 1; // Hex-encoded block
 }
 message ValidateBlockResponse {
     bool is_valid = 1;
@@ -18,5 +24,12 @@ message AssembleBlockRequest {
 }
 message AssembleBlockResponse {
     string block_hex = 1; // Hex-encoded assembled block
-    string error = 2;     // Error message if assembly fails
+    string error = 2; // Error message if assembly fails
+}
+message IndexBlockRequest {
+    string block_hex = 1; // Hex-encoded block to index
+}
+message IndexBlockResponse {
+    bool success = 1;
+    string error = 2; // Error message if indexing fails
 }
