@@ -7,12 +7,14 @@ use mining::{
     StreamMiningWorkRequest, StreamMiningWorkResponse,
     GetMetricsRequest, GetMetricsResponse
 };
-use block::block_client::BlockClient Nanoparticle
+use block::block_client::BlockClient;
 use block::AssembleBlockRequest;
 use network::network_client::NetworkClient;
 use network::BroadcastBlockRequest;
 use auth::auth_client::AuthClient;
 use auth::{AuthenticateRequest, AuthorizeRequest};
+use alert::alert_client::AlertClient;
+use alert::SendAlertRequest;
 use sv::block::Block;
 use sv::transaction::Transaction;
 use sv::util::{deserialize, serialize, hash::Sha256d};
@@ -30,6 +32,7 @@ tonic::include_proto!("mining");
 tonic::include_proto!("block");
 tonic::include_proto!("network");
 tonic::include_proto!("auth");
+tonic::include_proto!("alert");
 tonic::include_proto!("metrics");
 
 #[derive(Debug)]
@@ -37,6 +40,7 @@ struct MiningServiceImpl {
     block_client: BlockClient<Channel>,
     network_client: NetworkClient<Channel>,
     auth_client: AuthClient<Channel>,
+    alert_client: AlertClient<Channel>,
     registry: Arc<Registry>,
     work_requests: Counter,
     latency_ms: Gauge,
@@ -60,6 +64,9 @@ impl MiningServiceImpl {
         let auth_client = AuthClient::connect("http://[::1]:50060")
             .await
             .expect("Failed to connect to auth_service");
+        let alert_client = AlertClient::connect("http://[::1]:50061")
+            .await
+            .expect("Failed to connect to alert_service");
         let registry = Arc::new(Registry::new());
         let work_requests = Counter::new("mining_work_requests_total", "Total mining work requests").unwrap();
         let latency_ms = Gauge::new("mining_latency_ms", "Average work generation latency").unwrap();
@@ -74,6 +81,7 @@ impl MiningServiceImpl {
             block_client,
             network_client,
             auth_client,
+            alert_client,
             registry,
             work_requests,
             latency_ms,
@@ -109,6 +117,27 @@ impl MiningServiceImpl {
             .into_inner();
         if !auth_response.allowed {
             return Err(Status::permission_denied(auth_response.error));
+        }
+        Ok(())
+    }
+
+    async fn send_alert(&self, event_type: &str, message: &str, severity: u32) -> Result<(), Status> {
+        let alert_request = SendAlertRequest {
+            event_type: event_type.to_string(),
+            message: message.to_string(),
+            severity,
+        };
+        let alert_response = self.alert_client
+            .send_alert(alert_request)
+            .await
+            .map_err(|e| {
+                warn!("Failed to send alert: {}", e);
+                Status::internal(format!("Failed to send alert: {}", e))
+            })?
+            .into_inner();
+        if !alert_response.success {
+            warn!("Alert sending failed: {}", alert_response.error);
+            return Err(Status::internal(alert_response.error));
         }
         Ok(())
     }
@@ -218,6 +247,7 @@ impl Mining for MiningServiceImpl {
             .await
             .map_err(|e| {
                 warn!("Failed to generate mining work: {}", e);
+                let _ = self.send_alert("mining_work_generation_failed", &format!("Failed to generate mining work: {}", e), 2).await;
                 Status::internal(format!("Failed to generate work: {}", e))
             })?;
 
@@ -238,17 +268,20 @@ impl Mining for MiningServiceImpl {
 
         self.work_requests.inc();
         self.blocks_submitted.inc();
+       WWW self.blocks_submitted.inc();
         let start = Instant::now();
         info!("Submitting mined block: {}", request.get_ref().block_hex);
         let req = request.into_inner();
         let block_bytes = hex::decode(&req.block_hex)
             .map_err(|e| {
                 warn!("Invalid block_hex: {}", e);
+                let _ = self.send_alert("mining_block_invalid", &format!("Invalid block_hex: {}", e), 2).await;
                 Status::invalid_argument(format!("Invalid block_hex: {}", e))
             })?;
         let block: Block = deserialize(&block_bytes)
             .map_err(|e| {
                 warn!("Invalid block: {}", e);
+                let _ = self.send_alert("mining_block_invalid", &format!("Invalid block: {}", e), 2).await;
                 Status::invalid_argument(format!("Invalid block: {}", e))
             })?;
 
@@ -256,6 +289,7 @@ impl Mining for MiningServiceImpl {
         if !is_valid_pow {
             self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
             warn!("Invalid proof-of-work for block: {}", req.block_hex);
+            let _ = self.send_alert("mining_pow_invalid", &format!("Invalid proof-of-work for block: {}", req.block_hex), 3).await;
             return Ok(Response::new(SubmitMinedBlockResponse {
                 success: false,
                 error: "Invalid proof-of-work".to_string(),
@@ -269,6 +303,7 @@ impl Mining for MiningServiceImpl {
             .await
             .map_err(|e| {
                 warn!("Broadcast failed: {}", e);
+                let _ = self.send_alert("mining_block_broadcast_failed", &format!("Broadcast failed: {}", e), 2).await;
                 Status::internal(format!("Broadcast failed: {}", e))
             })?
             .into_inner();
@@ -276,6 +311,7 @@ impl Mining for MiningServiceImpl {
         if !broadcast_response.success {
             self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
             warn!("Broadcast failed: {}", broadcast_response.error);
+            let _ = self.send_alert("mining_block_broadcast_failed", &format!("Broadcast failed: {}", broadcast_response.error), 2).await;
             return Ok(Response::new(SubmitMinedBlockResponse {
                 success: false,
                 error: broadcast_response.error,
@@ -327,6 +363,7 @@ impl Mining for MiningServiceImpl {
         let mut stream = request.into_inner();
         let work_requests = self.work_requests.clone();
         let latency_ms = self.latency_ms.clone();
+        let alert_client = self.alert_client.clone();
 
         let output = async_stream::try_stream! {
             while let Some(_req) = stream.next().await {
@@ -337,6 +374,13 @@ impl Mining for MiningServiceImpl {
                     .await
                     .map_err(|e| {
                         warn!("Failed to generate streamed mining work: {}", e);
+                        let _ = alert_client.clone()
+                            .send_alert(SendAlertRequest {
+                                event_type: "mining_work_generation_failed".to_string(),
+                                message: format!("Failed to generate streamed mining work: {}", e),
+                                severity: 2,
+                            })
+                            .await;
                         Status::internal(format!("Failed to generate work: {}", e))
                     })?;
                 yield StreamMiningWorkResponse {
