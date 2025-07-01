@@ -11,6 +11,7 @@ use network::network_client::NetworkClient;
 use network::BroadcastBlockRequest;
 use sv::block::Block;
 use sv::util::{deserialize, serialize};
+use sv::block::BlockHeader;
 use hex;
 use toml;
 
@@ -36,7 +37,6 @@ impl MiningServiceImpl {
     }
 
     async fn generate_block_template(&self) -> Result<(String, u32), String> {
-        // Load test transactions from config (for demo)
         let config_str = include_str!("../../tests/config.toml");
         let config: toml::Value = toml::from_str(config_str).expect("Failed to parse config");
         let tx_hex = config["test_cases"]["broadcast_transaction"]["tx_hex"]
@@ -44,11 +44,8 @@ impl MiningServiceImpl {
             .unwrap()
             .to_string();
 
-        // Assemble block via block_service
         let mut block_client = self.block_client.clone();
-        let request = AssembleBlockRequest {
-            tx_hexes: vec![tx_hex],
-        };
+        let request = AssembleBlockRequest { tx_hexes: vec![tx_hex] };
         let response = block_client.assemble_block(request)
             .await
             .map_err(|e| format!("Block assembly failed: {}", e))?
@@ -58,9 +55,32 @@ impl MiningServiceImpl {
             return Err(response.error);
         }
 
-        // TODO: Compute realistic difficulty target
-        let target_difficulty = 0x1d00ffff; // Placeholder difficulty
+        let target_difficulty = 0x1d00ffff; // Placeholder
         Ok((response.block_hex, target_difficulty))
+    }
+
+    fn validate_proof_of_work(&self, header: &BlockHeader, target_difficulty: u32) -> bool {
+        let target = Self::bits_to_target(target_difficulty);
+        let hash = header.hash();
+        hash <= target
+    }
+
+    fn bits_to_target(bits: u32) -> [u8; 32] {
+        let exponent = (bits >> 24) as u8;
+        let mantissa = bits & 0x007fffff;
+        let mut target = [0u8; 32];
+        if exponent <= 3 {
+            let value = mantissa >> (8 * (3 - exponent));
+            target[31] = (value & 0xff) as u8;
+            target[30] = ((value >> 8) & 0xff) as u8;
+            target[29] = ((value >> 16) & 0xff) as u8;
+        } else {
+            let offset = 32 - exponent as usize;
+            target[offset] = (mantissa & 0xff) as u8;
+            target[offset + 1] = ((mantissa >> 8) & 0xff) as u8;
+            target[offset + 2] = ((mantissa >> 16) & 0xff) as u8;
+        }
+        target
     }
 }
 
@@ -87,9 +107,7 @@ impl Mining for MiningServiceImpl {
         let block: Block = deserialize(&block_bytes)
             .map_err(|e| Status::invalid_argument(format!("Invalid block: {}", e)))?;
 
-        // TODO: Verify proof-of-work
-        let is_valid_pow = true; // Placeholder
-
+        let is_valid_pow = self.validate_proof_of_work(&block.header, 0x1d00ffff); // Placeholder difficulty
         if !is_valid_pow {
             return Ok(Response::new(SubmitMinedBlockResponse {
                 success: false,
@@ -97,7 +115,6 @@ impl Mining for MiningServiceImpl {
             }));
         }
 
-        // Broadcast block via network_service
         let mut network_client = self.network_client.clone();
         let broadcast_request = BroadcastBlockRequest { block_hex: req.block_hex };
         let broadcast_response = network_client.broadcast_block(broadcast_request)
@@ -137,7 +154,7 @@ impl Mining for MiningServiceImpl {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let addr = "[::1]:50058".parse().unwrap(); // Different port for mining_service
+    let addr = "[::1]:50058".parse().unwrap();
     let mining_service = MiningServiceImpl::new().await;
 
     println!("Mining service listening on {}", addr);
