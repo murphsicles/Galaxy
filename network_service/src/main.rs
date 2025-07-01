@@ -8,6 +8,7 @@ use transaction::transaction_client::TransactionClient;
 use transaction::ValidateTxRequest;
 use block::block_client::BlockClient;
 use block::ValidateBlockRequest;
+use metrics::metrics_client::MetricsClient;
 use sv::messages::{Message, NetworkMessage};
 use sv::network::{Network as BSVNetwork, Version};
 use sv::transaction::Transaction;
@@ -18,24 +19,28 @@ use futures::stream::StreamExt;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
+use std::time::Instant;
+use prometheus::{Counter, Gauge, Registry};
 use hex;
 use toml;
 
 tonic::include_proto!("network");
 tonic::include_proto!("transaction");
 tonic::include_proto!("block");
+tonic::include_proto!("metrics");
 
 #[derive(Debug)]
 struct NetworkServiceImpl {
     peers: Arc<Mutex<HashMap<String, mpsc::Sender<Message>>>>,
     transaction_client: TransactionClient<Channel>,
     block_client: BlockClient<Channel>,
+    registry: Arc<Registry>,
+    requests_total: Counter,
+    latency_ms: Gauge,
 }
 
 impl NetworkServiceImpl {
     async fn new() -> Self {
-        let peers = Arc::new(Mutex::new(HashMap::new()));
-        // Load testnet nodes from config
         let config_str = include_str!("../../tests/config.toml");
         let config: toml::Value = toml::from_str(config_str).expect("Failed to parse config");
         let initial_peers = config["testnet"]["nodes"]
@@ -44,13 +49,20 @@ impl NetworkServiceImpl {
             .iter()
             .map(|v| v.as_str().unwrap().to_string())
             .collect::<Vec<String>>();
+        let shard_id = config["sharding"]["shard_id"].as_integer().unwrap_or(0) as u32;
 
+        let peers = Arc::new(Mutex::new(HashMap::new()));
         let transaction_client = TransactionClient::connect("http://[::1]:50052")
             .await
             .expect("Failed to connect to transaction_service");
         let block_client = BlockClient::connect("http://[::1]:50054")
             .await
             .expect("Failed to connect to block_service");
+        let registry = Arc::new(Registry::new());
+        let requests_total = Counter::new("network_requests_total", "Total network requests").unwrap();
+        let latency_ms = Gauge::new("network_latency_ms", "Average request latency").unwrap();
+        registry.register(Box::new(requests_total.clone())).unwrap();
+        registry.register(Box::new(latency_ms.clone())).unwrap();
 
         let peers_clone = Arc::clone(&peers);
         tokio::spawn(async move {
@@ -66,7 +78,7 @@ impl NetworkServiceImpl {
             }
         });
 
-        NetworkServiceImpl { peers, transaction_client, block_client }
+        NetworkServiceImpl { peers, transaction_client, block_client, registry, requests_total, latency_ms }
     }
 
     async fn send_version_message(stream: &mut TcpStream, addr: &str) -> Result<(), String> {
@@ -117,15 +129,9 @@ impl NetworkServiceImpl {
                 Ok(n) if n > 0 => {
                     if let Ok(message) = Message::deserialize(&buffer[..n], BSVNetwork::Testnet) {
                         match message.command.as_str() {
-                            "addr" => {
-                                println!("Received addr message from {}", addr);
-                            }
-                            "inv" => {
-                                println!("Received inv message from {}", addr);
-                            }
-                            "getdata" => {
-                                println!("Received getdata message from {}", addr);
-                            }
+                            "addr" => println!("Received addr message from {}", addr),
+                            "inv" => println!("Received inv message from {}", addr),
+                            "getdata" => println!("Received getdata message from {}", addr),
                             _ => {}
                         }
                     }
@@ -153,24 +159,30 @@ impl NetworkServiceImpl {
 #[tonic::async_trait]
 impl Network for NetworkServiceImpl {
     async fn ping(&self, request: Request<PingRequest>) -> Result<Response<PingResponse>, Status> {
+        self.requests_total.inc();
+        let start = Instant::now();
         let req = request.into_inner();
-        let reply = PingResponse {
+        self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
+        Ok(Response::new(PingResponse {
             reply: format!("Pong: {}", req.message),
-        };
-        Ok(Response::new(reply))
+        }))
     }
 
     async fn discover_peers(&self, _request: Request<DiscoverPeersRequest>) -> Result<Response<DiscoverPeersResponse>, Status> {
+        self.requests_total.inc();
+        let start = Instant::now();
         let peers = self.peers.lock().await;
         let peer_addresses: Vec<String> = peers.keys().cloned().collect();
-        let reply = DiscoverPeersResponse {
+        self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
+        Ok(Response::new(DiscoverPeersResponse {
             peer_addresses,
             error: if peers.is_empty() { "No active peers".to_string() } else { "".to_string() },
-        };
-        Ok(Response::new(reply))
+        }))
     }
 
     async fn broadcast_transaction(&self, request: Request<BroadcastTxRequest>) -> Result<Response<BroadcastTxResponse>, Status> {
+        self.requests_total.inc();
+        let start = Instant::now();
         let req = request.into_inner();
         let mut client = self.transaction_client.clone();
         let validate_request = ValidateTxRequest {
@@ -182,6 +194,7 @@ impl Network for NetworkServiceImpl {
             .into_inner();
 
         if !validate_response.is_valid {
+            self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
             return Ok(Response::new(BroadcastTxResponse {
                 success: false,
                 error: validate_response.error,
@@ -200,14 +213,16 @@ impl Network for NetworkServiceImpl {
         self.broadcast_message(message).await
             .map_err(|e| Status::internal(format!("Broadcast failed: {}", e)))?;
 
-        let reply = BroadcastTxResponse {
+        self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
+        Ok(Response::new(BroadcastTxResponse {
             success: true,
             error: "".to_string(),
-        };
-        Ok(Response::new(reply))
+        }))
     }
 
     async fn broadcast_block(&self, request: Request<BroadcastBlockRequest>) -> Result<Response<BroadcastBlockResponse>, Status> {
+        self.requests_total.inc();
+        let start = Instant::now();
         let req = request.into_inner();
         let mut client = self.block_client.clone();
         let validate_request = ValidateBlockRequest {
@@ -219,6 +234,7 @@ impl Network for NetworkServiceImpl {
             .into_inner();
 
         if !validate_response.is_valid {
+            self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
             return Ok(Response::new(BroadcastBlockResponse {
                 success: false,
                 error: validate_response.error,
@@ -237,11 +253,20 @@ impl Network for NetworkServiceImpl {
         self.broadcast_message(message).await
             .map_err(|e| Status::internal(format!("Broadcast failed: {}", e)))?;
 
-        let reply = BroadcastBlockResponse {
+        self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
+        Ok(Response::new(BroadcastBlockResponse {
             success: true,
             error: "".to_string(),
-        };
-        Ok(Response::new(reply))
+        }))
+    }
+
+    async fn get_metrics(&self, _request: Request<GetMetricsRequest>) -> Result<Response<GetMetricsResponse>, Status> {
+        Ok(Response::new(GetMetricsResponse {
+            service_name: "network_service".to_string(),
+            requests_total: self.requests_total.get() as u64,
+            avg_latency_ms: self.latency_ms.get(),
+            errors_total: 0, // Placeholder
+        }))
     }
 }
 
