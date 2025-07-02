@@ -1,146 +1,28 @@
-[testnet]
-nodes = [
-    "testnet-seed.bitcoin.sipa.be:18333",
-    "testnet-seed.bsv.io:18333"
-]
-tigerbeetle_address = "127.0.0.1:3000"
-
-[services]
-network_service_port = 50051
-transaction_service_port = 50052
-storage_service_port = 50053
-block_service_port = 50054
-consensus_service_port = 50055
-overlay_service_port = 50056
-validation_service_port = 50057
-mining_service_port = 50058
-metrics_port = 50059
-auth_service_port = 50060
-alert_service_port = 50061
-index_service_port = 50062
+# Configuration for Galaxy node testing
+# Version: 0.0.2-alpha
+# Updated: 2025-07-02
 
 [sharding]
-shard_id = 0
-shard_count = 4
-nodes = [
-    "node1.example.com:50051",
-    "node2.example.com:50051",
-    "node3.example.com:50051",
-    "node4.example.com:50051"
-]
+shard_id = 0  # Default shard ID for single-node testing
+shard_count = 4  # Number of shards for distributed testing
 
-[auth]
-secret_key = "secret" # Replace with secure key in production
-log_level = "INFO"
-
-[alert]
-severity_threshold = 2 # Minimum severity for alerts
-event_types = ["consensus_violation", "performance_issue", "security_alert"]
-
-[index]
-tx_index_path = "tx_index_db"
-block_index_path = "block_index_db"
+[testnet]
+nodes = ["127.0.0.1:8333", "192.168.1.100:8333"]  # Testnet peer nodes for network_service
 
 [test_cases]
-[test_cases.ping]
-message = "Hello"
-expected_reply = "Pong: Hello"
+# Example transaction for testing broadcast and validation
+[broadcast_transaction]
+tx_hex = "01000000010000000000000000000000000000000000000000000000000000000000000000ffffffff04deadbeef0100000001000000000000000000000000"
 
-[test_cases.discover_peers]
-node_id = "galaxy_node"
-min_peers = 2
+# Overlay-specific consensus settings
+[overlay_consensus]
+# Default rules for overlay transactions
+restrict_op_return = true  # Restrict OP_RETURN data size to 4.3GB
+max_op_return_size = 4294967296  # Maximum OP_RETURN size in bytes (4.3GB)
 
-[test_cases.broadcast_transaction]
-tx_hex = "01000000010000000000000000000000000000000000000000000000000000000000000000ffffffff0100ffffffff0100ffffffff"
-
-[test_cases.broadcast_block]
-block_hex = "01000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000ffffffff"
-
-[test_cases.validate_transaction]
-tx_hex = "01000000010000000000000000000000000000000000000000000000000000000000000000ffffffff0100ffffffff0100ffffffff"
-
-[test_cases.batch_validate_transaction]
-tx_hexes = [
-    "01000000010000000000000000000000000000000000000000000000000000000000000000ffffffff0100ffffffff0100ffffffff",
-    "01000000010000000000000000000000000000000000000000000000000000000000000000ffffffff0100ffffffff0100ffffffff"
-]
-
-[test_cases.validate_block]
-block_hex = "01000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000ffffffff"
-
-[test_cases.add_utxo]
-txid = "abc123"
-vout = 0
-script_pubkey = "76a91488a5e4a4e6c4a4e0c7b0b4a4e4a4e4a4e4a4e4a488ac"
-amount = 1000000
-
-[test_cases.batch_add_utxo]
-utxos = [
-    { txid = "abc123", vout = 0, script_pubkey = "76a91488a5e4a4e6c4a4e0c7b0b4a4e4a4e4a4e4a4e4a488ac", amount = 1000000 },
-    { txid = "def456", vout = 1, script_pubkey = "76a91488a5e4a4e6c4a4e0c7b0b4a4e4a4e4a4e4a4e4a488ac", amount = 2000000 }
-]
-
-[test_cases.create_overlay]
-overlay_id = "test_overlay"
-
-[test_cases.submit_overlay_transaction]
-overlay_id = "test_overlay"
-tx_hex = "01000000010000000000000000000000000000000000000000000000000000000000000000ffffffff0100ffffffff0100ffffffff"
-
-[test_cases.batch_submit_overlay_transaction]
-overlay_id = "test_overlay"
-tx_hexes = [
-    "01000000010000000000000000000000000000000000000000000000000000000000000000ffffffff0100ffffffff0100ffffffff",
-    "01000000010000000000000000000000000000000000000000000000000000000000000000ffffffff0100ffffffff0100ffffffff"
-]
-
-[test_cases.stream_overlay_transactions]
-overlay_id = "test_overlay"
-tx_hex = "01000000010000000000000000000000000000000000000000000000000000000000000000ffffffff0100ffffffff0100ffffffff"
-
-[test_cases.get_overlay_block]
-overlay_id = "test_overlay"
-block_height = 0
-
-[test_cases.index_overlay_transaction]
-overlay_id = "test_overlay"
-tx_hex = "01000000010000000000000000000000000000000000000000000000000000000000000000ffffffff0100ffffffff0100ffffffff"
-
-[test_cases.query_overlay_block]
-overlay_id = "test_overlay"
-block_height = 0
-
-[test_cases.generate_spv_proof]
-txid = "abc123"
-
-[test_cases.batch_generate_spv_proof]
-txids = ["abc123", "def456"]
-
-[test_cases.stream_spv_proofs]
-txid = "abc123"
-
-[test_cases.get_mining_work]
-miner_id = "miner1"
-
-[test_cases.submit_mined_block]
-block_hex = "01000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000ffffffff"
-
-[test_cases.batch_get_mining_work]
-miner_ids = ["miner1", "miner2"]
-
-[test_cases.stream_mining_work]
-miner_id = "miner1"
-
-[test_cases.get_metrics]
-service_name = "validation_service"
-
-[test_cases.authenticate]
-token = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1c2VyMSIsInJvbGUiOiJjbGllbnQiLCJleHAiOjE5MjA2NzY1MDl9.8X8z7z3Y8Qz5z5z7z3Y8Qz5z5z7z3Y8Qz5z5z7z3Y8Q" # Placeholder JWT
-
-[test_cases.send_alert]
-event_type = "consensus_violation"
-message = "Block size exceeds limit"
-severity = 3
-
-[test_cases.subscribe_to_alerts]
-event_type = "consensus_violation"
+# Metrics configuration
+[metrics]
+enable_prometheus = true  # Enable Prometheus metrics endpoint
+prometheus_port = 9090  # Port for Prometheus metrics scraping
+alert_threshold = 5  # Maximum severity level for alerts
+log_level = "info"  # Tracing log level (debug, info, warn, error)
