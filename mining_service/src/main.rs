@@ -171,7 +171,31 @@ impl MiningServiceImpl {
         let start = Instant::now();
         info!("Generating block template");
         let transactions = self.select_transactions().await?;
-        let txids: Vec<Sha256d> = transactions.iter().map(|tx| tx.txid()).collect();
+        let block = Block {
+            header: sv::block::BlockHeader {
+                version: 1,
+                prev_blockhash: Default::default(),
+                merkle_root: Default::default(), // Will be computed below
+                time: 0,
+                bits: self.calculate_difficulty_target().await,
+                nonce: 0,
+            },
+            transactions,
+        };
+
+        // Enforce temporary 32GB block size limit
+        let block_size = serialize(&block).len() as u64;
+        if block_size > 34_359_738_368 {
+            warn!("Block template size {} exceeds 32GB temporary limit", block_size);
+            let _ = self.send_alert(
+                "mining_block_size_exceeded",
+                &format!("Block template size {} exceeds 32GB temporary limit", block_size),
+                3,
+            ).await;
+            return Err(format!("Block template size {} exceeds 32GB temporary limit", block_size));
+        }
+
+        let txids: Vec<Sha256d> = block.transactions.iter().map(|tx| tx.txid()).collect();
         let merkle_root = if txids.is_empty() {
             Sha256d::from_hex("0000000000000000000000000000000000000000000000000000000000000000").unwrap()
         } else {
@@ -198,10 +222,10 @@ impl MiningServiceImpl {
                 prev_blockhash: Default::default(),
                 merkle_root,
                 time: 0,
-                bits: self.calculate_difficulty_target().await,
+                bits: block.header.bits,
                 nonce: 0,
             },
-            transactions,
+            transactions: block.transactions,
         };
 
         info!("Generated block template in {}ms", start.elapsed().as_secs_f64() * 1000.0);
@@ -289,6 +313,22 @@ impl Mining for MiningServiceImpl {
                 Status::invalid_argument(format!("Invalid block: {}", e))
             })?;
 
+        // Enforce temporary 32GB block size limit
+        let block_size = block_bytes.len() as u64;
+        if block_size > 34_359_738_368 {
+            self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
+            warn!("Submitted block size {} exceeds 32GB temporary limit", block_size);
+            let _ = self.send_alert(
+                "mining_block_size_exceeded",
+                &format!("Submitted block size {} exceeds 32GB temporary limit", block_size),
+                3,
+            ).await;
+            return Ok(Response::new(SubmitMinedBlockResponse {
+                success: false,
+                error: format!("Block size {} exceeds 32GB temporary limit", block_size),
+            }));
+        }
+
         let is_valid_pow = self.validate_proof_of_work(&block.header, block.header.bits);
         if !is_valid_pow {
             self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
@@ -332,7 +372,7 @@ impl Mining for MiningServiceImpl {
 
     async fn batch_get_mining_work(&self, request: Request<BatchGetMiningWorkRequest>) -> Result<Response<BatchGetMiningWorkResponse>, Status> {
         let token = request.metadata().get("authorization").ok_or_else(|| Status::unauthenticated("Missing token"))?;
-        let user_id = self.authenticate(token.to_str().map_err(|e| Status::invalid_argument("Invalid token format"))?).await?;
+        leta user_id = self.authenticate(token.to_str().map_err(|e| Status::invalid_argument("Invalid token format"))?).await?;
         self.authorize(&user_id, "BatchGetMiningWork").await?;
         self.rate_limiter.until_ready().await;
 
