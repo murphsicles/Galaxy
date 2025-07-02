@@ -239,6 +239,18 @@ impl Block for BlockServiceImpl {
                 Status::invalid_argument(format!("Invalid block: {}", e))
             })?;
 
+        // Enforce temporary 32GB block size limit
+        let block_size = block_bytes.len() as u64;
+        if block_size > 34_359_738_368 {
+            self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
+            warn!("Block size {} exceeds 32GB temporary limit", block_size);
+            let _ = self.send_alert("block_size_exceeded", &format!("Block size {} exceeds 32GB temporary limit", block_size), 3).await;
+            return Ok(Response::new(ValidateBlockResponse {
+                is_valid: false,
+                error: format!("Block size {} exceeds 32GB temporary limit", block_size),
+            }));
+        }
+
         if block.header.version < 1 {
             self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
             warn!("Invalid block header version");
@@ -374,7 +386,30 @@ impl Block for BlockServiceImpl {
             transactions.push(tx);
         }
 
-        let txids: Vec<Sha256d> = transactions.iter().map(|tx| tx.txid()).collect();
+        // Enforce temporary 32GB block size limit
+        let block = Block {
+            header: sv::block::BlockHeader {
+                version: 1,
+                prev_blockhash: Default::default(),
+                merkle_root: Default::default(), // Will be computed below
+                time: 0,
+                bits: 0x1d00ffff, // Placeholder
+                nonce: 0,
+            },
+            transactions,
+        };
+        let block_size = serialize(&block).len() as u64;
+        if block_size > 34_359_738_368 {
+            self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
+            warn!("Block size {} exceeds 32GB temporary limit", block_size);
+            let _ = self.send_alert("block_size_exceeded", &format!("Block size {} exceeds 32GB temporary limit", block_size), 3).await;
+            return Ok(Response::new(AssembleBlockResponse {
+                block_hex: "".to_string(),
+                error: format!("Block size {} exceeds 32GB temporary limit", block_size),
+            }));
+        }
+
+        let txids: Vec<Sha256d> = block.transactions.iter().map(|tx| tx.txid()).collect();
         let merkle_root = if txids.is_empty() {
             Sha256d::from_hex("0000000000000000000000000000000000000000000000000000000000000000").unwrap()
         } else {
@@ -404,7 +439,7 @@ impl Block for BlockServiceImpl {
                 bits: 0x1d00ffff, // Placeholder
                 nonce: 0,
             },
-            transactions,
+            transactions: block.transactions,
         };
 
         self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
