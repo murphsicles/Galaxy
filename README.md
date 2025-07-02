@@ -2,7 +2,7 @@
 **The Ultra High-Performance BSV Node**
 
 ![Rust](https://img.shields.io/badge/Rust-1.80+-orange?logo=rust)
-![Build Status](https://img.shields.io/badge/build-passing-brightgreen)
+![Build Status](https://github.com/murphsicles/Galaxy/actions/workflows/ci.yml/badge.svg)
 ![Dependencies](https://img.shields.io/badge/dependencies-up%20to%20date-green)
 ![License](https://img.shields.io/badge/license-Open%20BSV-blue)
 
@@ -23,14 +23,16 @@
   - Rate limiting to prevent abuse.
 - **Microservices Architecture**:
   - `network_service`: P2P networking with peer pool management.
-  - `transaction_service`: Transaction validation and queuing.
-  - `block_service`: Block validation and assembly with merkle root computation.
+  - `transaction_service`: Transaction validation, queuing, and indexing.
+  - `block_service`: Block validation, assembly, and indexing with merkle root computation.
   - `storage_service`: UTXO management with Tiger Beetle and keep-alive.
   - `consensus_service`: Enforces BSV consensus rules.
-  - `overlay_service`: Manages private blockchains with streaming and storage.
+  - `overlay_service`: Manages private blockchains with streaming, storage, and indexing.
   - `validation_service`: Generates/verifies SPV proofs with caching and streaming.
   - `mining_service`: Supports block mining with streaming and transaction selection.
   - `auth_service`: Handles authentication and authorization.
+  - `alert_service`: Monitors network health and sends notifications.
+  - `index_service`: Indexes transactions and blocks for efficient querying.
 - **Performance Optimizations**:
   - Asynchronous gRPC calls with connection keep-alive.
   - Batching for transactions, blocks, and UTXOs.
@@ -40,6 +42,9 @@
   - Prometheus metrics for performance monitoring.
   - Structured logging with tracing for observability.
   - Sharding for distributed processing.
+- **Monitoring**:
+  - Alert notifications for critical events (e.g., consensus violations, performance issues).
+  - Transaction and block indexing for efficient querying.
 
 ## 🛠️ Setup
 
@@ -48,7 +53,7 @@
 - Cargo
 - Tiger Beetle server (for `storage_service`, see [Tiger Beetle](https://github.com/tigerbeetle/tigerbeetle))
 - `grpcurl` for testing
-- `sled` for overlay storage
+- `sled` for overlay and index storage
 - `prometheus`, `governor`, `jsonwebtoken`, and `tracing` for metrics, rate limiting, auth, and logging
 
 ### Installation
@@ -96,6 +101,14 @@ cargo run
 cd auth_service
 cargo run
 ```
+```bash
+cd alert_service
+cargo run
+```
+```bash
+cd index_service
+cargo run
+```
 
 ### Tiger Beetle Setup
 For `storage_service`, start a Tiger Beetle server:
@@ -118,6 +131,8 @@ Test services using `grpcurl` with JWT tokens in the `authorization` header. Ens
 - `validation_service`: `localhost:50057`
 - `mining_service`: `localhost:50058`
 - `auth_service`: `localhost:50060`
+- `alert_service`: `localhost:50061`
+- `index_service`: `localhost:50062`
 
 ### Testnet Integration
 Galaxy is configured to connect to BSV testnet nodes. See `tests/config.toml` for settings:
@@ -125,6 +140,7 @@ Galaxy is configured to connect to BSV testnet nodes. See `tests/config.toml` fo
 - Tiger Beetle server address for `storage_service`
 - Sharding parameters and node mappings
 - Authentication settings
+- Alert and indexing configurations
 - Test cases for all services
 
 Run the full pipeline test:
@@ -138,6 +154,12 @@ chmod +x run_tests.sh
 Monitor performance using the `GetMetrics` endpoint on each service (e.g., `localhost:50057` for `validation_service`):
 ```bash
 grpcurl -plaintext -H "authorization: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1c2VyMSIsInJvbGUiOiJjbGllbnQiLCJleHAiOjE5MjA2NzY1MDl9.8X8z7z3Y8Qz5z5z7z3Y8Qz5z5z7z3Y8Qz5z5z7z3Y8Q" -d '{}' localhost:50057 validation.Validation/GetMetrics
+```
+
+### Alerts
+Subscribe to alerts using the `alert_service`:
+```bash
+grpcurl -plaintext -H "authorization: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1c2VyMSIsInJvbGUiOiJjbGllbnQiLCJleHAiOjE5MjA2NzY1MDl9.8X8z7z3Y8Qz5z5z7z3Y8Qz5z5z7z3Y8Qz5z5z7z3Y8Q" -d '{"event_type": "consensus_violation"}' localhost:50061 alert.Alert/SubscribeToAlerts
 ```
 
 ### Logging
@@ -169,6 +191,8 @@ Galaxy is optimized for ultra-high performance:
 - **Sharding**: Distributed processing with shard-aware logic.
 - **Security**: JWT authentication and RBAC for secure access.
 - **Rate Limiting**: Prevents endpoint abuse with 1000 req/s limit.
+- **Alerting**: Real-time notifications for network health.
+- **Indexing**: Efficient querying for transactions and blocks.
 
 These optimizations position Galaxy to surpass competitors like Teranode, targeting over 100,000,000 TPS per shard.
 
@@ -177,14 +201,16 @@ These optimizations position Galaxy to surpass competitors like Teranode, target
 | Directory            | Description                          |
 |----------------------|--------------------------------------|
 | `network_service/`   | P2P networking for BSV nodes         |
-| `transaction_service/`| Transaction validation and queuing   |
-| `block_service/`     | Block validation and assembly        |
+| `transaction_service/`| Transaction validation, queuing, indexing   |
+| `block_service/`     | Block validation, assembly, indexing        |
 | `storage_service/`   | UTXO storage with Tiger Beetle       |
 | `consensus_service/` | BSV consensus rule enforcement       |
 | `overlay_service/`   | Private blockchain overlays          |
 | `validation_service/`| SPV proof generation and verification|
 | `mining_service/`    | Block mining support                 |
 | `auth_service/`      | Authentication and authorization      |
+| `alert_service/`     | Network health monitoring and notifications |
+| `index_service/`     | Transaction and block indexing       |
 | `shared/`            | Shared utilities (ShardManager)      |
 | `protos/`            | gRPC proto files for services        |
 | `tests/`             | Test configuration and scripts       |
