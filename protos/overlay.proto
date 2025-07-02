@@ -13,6 +13,7 @@ service Overlay {
     rpc StreamOverlayTransactions (stream StreamOverlayTxRequest) returns (stream StreamOverlayTxResponse);
     rpc IndexOverlayTransaction (IndexOverlayTransactionRequest) returns (IndexOverlayTransactionResponse);
     rpc QueryOverlayBlock (QueryOverlayBlockRequest) returns (QueryOverlayBlockResponse);
+    rpc ManageOverlayConsensus (ManageOverlayConsensusRequest) returns (ManageOverlayConsensusResponse);
     rpc GetMetrics (metrics.GetMetricsRequest) returns (metrics.GetMetricsResponse);
 }
 
@@ -71,9 +72,12 @@ message QueryOverlayBlockResponse {
     string block_hex = 1; // Hex-encoded overlay block
     string error = 2; // Error message if query fails
 }
-message GetMetricsRequest {}
-message GetMetricsResponse {
-    uint64 tx_requests = 1; // Total transaction requests
-    double avg_latency_ms = 2; // Average transaction processing latency
-    uint64 block_count = 3; // Total overlay blocks created
+message ManageOverlayConsensusRequest {
+    string overlay_id = 1; // Overlay identifier
+    string rule_name = 2; // Name of the consensus rule (e.g., "restrict_op_return")
+    bool enable = 3; // Enable or disable the rule
+}
+message ManageOverlayConsensusResponse {
+    bool success = 1;
+    string error = 2; // Error message if rule update fails
 }
