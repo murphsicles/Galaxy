@@ -126,10 +126,10 @@ impl ConsensusServiceImpl {
 
     async fn validate_block_rules(&self, block: &Block) -> Result<bool, String> {
         let block_size = serialize(block).len() as u64;
-        if block_size > 4_000_000_000 {
-            warn!("Block size {} exceeds 4GB limit", block_size);
-            let _ = self.send_alert("block_size_exceeded", &format!("Block size {} exceeds 4GB limit", block_size), 3).await;
-            return Err(format!("Block size {} exceeds 4GB limit", block_size));
+        if block_size > 34_359_738_368 {
+            warn!("Block size {} exceeds 32GB temporary limit", block_size);
+            let _ = self.send_alert("block_size_exceeded", &format!("Block size {} exceeds 32GB temporary limit", block_size), 3).await;
+            return Err(format!("Block size {} exceeds 32GB temporary limit", block_size));
         }
 
         // TODO: Validate merkle root, difficulty, timestamp
@@ -138,18 +138,24 @@ impl ConsensusServiceImpl {
     }
 
     async fn validate_transaction_rules(&self, tx: &Transaction) -> Result<bool, String> {
+        let config_str = include_str!("../../tests/config.toml");
+        let config: toml::Value = toml::from_str(config_str).expect("Failed to parse config");
+        let max_op_return_size = config["overlay_consensus"]["max_op_return_size"]
+            .as_integer()
+            .unwrap_or(4294967296) as usize; // 4.3GB default
+
         let tx_size = serialize(tx).len() as u64;
-        if tx_size > 1_000_000_000 {
-            warn!("Transaction size {} exceeds limit", tx_size);
-            let _ = self.send_alert("tx_size_exceeded", &format!("Transaction size {} exceeds limit", tx_size), 3).await;
-            return Err(format!("Transaction size {} exceeds limit", tx_size));
+        if tx_size > 34_359_738_368 {
+            warn!("Transaction size {} exceeds 32GB temporary limit", tx_size);
+            let _ = self.send_alert("tx_size_exceeded", &format!("Transaction size {} exceeds 32GB temporary limit", tx_size), 3).await;
+            return Err(format!("Transaction size {} exceeds 32GB temporary limit", tx_size));
         }
 
         for output in &tx.outputs {
-            if output.script_pubkey.is_op_return() && output.script_pubkey.len() > 100_000 {
-                warn!("OP_RETURN data exceeds 100KB limit");
-                let _ = self.send_alert("op_return_size_exceeded", "OP_RETURN data exceeds 100KB limit", 3).await;
-                return Err("OP_RETURN data exceeds 100KB limit".to_string());
+            if output.script_pubkey.is_op_return() && output.script_pubkey.len() > max_op_return_size {
+                warn!("OP_RETURN data exceeds 4.3GB limit");
+                let _ = self.send_alert("op_return_size_exceeded", "OP_RETURN data exceeds 4.3GB limit", 3).await;
+                return Err("OP_RETURN data exceeds 4.3GB limit".to_string());
             }
             if !output.script_pubkey.is_standard() {
                 warn!("Non-standard script detected");
