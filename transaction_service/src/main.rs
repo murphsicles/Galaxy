@@ -9,8 +9,8 @@ use auth::auth_client::AuthClient;
 use auth::{AuthenticateRequest, AuthorizeRequest};
 use index::index_client::IndexClient;
 use index::IndexTransactionRequest as IndexIndexTransactionRequest;
-use metrics::metrics_client::MetricsClient;
-use metrics::{GetMetricsRequest, GetMetricsResponse};
+use alert::alert_client::AlertClient;
+use alert::SendAlertRequest;
 use sv::transaction::{Transaction, Input};
 use sv::script::Script;
 use sv::util::{deserialize, serialize};
@@ -31,6 +31,7 @@ tonic::include_proto!("storage");
 tonic::include_proto!("consensus");
 tonic::include_proto!("auth");
 tonic::include_proto!("index");
+tonic::include_proto!("alert");
 tonic::include_proto!("metrics");
 
 #[derive(Debug)]
@@ -39,10 +40,13 @@ struct TransactionServiceImpl {
     consensus_client: ConsensusClient<Channel>,
     auth_client: AuthClient<Channel>,
     index_client: IndexClient<Channel>,
+    alert_client: AlertClient<Channel>,
     tx_queue: Arc<Mutex<(Sender<String>, Receiver<String>)>>,
     registry: Arc<Registry>,
     requests_total: Counter,
     latency_ms: Gauge,
+    alert_count: Counter,
+    index_throughput: Gauge,
     rate_limiter: Arc<RateLimiter<String, governor::state::direct::NotKeyed, governor::clock::DefaultClock>>,
     shard_manager: Arc<ShardManager>,
 }
@@ -65,13 +69,20 @@ impl TransactionServiceImpl {
         let index_client = IndexClient::connect("http://[::1]:50062")
             .await
             .expect("Failed to connect to index_service");
+        let alert_client = AlertClient::connect("http://[::1]:50061")
+            .await
+            .expect("Failed to connect to alert_service");
         let (tx, rx) = async_channel::bounded(1000);
         let tx_queue = Arc::new(Mutex::new((tx, rx)));
         let registry = Arc::new(Registry::new());
         let requests_total = Counter::new("transaction_requests_total", "Total transaction requests").unwrap();
         let latency_ms = Gauge::new("transaction_latency_ms", "Average transaction processing latency").unwrap();
+        let alert_count = Counter::new("transaction_alert_count", "Total alerts sent").unwrap();
+        let index_throughput = Gauge::new("transaction_index_throughput", "Indexed transactions per second").unwrap();
         registry.register(Box::new(requests_total.clone())).unwrap();
         registry.register(Box::new(latency_ms.clone())).unwrap();
+        registry.register(Box::new(alert_count.clone())).unwrap();
+        registry.register(Box::new(index_throughput.clone())).unwrap();
         let rate_limiter = Arc::new(RateLimiter::direct(Quota::per_second(NonZeroU32::new(1000).unwrap())));
         let shard_manager = Arc::new(ShardManager::new());
 
@@ -88,10 +99,13 @@ impl TransactionServiceImpl {
             consensus_client,
             auth_client,
             index_client,
+            alert_client,
             tx_queue,
             registry,
             requests_total,
             latency_ms,
+            alert_count,
+            index_throughput,
             rate_limiter,
             shard_manager,
         }
@@ -127,6 +141,28 @@ impl TransactionServiceImpl {
         Ok(())
     }
 
+    async fn send_alert(&self, event_type: &str, message: &str, severity: u32) -> Result<(), Status> {
+        let alert_request = SendAlertRequest {
+            event_type: event_type.to_string(),
+            message: message.to_string(),
+            severity,
+        };
+        let alert_response = self.alert_client
+            .send_alert(alert_request)
+            .await
+            .map_err(|e| {
+                warn!("Failed to send alert: {}", e);
+                Status::internal(format!("Failed to send alert: {}", e))
+            })?
+            .into_inner();
+        if !alert_response.success {
+            warn!("Alert sending failed: {}", alert_response.error);
+            return Err(Status::internal(alert_response.error));
+        }
+        self.alert_count.inc();
+        Ok(())
+    }
+
     async fn validate_inputs(&self, tx: &Transaction) -> Result<bool, String> {
         let mut client = self.storage_client.clone();
         for input in &tx.inputs {
@@ -141,13 +177,17 @@ impl TransactionServiceImpl {
                 .into_inner();
 
             if !response.exists {
-                return Err(format!("UTXO not found: {}:{}", input.previous_output.txid, input.previous_output.vout));
+                let error = format!("UTXO not found: {}:{}", input.previous_output.txid, input.previous_output.vout);
+                let _ = self.send_alert("utxo_not_found", &error, 2).await;
+                return Err(error);
             }
 
             let script_pubkey: Script = deserialize(&hex::decode(&response.script_pubkey)
                 .map_err(|e| format!("Invalid script_pubkey: {}", e))?)?;
             if !script_pubkey.is_standard() {
-                return Err("Non-standard script".to_string());
+                let error = "Non-standard script".to_string();
+                let _ = self.send_alert("non_standard_script", &error, 2).await;
+                return Err(error);
             }
         }
         Ok(true)
@@ -169,17 +209,20 @@ impl Transaction for TransactionServiceImpl {
         let tx_bytes = hex::decode(&req.tx_hex)
             .map_err(|e| {
                 warn!("Invalid tx_hex: {}", e);
+                let _ = self.send_alert("tx_invalid_format", &format!("Invalid tx_hex: {}", e), 2).await;
                 Status::invalid_argument(format!("Invalid tx_hex: {}", e))
             })?;
         let tx: Transaction = deserialize(&tx_bytes)
             .map_err(|e| {
                 warn!("Invalid transaction: {}", e);
+                let _ = self.send_alert("tx_invalid_format", &format!("Invalid transaction: {}", e), 2).await;
                 Status::invalid_argument(format!("Invalid transaction: {}", e))
             })?;
 
         if tx.inputs.is_empty() || tx.outputs.is_empty() {
             self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
             warn!("Invalid transaction format: empty inputs or outputs");
+            let _ = self.send_alert("tx_invalid_format", "Invalid transaction format: empty inputs or outputs", 2).await;
             return Ok(Response::new(ValidateTxResponse {
                 is_valid: false,
                 error: "Invalid transaction format: empty inputs or outputs".to_string(),
@@ -193,12 +236,14 @@ impl Transaction for TransactionServiceImpl {
             .await
             .map_err(|e| {
                 warn!("Consensus validation failed: {}", e);
+                let _ = self.send_alert("tx_consensus_failed", &format!("Consensus validation failed: {}", e), 2).await;
                 Status::internal(format!("Consensus validation failed: {}", e))
             })?
             .into_inner();
         if !consensus_response.is_valid {
             self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
             warn!("Consensus validation failed: {}", consensus_response.error);
+            let _ = self.send_alert("tx_consensus_failed", &format!("Consensus validation failed: {}", consensus_response.error), 2).await;
             return Ok(Response::new(ValidateTxResponse {
                 is_valid: false,
                 error: consensus_response.error,
@@ -244,6 +289,7 @@ impl Transaction for TransactionServiceImpl {
         if !validate_response.is_valid {
             self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
             warn!("Transaction validation failed: {}", validate_response.error);
+            let _ = self.send_alert("tx_validation_failed", &format!("Transaction validation failed: {}", validate_response.error), 2).await;
             return Ok(Response::new(ProcessTxResponse {
                 success: false,
                 error: validate_response.error,
@@ -257,17 +303,20 @@ impl Transaction for TransactionServiceImpl {
             .await
             .map_err(|e| {
                 warn!("Transaction indexing failed: {}", e);
+                let _ = self.send_alert("tx_indexing_failed", &format!("Transaction indexing failed: {}", e), 2).await;
                 Status::internal(format!("Transaction indexing failed: {}", e))
             })?
             .into_inner();
         if !index_response.success {
             self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
             warn!("Transaction indexing failed: {}", index_response.error);
+            let _ = self.send_alert("tx_indexing_failed", &format!("Transaction indexing failed: {}", index_response.error), 2).await;
             return Ok(Response::new(ProcessTxResponse {
                 success: false,
                 error: index_response.error,
             }));
         }
+        self.index_throughput.inc_by(1.0);
 
         let tx_queue = self.tx_queue.lock().await;
         tx_queue
@@ -276,6 +325,7 @@ impl Transaction for TransactionServiceImpl {
             .await
             .map_err(|e| {
                 warn!("Failed to queue transaction: {}", e);
+                let _ = self.send_alert("tx_queue_failed", &format!("Failed to queue transaction: {}", e), 2).await;
                 Status::internal(format!("Failed to queue transaction: {}", e))
             })?;
 
@@ -330,10 +380,12 @@ impl Transaction for TransactionServiceImpl {
             .await
             .map_err(|e| {
                 warn!("Transaction indexing failed: {}", e);
+                let _ = self.send_alert("tx_indexing_failed", &format!("Transaction indexing failed: {}", e), 2).await;
                 Status::internal(format!("Transaction indexing failed: {}", e))
             })?
             .into_inner();
 
+        self.index_throughput.inc_by(1.0);
         self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
         info!("Transaction indexing {}: {}", if index_response.success { "succeeded" } else { "failed" }, req.tx_hex);
         Ok(Response::new(IndexTransactionResponse {
@@ -352,6 +404,9 @@ impl Transaction for TransactionServiceImpl {
             requests_total: self.requests_total.get() as u64,
             avg_latency_ms: self.latency_ms.get(),
             errors_total: 0, // Placeholder
+            cache_hits: 0, // Not applicable
+            alert_count: self.alert_count.get() as u64,
+            index_throughput: self.index_throughput.get(),
         }))
     }
 }
