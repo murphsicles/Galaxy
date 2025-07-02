@@ -15,12 +15,10 @@ use auth::auth_client::AuthClient;
 use auth::{AuthenticateRequest, AuthorizeRequest};
 use alert::alert_client::AlertClient;
 use alert::SendAlertRequest;
-use metrics::metrics_client::MetricsClient;
 use sv::block::Block;
 use sv::util::{deserialize, serialize, hash::Sha256d};
 use futures::StreamExt;
 use lru::LruCache;
-use std::collections::HashMap;
 use tokio::sync::Mutex;
 use std::sync::Arc;
 use std::time::Instant;
@@ -29,6 +27,7 @@ use governor::{Quota, RateLimiter, Jitter};
 use std::num::NonZeroU32;
 use tracing::{info, warn};
 use shared::ShardManager;
+use toml;
 
 tonic::include_proto!("validation");
 tonic::include_proto!("block");
@@ -48,6 +47,7 @@ struct ValidationServiceImpl {
     requests_total: Counter,
     latency_ms: Gauge,
     cache_hits: Counter,
+    alert_count: Counter,
     rate_limiter: Arc<RateLimiter<String, governor::state::direct::NotKeyed, governor::clock::DefaultClock>>,
     shard_manager: Arc<ShardManager>,
 }
@@ -75,9 +75,11 @@ impl ValidationServiceImpl {
         let requests_total = Counter::new("validation_requests_total", "Total SPV proof requests").unwrap();
         let latency_ms = Gauge::new("validation_latency_ms", "Average proof generation latency").unwrap();
         let cache_hits = Counter::new("validation_cache_hits", "Cache hit count").unwrap();
+        let alert_count = Counter::new("validation_alert_count", "Total alerts sent").unwrap();
         registry.register(Box::new(requests_total.clone())).unwrap();
         registry.register(Box::new(latency_ms.clone())).unwrap();
         registry.register(Box::new(cache_hits.clone())).unwrap();
+        registry.register(Box::new(alert_count.clone())).unwrap();
         let rate_limiter = Arc::new(RateLimiter::direct(Quota::per_second(NonZeroU32::new(1000).unwrap())));
         let shard_manager = Arc::new(ShardManager::new());
 
@@ -91,6 +93,7 @@ impl ValidationServiceImpl {
             requests_total,
             latency_ms,
             cache_hits,
+            alert_count,
             rate_limiter,
             shard_manager,
         }
@@ -144,6 +147,7 @@ impl ValidationServiceImpl {
             warn!("Alert sending failed: {}", alert_response.error);
             return Err(Status::internal(alert_response.error));
         }
+        self.alert_count.inc();
         Ok(())
     }
 
@@ -301,11 +305,13 @@ impl Validation for ValidationServiceImpl {
         let merkle_path = hex::decode(&req.merkle_path)
             .map_err(|e| {
                 warn!("Invalid merkle_path: {}", e);
+                let _ = self.send_alert("spv_proof_invalid_format", &format!("Invalid merkle_path: {}", e), 2).await;
                 Status::invalid_argument(format!("Invalid merkle_path: {}", e))
             })?;
         let txid = Sha256d::from_hex(&req.txid)
             .map_err(|e| {
                 warn!("Invalid txid: {}", e);
+                let _ = self.send_alert("spv_proof_invalid_format", &format!("Invalid txid: {}", e), 2).await;
                 Status::invalid_argument(format!("Invalid txid: {}", e))
             })?;
 
@@ -314,11 +320,13 @@ impl Validation for ValidationServiceImpl {
             let header_bytes = hex::decode(&header_hex)
                 .map_err(|e| {
                     warn!("Invalid block header: {}", e);
+                    let _ = self.send_alert("spv_proof_invalid_format", &format!("Invalid block header: {}", e), 2).await;
                     Status::invalid_argument(format!("Invalid block header: {}", e))
                 })?;
             let header: sv::block::BlockHeader = deserialize(&header_bytes)
                 .map_err(|e| {
                     warn!("Invalid block header: {}", e);
+                    let _ = self.send_alert("spv_proof_invalid_format", &format!("Invalid block header: {}", e), 2).await;
                     Status::invalid_argument(format!("Invalid block header: {}", e))
                 })?;
 
@@ -507,13 +515,6 @@ impl Validation for ValidationServiceImpl {
                     })?;
 
                 if merkle_root != block.header.merkle_root {
-                    yield StreamSPVProofsResponse {
-                        success: false,
-                        txid: req.txid,
-                        merkle_path: "".to_string(),
-                        block_headers: vec![],
-                        error: "Merkle root mismatch".to_string(),
-                    };
                     let _ = alert_client.clone()
                         .send_alert(SendAlertRequest {
                             event_type: "spv_proof_merkle_root_mismatch".to_string(),
@@ -521,6 +522,13 @@ impl Validation for ValidationServiceImpl {
                             severity: 3,
                         })
                         .await;
+                    yield StreamSPVProofsResponse {
+                        success: false,
+                        txid: req.txid,
+                        merkle_path: "".to_string(),
+                        block_headers: vec![],
+                        error: "Merkle root mismatch".to_string(),
+                    };
                     warn!("Merkle root mismatch for streamed txid: {}", req.txid);
                     continue;
                 }
@@ -553,6 +561,9 @@ impl Validation for ValidationServiceImpl {
             requests_total: self.requests_total.get() as u64,
             avg_latency_ms: self.latency_ms.get(),
             errors_total: 0, // Placeholder
+            cache_hits: self.cache_hits.get() as u64,
+            alert_count: self.alert_count.get() as u64,
+            index_throughput: 0.0, // Not applicable
         }))
     }
 }
