@@ -11,8 +11,8 @@ use auth::auth_client::AuthClient;
 use auth::{AuthenticateRequest, AuthorizeRequest};
 use index::index_client::IndexClient;
 use index::IndexBlockRequest as IndexIndexBlockRequest;
-use metrics::metrics_client::MetricsClient;
-use metrics::{GetMetricsRequest, GetMetricsResponse};
+use alert::alert_client::AlertClient;
+use alert::SendAlertRequest;
 use sv::block::Block;
 use sv::transaction::Transaction;
 use sv::util::{deserialize, serialize, hash::Sha256d};
@@ -31,6 +31,7 @@ tonic::include_proto!("storage");
 tonic::include_proto!("consensus");
 tonic::include_proto!("auth");
 tonic::include_proto!("index");
+tonic::include_proto!("alert");
 tonic::include_proto!("metrics");
 
 #[derive(Debug)]
@@ -40,9 +41,12 @@ struct BlockServiceImpl {
     consensus_client: ConsensusClient<Channel>,
     auth_client: AuthClient<Channel>,
     index_client: IndexClient<Channel>,
+    alert_client: AlertClient<Channel>,
     registry: Arc<Registry>,
     requests_total: Counter,
     latency_ms: Gauge,
+    alert_count: Counter,
+    index_throughput: Gauge,
     rate_limiter: Arc<RateLimiter<String, governor::state::direct::NotKeyed, governor::clock::DefaultClock>>,
     shard_manager: Arc<ShardManager>,
 }
@@ -68,11 +72,18 @@ impl BlockServiceImpl {
         let index_client = IndexClient::connect("http://[::1]:50062")
             .await
             .expect("Failed to connect to index_service");
+        let alert_client = AlertClient::connect("http://[::1]:50061")
+            .await
+            .expect("Failed to connect to alert_service");
         let registry = Arc::new(Registry::new());
         let requests_total = Counter::new("block_requests_total", "Total block requests").unwrap();
         let latency_ms = Gauge::new("block_latency_ms", "Average block processing latency").unwrap();
+        let alert_count = Counter::new("block_alert_count", "Total alerts sent").unwrap();
+        let index_throughput = Gauge::new("block_index_throughput", "Indexed blocks per second").unwrap();
         registry.register(Box::new(requests_total.clone())).unwrap();
         registry.register(Box::new(latency_ms.clone())).unwrap();
+        registry.register(Box::new(alert_count.clone())).unwrap();
+        registry.register(Box::new(index_throughput.clone())).unwrap();
         let rate_limiter = Arc::new(RateLimiter::direct(Quota::per_second(NonZeroU32::new(1000).unwrap())));
         let shard_manager = Arc::new(ShardManager::new());
 
@@ -82,9 +93,12 @@ impl BlockServiceImpl {
             consensus_client,
             auth_client,
             index_client,
+            alert_client,
             registry,
             requests_total,
             latency_ms,
+            alert_count,
+            index_throughput,
             rate_limiter,
             shard_manager,
         }
@@ -120,6 +134,28 @@ impl BlockServiceImpl {
         Ok(())
     }
 
+    async fn send_alert(&self, event_type: &str, message: &str, severity: u32) -> Result<(), Status> {
+        let alert_request = SendAlertRequest {
+            event_type: event_type.to_string(),
+            message: message.to_string(),
+            severity,
+        };
+        let alert_response = self.alert_client
+            .send_alert(alert_request)
+            .await
+            .map_err(|e| {
+                warn!("Failed to send alert: {}", e);
+                Status::internal(format!("Failed to send alert: {}", e))
+            })?
+            .into_inner();
+        if !alert_response.success {
+            warn!("Alert sending failed: {}", alert_response.error);
+            return Err(Status::internal(alert_response.error));
+        }
+        self.alert_count.inc();
+        Ok(())
+    }
+
     async fn validate_block_transactions(&self, block: &Block) -> Result<bool, String> {
         let mut client = self.transaction_client.clone();
         for tx in &block.transactions {
@@ -131,6 +167,7 @@ impl BlockServiceImpl {
                 .map_err(|e| format!("Transaction validation failed: {}", e))?
                 .into_inner();
             if !response.is_valid {
+                let _ = self.send_alert("block_tx_validation_failed", &format!("Transaction validation failed: {}", response.error), 2).await;
                 return Err(response.error);
             }
         }
@@ -151,6 +188,7 @@ impl BlockServiceImpl {
                     .map_err(|e| format!("Remove UTXO failed: {}", e))?
                     .into_inner();
                 if !response.success {
+                    let _ = self.send_alert("utxo_remove_failed", &format!("Remove UTXO failed: {}", response.error), 2).await;
                     return Err(response.error);
                 }
             }
@@ -167,6 +205,7 @@ impl BlockServiceImpl {
                     .map_err(|e| format!("Add UTXO failed: {}", e))?
                     .into_inner();
                 if !response.success {
+                    let _ = self.send_alert("utxo_add_failed", &format!("Add UTXO failed: {}", response.error), 2).await;
                     return Err(response.error);
                 }
             }
@@ -190,17 +229,20 @@ impl Block for BlockServiceImpl {
         let block_bytes = hex::decode(&req.block_hex)
             .map_err(|e| {
                 warn!("Invalid block_hex: {}", e);
+                let _ = self.send_alert("block_invalid_format", &format!("Invalid block_hex: {}", e), 2).await;
                 Status::invalid_argument(format!("Invalid block_hex: {}", e))
             })?;
         let block: Block = deserialize(&block_bytes)
             .map_err(|e| {
                 warn!("Invalid block: {}", e);
+                let _ = self.send_alert("block_invalid_format", &format!("Invalid block: {}", e), 2).await;
                 Status::invalid_argument(format!("Invalid block: {}", e))
             })?;
 
         if block.header.version < 1 {
             self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
             warn!("Invalid block header version");
+            let _ = self.send_alert("block_invalid_version", "Invalid block header version", 2).await;
             return Ok(Response::new(ValidateBlockResponse {
                 is_valid: false,
                 error: "Invalid block header version".to_string(),
@@ -216,12 +258,14 @@ impl Block for BlockServiceImpl {
             .await
             .map_err(|e| {
                 warn!("Consensus validation failed: {}", e);
+                let _ = self.send_alert("block_consensus_failed", &format!("Consensus validation failed: {}", e), 2).await;
                 Status::internal(format!("Consensus validation failed: {}", e))
             })?
             .into_inner();
         if !consensus_response.is_valid {
             self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
             warn!("Consensus validation failed: {}", consensus_response.error);
+            let _ = self.send_alert("block_consensus_failed", &format!("Consensus validation failed: {}", consensus_response.error), 2).await;
             return Ok(Response::new(ValidateBlockResponse {
                 is_valid: false,
                 error: consensus_response.error,
@@ -244,6 +288,7 @@ impl Block for BlockServiceImpl {
             if let Err(e) = self.update_utxos(&block).await {
                 self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
                 warn!("UTXO update failed: {}", e);
+                let _ = self.send_alert("block_utxo_update_failed", &format!("UTXO update failed: {}", e), 2).await;
                 return Ok(Response::new(ValidateBlockResponse {
                     is_valid: false,
                     error: format!("UTXO update failed: {}", e),
@@ -257,17 +302,20 @@ impl Block for BlockServiceImpl {
                 .await
                 .map_err(|e| {
                     warn!("Block indexing failed: {}", e);
+                    let _ = self.send_alert("block_indexing_failed", &format!("Block indexing failed: {}", e), 2).await;
                     Status::internal(format!("Block indexing failed: {}", e))
                 })?
                 .into_inner();
             if !index_response.success {
                 self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
                 warn!("Block indexing failed: {}", index_response.error);
+                let _ = self.send_alert("block_indexing_failed", &format!("Block indexing failed: {}", index_response.error), 2).await;
                 return Ok(Response::new(ValidateBlockResponse {
                     is_valid: false,
                     error: index_response.error,
                 }));
             }
+            self.index_throughput.inc_by(1.0);
         }
 
         self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
@@ -298,12 +346,14 @@ impl Block for BlockServiceImpl {
                 .await
                 .map_err(|e| {
                     warn!("Transaction validation failed: {}", e);
+                    let _ = self.send_alert("block_assembly_tx_validation_failed", &format!("Transaction validation failed: {}", e), 2).await;
                     Status::internal(format!("Transaction validation failed: {}", e))
                 })?
                 .into_inner();
             if !response.is_valid {
                 self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
                 warn!("Invalid transaction: {}", response.error);
+                let _ = self.send_alert("block_assembly_tx_validation_failed", &format!("Invalid transaction: {}", response.error), 2).await;
                 return Ok(Response::new(AssembleBlockResponse {
                     block_hex: "".to_string(),
                     error: response.error,
@@ -312,11 +362,13 @@ impl Block for BlockServiceImpl {
             let tx_bytes = hex::decode(&tx_hex)
                 .map_err(|e| {
                     warn!("Invalid tx_hex: {}", e);
+                    let _ = self.send_alert("block_assembly_tx_invalid_format", &format!("Invalid tx_hex: {}", e), 2).await;
                     Status::invalid_argument(format!("Invalid tx_hex: {}", e))
                 })?;
             let tx: Transaction = deserialize(&tx_bytes)
                 .map_err(|e| {
                     warn!("Invalid transaction: {}", e);
+                    let _ = self.send_alert("block_assembly_tx_invalid_format", &format!("Invalid transaction: {}", e), 2).await;
                     Status::invalid_argument(format!("Invalid transaction: {}", e))
                 })?;
             transactions.push(tx);
@@ -380,10 +432,12 @@ impl Block for BlockServiceImpl {
             .await
             .map_err(|e| {
                 warn!("Block indexing failed: {}", e);
+                let _ = self.send_alert("block_indexing_failed", &format!("Block indexing failed: {}", e), 2).await;
                 Status::internal(format!("Block indexing failed: {}", e))
             })?
             .into_inner();
 
+        self.index_throughput.inc_by(1.0);
         self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
         info!("Block indexing {}: {}", if index_response.success { "succeeded" } else { "failed" }, req.block_hex);
         Ok(Response::new(IndexBlockResponse {
@@ -402,6 +456,9 @@ impl Block for BlockServiceImpl {
             requests_total: self.requests_total.get() as u64,
             avg_latency_ms: self.latency_ms.get(),
             errors_total: 0, // Placeholder
+            cache_hits: 0, // Not applicable
+            alert_count: self.alert_count.get() as u64,
+            index_throughput: self.index_throughput.get(),
         }))
     }
 }
