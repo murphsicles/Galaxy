@@ -1,50 +1,60 @@
-use tonic::{transport::Server, Request, Response, Status, Streaming};
+use tonic::{transport::Server, Request, Response, Status};
 use alert::alert_server::{Alert, AlertServer};
-use alert::{SendAlertRequest, SendAlertResponse, SubscribeToAlertsRequest, AlertResponse};
+use alert::{SendAlertRequest, SendAlertResponse, GetMetricsRequest, GetMetricsResponse};
 use auth::auth_client::AuthClient;
 use auth::{AuthenticateRequest, AuthorizeRequest};
-use tokio::sync::mpsc;
-use futures::StreamExt;
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use std::time::{Instant, SystemTime};
+use std::time::Instant;
 use prometheus::{Counter, Gauge, Registry};
+use governor::{Quota, RateLimiter, Jitter};
+use std::num::NonZeroU32;
 use tracing::{info, warn};
+use shared::ShardManager;
 use toml;
 
 tonic::include_proto!("alert");
 tonic::include_proto!("auth");
+tonic::include_proto!("metrics");
 
 #[derive(Debug)]
 struct AlertServiceImpl {
     auth_client: AuthClient<tonic::transport::Channel>,
-    alert_channel: Arc<Mutex<mpsc::Sender<AlertResponse>>>,
     registry: Arc<Registry>,
-    alerts_total: Counter,
+    requests_total: Counter,
     latency_ms: Gauge,
+    alert_count: Counter,
+    rate_limiter: Arc<RateLimiter<String, governor::state::direct::NotKeyed, governor::clock::DefaultClock>>,
+    shard_manager: Arc<ShardManager>,
 }
 
 impl AlertServiceImpl {
     async fn new() -> Self {
         let config_str = include_str!("../../tests/config.toml");
         let config: toml::Value = toml::from_str(config_str).expect("Failed to parse config");
+        let shard_id = config["sharding"]["shard_id"].as_integer().unwrap_or(0) as u32;
+
         let auth_client = AuthClient::connect("http://[::1]:50060")
             .await
             .expect("Failed to connect to auth_service");
-        let (tx, _rx) = mpsc::channel(100);
-        let alert_channel = Arc::new(Mutex::new(tx));
         let registry = Arc::new(Registry::new());
-        let alerts_total = Counter::new("alerts_total", "Total alerts sent").unwrap();
+        let requests_total = Counter::new("alert_requests_total", "Total alert requests").unwrap();
         let latency_ms = Gauge::new("alert_latency_ms", "Average alert processing latency").unwrap();
-        registry.register(Box::new(alerts_total.clone())).unwrap();
+        let alert_count = Counter::new("alert_alert_count", "Total alerts processed").unwrap();
+        registry.register(Box::new(requests_total.clone())).unwrap();
         registry.register(Box::new(latency_ms.clone())).unwrap();
+        registry.register(Box::new(alert_count.clone())).unwrap();
+        let rate_limiter = Arc::new(RateLimiter::direct(Quota::per_second(NonZeroU32::new(1000).unwrap())));
+        let shard_manager = Arc::new(ShardManager::new());
 
         AlertServiceImpl {
             auth_client,
-            alert_channel,
             registry,
-            alerts_total,
+            requests_total,
             latency_ms,
+            alert_count,
+            rate_limiter,
+            shard_manager,
         }
     }
 
@@ -85,65 +95,46 @@ impl Alert for AlertServiceImpl {
         let token = request.metadata().get("authorization").ok_or_else(|| Status::unauthenticated("Missing token"))?;
         let user_id = self.authenticate(token.to_str().map_err(|e| Status::invalid_argument("Invalid token format"))?).await?;
         self.authorize(&user_id, "SendAlert").await?;
+        self.rate_limiter.until_ready().await;
 
-        self.alerts_total.inc();
+        self.requests_total.inc();
         let start = Instant::now();
         let req = request.into_inner();
-        info!("Sending alert: type={}, message={}, severity={}", req.event_type, req.message, req.severity);
+        info!("Processing alert: {} - {}", req.event_type, req.message);
 
-        let alert = AlertResponse {
-            event_type: req.event_type,
-            message: req.message,
-            severity: req.severity,
-            timestamp: SystemTime::now()
-                .duration_since(SystemTime::UNIX_EPOCH)
-                .unwrap()
-                .as_secs(),
-        };
-        let alert_channel = self.alert_channel.lock().await;
-        alert_channel
-            .send(alert)
-            .await
-            .map_err(|e| {
-                warn!("Failed to send alert: {}", e);
-                Status::internal(format!("Failed to send alert: {}", e))
-            })?;
+        // Simulate alert processing (e.g., logging to a system or notifying external service)
+        if req.severity > 5 {
+            self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
+            warn!("Invalid severity level: {}", req.severity);
+            return Ok(Response::new(SendAlertResponse {
+                success: false,
+                error: "Invalid severity level".to_string(),
+            }));
+        }
 
+        self.alert_count.inc();
         self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
-        info!("Alert sent successfully");
+        info!("Alert processed successfully: {} - {}", req.event_type, req.message);
         Ok(Response::new(SendAlertResponse {
             success: true,
             error: "".to_string(),
         }))
     }
 
-    async fn subscribe_to_alerts(&self, request: Request<SubscribeToAlertsRequest>) -> Result<Response<Self::SubscribeToAlertsStream>, Status> {
+    async fn get_metrics(&self, request: Request<GetMetricsRequest>) -> Result<Response<GetMetricsResponse>, Status> {
         let token = request.metadata().get("authorization").ok_or_else(|| Status::unauthenticated("Missing token"))?;
         let user_id = self.authenticate(token.to_str().map_err(|e| Status::invalid_argument("Invalid token format"))?).await?;
-        self.authorize(&user_id, "SubscribeToAlerts").await?;
+        self.authorize(&user_id, "GetMetrics").await?;
 
-        self.alerts_total.inc();
-        let start = Instant::now();
-        let req = request.into_inner();
-        info!("Subscribing to alerts with filter: {}", req.event_type);
-        let (tx, mut rx) = mpsc::channel(100);
-        let alert_channel = Arc::clone(&self.alert_channel);
-        let event_type_filter = req.event_type.clone();
-
-        tokio::spawn(async move {
-            let mut alert_channel = alert_channel.lock().await;
-            while let Ok(alert) = rx.recv().await {
-                if event_type_filter.is_empty() || alert.event_type == event_type_filter {
-                    if let Err(e) = tx.send(Ok(alert)).await {
-                        warn!("Failed to stream alert: {}", e);
-                        break;
-                    }
-                }
-            }
-        });
-
-        self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
-        Ok(Response::new(Box::pin(tokio_stream::wrappers::ReceiverStream::new(rx))))
+        Ok(Response::new(GetMetricsResponse {
+            service_name: "alert_service".to_string(),
+            requests_total: self.requests_total.get() as u64,
+            avg_latency_ms: self.latency_ms.get(),
+            errors_total: 0, // Placeholder
+            cache_hits: 0, // Not applicable
+            alert_count: self.alert_count.get() as u64,
+            index_throughput: 0.0, // Not applicable
+        }))
     }
 }
 
