@@ -181,7 +181,31 @@ impl OverlayServiceImpl {
     }
 
     async fn assemble_overlay_block(&self, overlay_id: &str, transactions: Vec<Transaction>) -> Result<Block, String> {
-        let txids: Vec<Sha256d> = transactions.iter().map(|tx| tx.txid()).collect();
+        let block = Block {
+            header: sv::block::BlockHeader {
+                version: 1,
+                prev_blockhash: Default::default(),
+                merkle_root: Default::default(), // Will be computed below
+                time: 0,
+                bits: 0x1d00ffff, // Placeholder
+                nonce: 0,
+            },
+            transactions,
+        };
+
+        // Enforce temporary 32GB block size limit
+        let block_size = serialize(&block).len() as u64;
+        if block_size > 34_359_738_368 {
+            warn!("Overlay block size {} exceeds 32GB temporary limit for overlay: {}", block_size, overlay_id);
+            let _ = self.send_alert(
+                "overlay_block_size_exceeded",
+                &format!("Overlay block size {} exceeds 32GB temporary limit for overlay: {}", block_size, overlay_id),
+                3,
+            ).await;
+            return Err(format!("Overlay block size {} exceeds 32GB temporary limit", block_size));
+        }
+
+        let txids: Vec<Sha256d> = block.transactions.iter().map(|tx| tx.txid()).collect();
         let merkle_root = if txids.is_empty() {
             Sha256d::from_hex("0000000000000000000000000000000000000000000000000000000000000000").unwrap()
         } else {
@@ -211,7 +235,7 @@ impl OverlayServiceImpl {
                 bits: 0x1d00ffff, // Placeholder
                 nonce: 0,
             },
-            transactions,
+            transactions: block.transactions,
         };
 
         let block_key = format!("block_{}:{}", overlay_id, self.block_count.get());
