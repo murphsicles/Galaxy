@@ -8,6 +8,7 @@ use auth::auth_client::AuthClient;
 use auth::{AuthenticateRequest, AuthorizeRequest};
 use alert::alert_client::AlertClient;
 use alert::SendAlertRequest;
+use tigerbeetle::TigerBeetleClient; // Placeholder for future integration
 use std::collections::HashMap;
 use tokio::sync::Mutex;
 use std::sync::Arc;
