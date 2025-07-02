@@ -45,6 +45,7 @@ struct MiningServiceImpl {
     work_requests: Counter,
     latency_ms: Gauge,
     blocks_submitted: Counter,
+    alert_count: Counter,
     rate_limiter: Arc<RateLimiter<String, governor::state::direct::NotKeyed, governor::clock::DefaultClock>>,
     shard_manager: Arc<ShardManager>,
 }
@@ -71,9 +72,11 @@ impl MiningServiceImpl {
         let work_requests = Counter::new("mining_work_requests_total", "Total mining work requests").unwrap();
         let latency_ms = Gauge::new("mining_latency_ms", "Average work generation latency").unwrap();
         let blocks_submitted = Counter::new("mining_blocks_submitted", "Total blocks submitted").unwrap();
+        let alert_count = Counter::new("mining_alert_count", "Total alerts sent").unwrap();
         registry.register(Box::new(work_requests.clone())).unwrap();
         registry.register(Box::new(latency_ms.clone())).unwrap();
         registry.register(Box::new(blocks_submitted.clone())).unwrap();
+        registry.register(Box::new(alert_count.clone())).unwrap();
         let rate_limiter = Arc::new(RateLimiter::direct(Quota::per_second(NonZeroU32::new(1000).unwrap())));
         let shard_manager = Arc::new(ShardManager::new());
 
@@ -86,6 +89,7 @@ impl MiningServiceImpl {
             work_requests,
             latency_ms,
             blocks_submitted,
+            alert_count,
             rate_limiter,
             shard_manager,
         }
@@ -139,6 +143,7 @@ impl MiningServiceImpl {
             warn!("Alert sending failed: {}", alert_response.error);
             return Err(Status::internal(alert_response.error));
         }
+        self.alert_count.inc();
         Ok(())
     }
 
@@ -268,7 +273,6 @@ impl Mining for MiningServiceImpl {
 
         self.work_requests.inc();
         self.blocks_submitted.inc();
-       WWW self.blocks_submitted.inc();
         let start = Instant::now();
         info!("Submitting mined block: {}", request.get_ref().block_hex);
         let req = request.into_inner();
@@ -407,6 +411,9 @@ impl Mining for MiningServiceImpl {
             requests_total: self.work_requests.get() as u64,
             avg_latency_ms: self.latency_ms.get(),
             errors_total: 0, // Placeholder
+            cache_hits: 0, // Not applicable
+            alert_count: self.alert_count.get() as u64,
+            index_throughput: 0.0, // Not applicable
         }))
     }
 }
