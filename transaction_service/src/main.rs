@@ -1,6 +1,9 @@
 use tonic::{transport::{Server, Channel}, Request, Response, Status};
 use transaction::transaction_server::{Transaction, TransactionServer};
-use transaction::{ValidateTxRequest, ValidateTxResponse, ProcessTxRequest, ProcessTxResponse, BatchValidateTxRequest, BatchValidateTxResponse, IndexTransactionRequest, IndexTransactionResponse};
+use transaction::{
+    ValidateTxRequest, ValidateTxResponse, ProcessTxRequest, ProcessTxResponse,
+    BatchValidateTxRequest, BatchValidateTxResponse, IndexTransactionRequest, IndexTransactionResponse
+};
 use storage::storage_client::StorageClient;
 use storage::QueryUtxoRequest;
 use consensus::consensus_client::ConsensusClient;
