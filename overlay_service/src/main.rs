@@ -224,6 +224,12 @@ impl OverlayServiceImpl {
     }
 
     async fn validate_overlay_consensus(&self, overlay_id: &str, tx: &Transaction) -> Result<bool, String> {
+        let config_str = include_str!("../../tests/config.toml");
+        let config: toml::Value = toml::from_str(config_str).expect("Failed to parse config");
+        let max_op_return_size = config["overlay_consensus"]["max_op_return_size"]
+            .as_integer()
+            .unwrap_or(4294967296) as usize; // 4.3GB default
+
         let consensus_rules = self.consensus_rules.lock().await;
         let rules = consensus_rules.get(overlay_id).ok_or_else(|| {
             warn!("No consensus rules for overlay: {}", overlay_id);
@@ -233,10 +239,14 @@ impl OverlayServiceImpl {
         if let Some(&enabled) = rules.get("restrict_op_return") {
             if enabled {
                 for output in &tx.outputs {
-                    if output.script_pubkey.is_op_return() && output.script_pubkey.len() > 1000 {
-                        warn!("OP_RETURN exceeds 1KB limit for overlay: {}", overlay_id);
-                        let _ = self.send_alert("overlay_op_return_exceeded", &format!("OP_RETURN exceeds 1KB limit for overlay: {}", overlay_id), 3).await;
-                        return Err("OP_RETURN exceeds 1KB limit".to_string());
+                    if output.script_pubkey.is_op_return() && output.script_pubkey.len() > max_op_return_size {
+                        warn!("OP_RETURN exceeds 4.3GB limit for overlay: {}", overlay_id);
+                        let _ = self.send_alert(
+                            "overlay_op_return_exceeded",
+                            &format!("OP_RETURN exceeds 4.3GB limit for overlay: {}", overlay_id),
+                            3,
+                        ).await;
+                        return Err("OP_RETURN exceeds 4.3GB limit".to_string());
                     }
                 }
             }
