@@ -4,7 +4,8 @@ use overlay::{
     CreateOverlayRequest, CreateOverlayResponse, SubmitOverlayTxRequest, SubmitOverlayTxResponse,
     GetOverlayBlockRequest, GetOverlayBlockResponse, BatchSubmitOverlayTxRequest, BatchSubmitOverlayTxResponse,
     StreamOverlayTxRequest, StreamOverlayTxResponse, IndexOverlayTransactionRequest, IndexOverlayTransactionResponse,
-    QueryOverlayBlockRequest, QueryOverlayBlockResponse, GetMetricsRequest, GetMetricsResponse
+    QueryOverlayBlockRequest, QueryOverlayBlockResponse, ManageOverlayConsensusRequest, ManageOverlayConsensusResponse,
+    GetMetricsRequest, GetMetricsResponse
 };
 use transaction::transaction_client::TransactionClient;
 use transaction::ValidateTxRequest;
@@ -53,11 +54,14 @@ struct OverlayServiceImpl {
     index_client: IndexClient<Channel>,
     alert_client: AlertClient<Channel>,
     overlays: Arc<Mutex<HashMap<String, (Vec<Block>, Vec<Transaction>)>>>,
+    consensus_rules: Arc<Mutex<HashMap<String, HashMap<String, bool>>>>, // Overlay ID -> Rule Name -> Enabled
     db: Arc<Db>,
     registry: Arc<Registry>,
     tx_requests: Counter,
     latency_ms: Gauge,
     block_count: Counter,
+    alert_count: Counter,
+    index_throughput: Gauge,
     rate_limiter: Arc<RateLimiter<String, governor::state::direct::NotKeyed, governor::clock::DefaultClock>>,
     shard_manager: Arc<ShardManager>,
 }
@@ -87,14 +91,19 @@ impl OverlayServiceImpl {
             .await
             .expect("Failed to connect to alert_service");
         let overlays = Arc::new(Mutex::new(HashMap::new()));
+        let consensus_rules = Arc::new(Mutex::new(HashMap::new()));
         let db = Arc::new(sled::open(format!("overlay_db_{}", shard_id)).expect("Failed to open sled DB"));
         let registry = Arc::new(Registry::new());
         let tx_requests = Counter::new("overlay_tx_requests_total", "Total transaction requests").unwrap();
         let latency_ms = Gauge::new("overlay_latency_ms", "Average transaction processing latency").unwrap();
         let block_count = Counter::new("overlay_block_count", "Total overlay blocks created").unwrap();
+        let alert_count = Counter::new("overlay_alert_count", "Total alerts sent").unwrap();
+        let index_throughput = Gauge::new("overlay_index_throughput", "Indexed overlay transactions per second").unwrap();
         registry.register(Box::new(tx_requests.clone())).unwrap();
         registry.register(Box::new(latency_ms.clone())).unwrap();
         registry.register(Box::new(block_count.clone())).unwrap();
+        registry.register(Box::new(alert_count.clone())).unwrap();
+        registry.register(Box::new(index_throughput.clone())).unwrap();
         let rate_limiter = Arc::new(RateLimiter::direct(Quota::per_second(NonZeroU32::new(1000).unwrap())));
         let shard_manager = Arc::new(ShardManager::new());
 
@@ -106,11 +115,14 @@ impl OverlayServiceImpl {
             index_client,
             alert_client,
             overlays,
+            consensus_rules,
             db,
             registry,
             tx_requests,
             latency_ms,
             block_count,
+            alert_count,
+            index_throughput,
             rate_limiter,
             shard_manager,
         }
@@ -164,6 +176,7 @@ impl OverlayServiceImpl {
             warn!("Alert sending failed: {}", alert_response.error);
             return Err(Status::internal(alert_response.error));
         }
+        self.alert_count.inc();
         Ok(())
     }
 
@@ -209,6 +222,29 @@ impl OverlayServiceImpl {
         info!("Assembled overlay block for {}: {}", overlay_id, block_key);
         Ok(block)
     }
+
+    async fn validate_overlay_consensus(&self, overlay_id: &str, tx: &Transaction) -> Result<bool, String> {
+        let consensus_rules = self.consensus_rules.lock().await;
+        let rules = consensus_rules.get(overlay_id).ok_or_else(|| {
+            warn!("No consensus rules for overlay: {}", overlay_id);
+            "No consensus rules defined".to_string()
+        })?;
+
+        if let Some(&enabled) = rules.get("restrict_op_return") {
+            if enabled {
+                for output in &tx.outputs {
+                    if output.script_pubkey.is_op_return() && output.script_pubkey.len() > 1000 {
+                        warn!("OP_RETURN exceeds 1KB limit for overlay: {}", overlay_id);
+                        let _ = self.send_alert("overlay_op_return_exceeded", &format!("OP_RETURN exceeds 1KB limit for overlay: {}", overlay_id), 3).await;
+                        return Err("OP_RETURN exceeds 1KB limit".to_string());
+                    }
+                }
+            }
+        }
+
+        info!("Validated overlay consensus for txid: {} in overlay: {}", tx.txid(), overlay_id);
+        Ok(true)
+    }
 }
 
 #[tonic::async_trait]
@@ -224,6 +260,7 @@ impl Overlay for OverlayServiceImpl {
         info!("Creating overlay: {}", request.get_ref().overlay_id);
         let req = request.into_inner();
         let mut overlays = self.overlays.lock().await;
+        let mut consensus_rules = self.consensus_rules.lock().await;
         if overlays.contains_key(&req.overlay_id) {
             self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
             warn!("Overlay already exists: {}", req.overlay_id);
@@ -234,6 +271,7 @@ impl Overlay for OverlayServiceImpl {
             }));
         }
         overlays.insert(req.overlay_id.clone(), (vec![], vec![]));
+        consensus_rules.insert(req.overlay_id.clone(), HashMap::new());
         self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
         info!("Created overlay: {}", req.overlay_id);
         Ok(Response::new(CreateOverlayResponse {
@@ -280,6 +318,32 @@ impl Overlay for OverlayServiceImpl {
             }));
         }
 
+        let tx_bytes = hex::decode(&req.tx_hex)
+            .map_err(|e| {
+                warn!("Invalid tx_hex: {}", e);
+                Status::invalid_argument(format!("Invalid tx_hex: {}", e))
+            })?;
+        let tx: Transaction = deserialize(&tx_bytes)
+            .map_err(|e| {
+                warn!("Invalid transaction: {}", e);
+                Status::invalid_argument(format!("Invalid transaction: {}", e))
+            })?;
+
+        if !self.validate_overlay_consensus(&req.overlay_id, &tx).await
+            .map_err(|e| {
+                warn!("Overlay consensus validation failed: {}", e);
+                Status::invalid_argument(format!("Overlay consensus validation failed: {}", e))
+            })?
+        {
+            self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
+            warn!("Overlay consensus validation failed for txid: {}", tx.txid());
+            let _ = self.send_alert("overlay_consensus_failed", &format!("Overlay consensus validation failed for txid: {}", tx.txid()), 3).await;
+            return Ok(Response::new(SubmitOverlayTxResponse {
+                success: false,
+                error: "Overlay consensus validation failed".to_string(),
+            }));
+        }
+
         let mut index_client = self.index_client.clone();
         let index_request = IndexIndexTransactionRequest { tx_hex: req.tx_hex.clone() };
         let index_response = index_client
@@ -299,17 +363,7 @@ impl Overlay for OverlayServiceImpl {
                 error: index_response.error,
             }));
         }
-
-        let tx_bytes = hex::decode(&req.tx_hex)
-            .map_err(|e| {
-                warn!("Invalid tx_hex: {}", e);
-                Status::invalid_argument(format!("Invalid tx_hex: {}", e))
-            })?;
-        let tx: Transaction = deserialize(&tx_bytes)
-            .map_err(|e| {
-                warn!("Invalid transaction: {}", e);
-                Status::invalid_argument(format!("Invalid transaction: {}", e))
-            })?;
+        self.index_throughput.inc_by(1.0);
 
         let mut network_client = self.network_client.clone();
         let broadcast_request = BroadcastTxRequest { tx_hex: req.tx_hex.clone() };
@@ -431,6 +485,32 @@ impl Overlay for OverlayServiceImpl {
                 continue;
             }
 
+            let tx_bytes = hex::decode(&tx_hex)
+                .map_err(|e| {
+                    warn!("Invalid tx_hex: {}", e);
+                    Status::invalid_argument(format!("Invalid tx_hex: {}", e))
+                })?;
+            let tx: Transaction = deserialize(&tx_bytes)
+                .map_err(|e| {
+                    warn!("Invalid transaction: {}", e);
+                    Status::invalid_argument(format!("Invalid transaction: {}", e))
+                })?;
+
+            if !self.validate_overlay_consensus(&req.overlay_id, &tx).await
+                .map_err(|e| {
+                    warn!("Overlay consensus validation failed: {}", e);
+                    Status::invalid_argument(format!("Overlay consensus validation failed: {}", e))
+                })?
+            {
+                results.push(SubmitOverlayTxResponse {
+                    success: false,
+                    error: "Overlay consensus validation failed".to_string(),
+                });
+                let _ = self.send_alert("overlay_consensus_failed", &format!("Batch overlay consensus validation failed for txid: {}", tx.txid()), 3).await;
+                warn!("Batch overlay consensus validation failed for txid: {}", tx.txid());
+                continue;
+            }
+
             let index_request = IndexIndexTransactionRequest { tx_hex: tx_hex.clone() };
             let index_response = index_client
                 .index_transaction(index_request)
@@ -449,6 +529,7 @@ impl Overlay for OverlayServiceImpl {
                 warn!("Batch transaction indexing failed: {}", index_response.error);
                 continue;
             }
+            self.index_throughput.inc_by(1.0);
 
             let broadcast_request = BroadcastTxRequest { tx_hex: tx_hex.clone() };
             let broadcast_response = network_client
@@ -469,18 +550,7 @@ impl Overlay for OverlayServiceImpl {
                 continue;
             }
 
-            let tx_bytes = hex::decode(&tx_hex)
-                .map_err(|e| {
-                    warn!("Invalid tx_hex: {}", e);
-                    Status::invalid_argument(format!("Invalid tx_hex: {}", e))
-                })?;
-            let tx: Transaction = deserialize(&tx_bytes)
-                .map_err(|e| {
-                    warn!("Invalid transaction: {}", e);
-                    Status::invalid_argument(format!("Invalid transaction: {}", e))
-                })?;
             pending_txs.push(tx);
-
             results.push(SubmitOverlayTxResponse {
                 success: true,
                 error: "".to_string(),
@@ -521,6 +591,7 @@ impl Overlay for OverlayServiceImpl {
         let alert_client = self.alert_client.clone();
         let block_count = self.block_count.clone();
         let latency_ms = self.latency_ms.clone();
+        let index_throughput = self.index_throughput.clone();
 
         let output = async_stream::try_stream! {
             while let Some(req) = stream.next().await {
@@ -560,6 +631,39 @@ impl Overlay for OverlayServiceImpl {
                     continue;
                 }
 
+                let tx_bytes = hex::decode(&req.tx_hex)
+                    .map_err(|e| {
+                        warn!("Invalid tx_hex: {}", e);
+                        Status::invalid_argument(format!("Invalid tx_hex: {}", e))
+                    })?;
+                let tx: Transaction = deserialize(&tx_bytes)
+                    .map_err(|e| {
+                        warn!("Invalid transaction: {}", e);
+                        Status::invalid_argument(format!("Invalid transaction: {}", e))
+                    })?;
+
+                if !self.validate_overlay_consensus(&req.overlay_id, &tx).await
+                    .map_err(|e| {
+                        warn!("Overlay consensus validation failed: {}", e);
+                        Status::invalid_argument(format!("Overlay consensus validation failed: {}", e))
+                    })?
+                {
+                    let _ = alert_client.clone()
+                        .send_alert(SendAlertRequest {
+                            event_type: "overlay_consensus_failed".to_string(),
+                            message: format!("Streamed overlay consensus validation failed for txid: {}", tx.txid()),
+                            severity: 3,
+                        })
+                        .await;
+                    yield StreamOverlayTxResponse {
+                        success: false,
+                        tx_hex: req.tx_hex,
+                        error: "Overlay consensus validation failed".to_string(),
+                    };
+                    warn!("Streamed overlay consensus validation failed for txid: {}", tx.txid());
+                    continue;
+                }
+
                 let index_request = IndexIndexTransactionRequest { tx_hex: req.tx_hex.clone() };
                 let index_response = index_client.clone()
                     .index_transaction(index_request)
@@ -585,6 +689,7 @@ impl Overlay for OverlayServiceImpl {
                     warn!("Streamed transaction indexing failed: {}", index_response.error);
                     continue;
                 }
+                index_throughput.inc_by(1.0);
 
                 let broadcast_request = BroadcastTxRequest { tx_hex: req.tx_hex.clone() };
                 let broadcast_response = network_client.clone()
@@ -612,18 +717,7 @@ impl Overlay for OverlayServiceImpl {
                     continue;
                 }
 
-                let tx_bytes = hex::decode(&req.tx_hex)
-                    .map_err(|e| {
-                        warn!("Invalid tx_hex: {}", e);
-                        Status::invalid_argument(format!("Invalid tx_hex: {}", e))
-                    })?;
-                let tx: Transaction = deserialize(&tx_bytes)
-                    .map_err(|e| {
-                        warn!("Invalid transaction: {}", e);
-                        Status::invalid_argument(format!("Invalid transaction: {}", e))
-                    })?;
                 pending_txs.push(tx);
-
                 if pending_txs.len() >= 100 {
                     let block = self
                         .assemble_overlay_block(&req.overlay_id, pending_txs.drain(..).collect())
@@ -680,6 +774,7 @@ impl Overlay for OverlayServiceImpl {
                 error: index_response.error,
             }));
         }
+        self.index_throughput.inc_by(1.0);
 
         self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
         info!("Successfully indexed overlay transaction: {}", req.tx_hex);
@@ -724,6 +819,40 @@ impl Overlay for OverlayServiceImpl {
         }
     }
 
+    async fn manage_overlay_consensus(&self, request: Request<ManageOverlayConsensusRequest>) -> Result<Response<ManageOverlayConsensusResponse>, Status> {
+        let token = request.metadata().get("authorization").ok_or_else(|| Status::unauthenticated("Missing token"))?;
+        let user_id = self.authenticate(token.to_str().map_err(|e| Status::invalid_argument("Invalid token format"))?).await?;
+        self.authorize(&user_id, "ManageOverlayConsensus").await?;
+        self.rate_limiter.until_ready().await;
+
+        self.tx_requests.inc();
+        let start = Instant::now();
+        info!("Managing consensus rule for overlay: {} - rule: {}, enable: {}", request.get_ref().overlay_id, request.get_ref().rule_name, request.get_ref().enable);
+        let req = request.into_inner();
+        let mut consensus_rules = self.consensus_rules.lock().await;
+        let rules = consensus_rules
+            .entry(req.overlay_id.clone())
+            .or_insert_with(HashMap::new);
+
+        if req.rule_name != "restrict_op_return" {
+            self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
+            warn!("Unsupported consensus rule: {}", req.rule_name);
+            let _ = self.send_alert("overlay_consensus_rule_unsupported", &format!("Unsupported consensus rule: {}", req.rule_name), 2).await;
+            return Ok(Response::new(ManageOverlayConsensusResponse {
+                success: false,
+                error: "Unsupported consensus rule".to_string(),
+            }));
+        }
+
+        rules.insert(req.rule_name.clone(), req.enable);
+        self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
+        info!("Updated consensus rule for overlay: {} - {}: {}", req.overlay_id, req.rule_name, req.enable);
+        Ok(Response::new(ManageOverlayConsensusResponse {
+            success: true,
+            error: "".to_string(),
+        }))
+    }
+
     async fn get_metrics(&self, request: Request<GetMetricsRequest>) -> Result<Response<GetMetricsResponse>, Status> {
         let token = request.metadata().get("authorization").ok_or_else(|| Status::unauthenticated("Missing token"))?;
         let user_id = self.authenticate(token.to_str().map_err(|e| Status::invalid_argument("Invalid token format"))?).await?;
@@ -734,6 +863,9 @@ impl Overlay for OverlayServiceImpl {
             requests_total: self.tx_requests.get() as u64,
             avg_latency_ms: self.latency_ms.get(),
             errors_total: 0, // Placeholder
+            cache_hits: 0, // Not applicable
+            alert_count: self.alert_count.get() as u64,
+            index_throughput: self.index_throughput.get(),
         }))
     }
 }
