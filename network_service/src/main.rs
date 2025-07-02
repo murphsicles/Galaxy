@@ -12,8 +12,6 @@ use auth::auth_client::AuthClient;
 use auth::{AuthenticateRequest, AuthorizeRequest};
 use alert::alert_client::AlertClient;
 use alert::SendAlertRequest;
-use metrics::metrics_client::MetricsClient;
-use metrics::{GetMetricsRequest, GetMetricsResponse};
 use sv::messages::{Message, NetworkMessage};
 use sv::network::{Network as BSVNetwork, Version};
 use sv::transaction::Transaction;
@@ -50,6 +48,7 @@ struct NetworkServiceImpl {
     registry: Arc<Registry>,
     requests_total: Counter,
     latency_ms: Gauge,
+    alert_count: Counter,
     rate_limiter: Arc<RateLimiter<String, governor::state::direct::NotKeyed, governor::clock::DefaultClock>>,
     shard_manager: Arc<ShardManager>,
 }
@@ -82,8 +81,10 @@ impl NetworkServiceImpl {
         let registry = Arc::new(Registry::new());
         let requests_total = Counter::new("network_requests_total", "Total network requests").unwrap();
         let latency_ms = Gauge::new("network_latency_ms", "Average request latency").unwrap();
+        let alert_count = Counter::new("network_alert_count", "Total alerts sent").unwrap();
         registry.register(Box::new(requests_total.clone())).unwrap();
         registry.register(Box::new(latency_ms.clone())).unwrap();
+        registry.register(Box::new(alert_count.clone())).unwrap();
         let rate_limiter = Arc::new(RateLimiter::direct(Quota::per_second(NonZeroU32::new(1000).unwrap())));
         let shard_manager = Arc::new(ShardManager::new());
 
@@ -110,6 +111,7 @@ impl NetworkServiceImpl {
             registry,
             requests_total,
             latency_ms,
+            alert_count,
             rate_limiter,
             shard_manager,
         }
@@ -163,6 +165,7 @@ impl NetworkServiceImpl {
             warn!("Alert sending failed: {}", alert_response.error);
             return Err(Status::internal(alert_response.error));
         }
+        self.alert_count.inc();
         Ok(())
     }
 
@@ -430,6 +433,9 @@ impl Network for NetworkServiceImpl {
             requests_total: self.requests_total.get() as u64,
             avg_latency_ms: self.latency_ms.get(),
             errors_total: 0, // Placeholder
+            cache_hits: 0, // Not applicable
+            alert_count: self.alert_count.get() as u64,
+            index_throughput: 0.0, // Not applicable
         }))
     }
 }
