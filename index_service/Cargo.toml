@@ -1,7 +1,11 @@
 [package]
 name = "index_service"
-version = "0.0.3"
+version = "0.0.4"
 edition = "2021"
+
+[lib]
+name = "index_service"
+path = "src/lib.rs"
 
 [[bin]]
 name = "index_service"
@@ -11,13 +15,14 @@ path = "src/main.rs"
 tonic = { workspace = true }
 prost = { workspace = true }
 prometheus = { workspace = true }
-sled = { workspace = true }
+sv = { workspace = true }
 hex = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 governor = { workspace = true }
 tokio = { workspace = true }
-sv = { workspace = true }
+sled = { workspace = true }
+shared = { path = "../shared" }
 
 [build-dependencies]
 tonic-build = { workspace = true }
