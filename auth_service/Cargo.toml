@@ -1,16 +1,22 @@
 [package]
 name = "auth_service"
-version = "0.1.0"
+version = "0.0.3"
 edition = "2021"
 
+[[bin]]
+name = "auth_service"
+path = "src/main.rs"
+
 [dependencies]
-tokio = { version = "1", features = ["full"] }
-tonic = "0.8"
-prost = "0.11"
-jsonwebtoken = "8.3" # For JWT handling
-serde = { version = "1.0", features = ["derive"] }
-toml = "0.8"
-shared = { path = "../shared" }
+tonic = { workspace = true }
+prost = { workspace = true }
+prometheus = { workspace = true }
+jsonwebtoken = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+governor = { workspace = true }
+tokio = { workspace = true }
+futures = { workspace = true }
 
 [build-dependencies]
-tonic-build = "0.8"
+tonic-build = { workspace = true }
