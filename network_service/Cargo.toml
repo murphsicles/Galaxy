@@ -1,20 +1,28 @@
 [package]
 name = "network_service"
-version = "0.1.0"
+version = "0.0.4"
 edition = "2021"
 
+[lib]
+name = "network_service"
+path = "src/lib.rs"
+
+[[bin]]
+name = "network_service"
+path = "src/main.rs"
+
 [dependencies]
-tokio = { version = "1", features = ["full"] }
-tonic = "0.8"
-prost = "0.11"
-sv = { git = "https://github.com/murphsicles/rust-sv", tag = "v0.4.0" }
-hex = "0.4"
-async-std = "1.12"
-futures = "0.3"
-toml = "0.8"                                  # Config parsing
+tonic = { workspace = true }
+prost = { workspace = true }
+prometheus = { workspace = true }
+hex = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+governor = { workspace = true }
+tokio = { workspace = true }
+futures = { workspace = true }
+async-stream = { workspace = true }
 shared = { path = "../shared" }
-transaction_service = { path = "../transaction_service" }
-block_service = { path = "../block_service" }
 
 [build-dependencies]
-tonic-build = "0.8"
+tonic-build = { workspace = true }
