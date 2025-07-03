@@ -2,23 +2,23 @@ use tonic::{transport::{Server, Channel}, Request, Response, Status};
 use storage::storage_server::{Storage, StorageServer};
 use storage::{
     QueryUtxoRequest, QueryUtxoResponse, AddUtxoRequest, AddUtxoResponse,
-    RemoveUtxoRequest, RemoveUtxoResponse, BatchAddUtxoRequest, BatchAddUtxoResponse
+    RemoveUtxoRequest, RemoveUtxoResponse, BatchAddUtxoRequest, BatchAddUtxoResponse,
+    GetMetricsRequest, GetMetricsResponse
 };
 use auth::auth_client::AuthClient;
 use auth::{AuthenticateRequest, AuthorizeRequest};
 use alert::alert_client::AlertClient;
 use alert::SendAlertRequest;
-use tigerbeetle::TigerBeetleClient; // Placeholder for future integration
-use std::collections::HashMap;
-use tokio::sync::Mutex;
-use std::sync::Arc;
-use std::time::Instant;
+use tigerbeetle_unofficial as tigerbeetle;
 use prometheus::{Counter, Gauge, Registry};
-use governor::{Quota, RateLimiter, Jitter};
+use governor::{Quota, RateLimiter};
 use std::num::NonZeroU32;
 use tracing::{info, warn};
 use shared::ShardManager;
 use toml;
+use std::sync::Arc;
+use tokio::sync::Mutex;
+use std::collections::HashMap;
 
 tonic::include_proto!("storage");
 tonic::include_proto!("auth");
@@ -27,7 +27,7 @@ tonic::include_proto!("metrics");
 
 #[derive(Debug)]
 struct StorageServiceImpl {
-    utxos: Arc<Mutex<HashMap<String, HashMap<u32, (String, u64)>>>>, // txid -> vout -> (script_pubkey, amount)
+    utxos: Arc<Mutex<HashMap<String, (String, u64)>>>,
     auth_client: AuthClient<Channel>,
     alert_client: AlertClient<Channel>,
     registry: Arc<Registry>,
@@ -42,23 +42,30 @@ impl StorageServiceImpl {
     async fn new() -> Self {
         let config_str = include_str!("../../tests/config.toml");
         let config: toml::Value = toml::from_str(config_str).expect("Failed to parse config");
-        let shard_id = config["sharding"]["shard_id"].as_integer().unwrap_or(0) as u32;
+        let shard_id = config["sharding"]["shard_id"]
+            .as_integer()
+            .unwrap_or(0) as u32;
 
-        let utxos = Arc::new(Mutex::new(HashMap::new()));
         let auth_client = AuthClient::connect("http://[::1]:50060")
             .await
             .expect("Failed to connect to auth_service");
         let alert_client = AlertClient::connect("http://[::1]:50061")
             .await
             .expect("Failed to connect to alert_service");
+        let utxos = Arc::new(Mutex::new(HashMap::new()));
         let registry = Arc::new(Registry::new());
-        let requests_total = Counter::new("storage_requests_total", "Total storage requests").unwrap();
-        let latency_ms = Gauge::new("storage_latency_ms", "Average storage request latency").unwrap();
-        let alert_count = Counter::new("storage_alert_count", "Total alerts sent").unwrap();
+        let requests_total = Counter::new("storage_requests_total", "Total storage requests")
+            .unwrap();
+        let latency_ms = Gauge::new("storage_latency_ms", "Average storage request latency")
+            .unwrap();
+        let alert_count = Counter::new("storage_alert_count", "Total alerts sent")
+            .unwrap();
         registry.register(Box::new(requests_total.clone())).unwrap();
         registry.register(Box::new(latency_ms.clone())).unwrap();
         registry.register(Box::new(alert_count.clone())).unwrap();
-        let rate_limiter = Arc::new(RateLimiter::direct(Quota::per_second(NonZeroU32::new(1000).unwrap())));
+        let rate_limiter = Arc::new(RateLimiter::direct(
+            Quota::per_second(NonZeroU32::new(1000).unwrap()),
+        ));
         let shard_manager = Arc::new(ShardManager::new());
 
         StorageServiceImpl {
@@ -75,8 +82,11 @@ impl StorageServiceImpl {
     }
 
     async fn authenticate(&self, token: &str) -> Result<String, Status> {
-        let auth_request = AuthenticateRequest { token: token.to_string() };
-        let auth_response = self.auth_client
+        let auth_request = AuthenticateRequest {
+            token: token.to_string(),
+        };
+        let auth_response = self
+            .auth_client
             .authenticate(auth_request)
             .await
             .map_err(|e| Status::unauthenticated(format!("Authentication failed: {}", e)))?
@@ -93,7 +103,8 @@ impl StorageServiceImpl {
             service: "storage_service".to_string(),
             method: method.to_string(),
         };
-        let auth_response = self.auth_client
+        let auth_response = self
+            .auth_client
             .authorize(auth_request)
             .await
             .map_err(|e| Status::permission_denied(format!("Authorization failed: {}", e)))?
@@ -110,7 +121,8 @@ impl StorageServiceImpl {
             message: message.to_string(),
             severity,
         };
-        let alert_response = self.alert_client
+        let alert_response = self
+            .alert_client
             .send_alert(alert_request)
             .await
             .map_err(|e| {
@@ -129,128 +141,180 @@ impl StorageServiceImpl {
 
 #[tonic::async_trait]
 impl Storage for StorageServiceImpl {
-    async fn query_utxo(&self, request: Request<QueryUtxoRequest>) -> Result<Response<QueryUtxoResponse>, Status> {
-        let token = request.metadata().get("authorization").ok_or_else(|| Status::unauthenticated("Missing token"))?;
-        let user_id = self.authenticate(token.to_str().map_err(|e| Status::invalid_argument("Invalid token format"))?).await?;
+    async fn query_utxo(
+        &self,
+        request: Request<QueryUtxoRequest>,
+    ) -> Result<Response<QueryUtxoResponse>, Status> {
+        let token = request
+            .metadata()
+            .get("authorization")
+            .ok_or_else(|| Status::unauthenticated("Missing token"))?;
+        let user_id = self
+            .authenticate(
+                token
+                    .to_str()
+                    .map_err(|e| Status::invalid_argument("Invalid token format"))?,
+            )
+            .await?;
         self.authorize(&user_id, "QueryUtxo").await?;
         self.rate_limiter.until_ready().await;
 
         self.requests_total.inc();
-        let start = Instant::now();
-        info!("Querying UTXO: {}:{}", request.get_ref().txid, request.get_ref().vout);
+        let start = std::time::Instant::now();
         let req = request.into_inner();
         let utxos = self.utxos.lock().await;
-        let utxo_map = utxos.get(&req.txid);
+        let exists = utxos.contains_key(&req.txid);
 
         self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
-        if let Some(utxo_map) = utxo_map {
-            if let Some((script_pubkey, amount)) = utxo_map.get(&req.vout) {
-                info!("Found UTXO: {}:{}", req.txid, req.vout);
-                return Ok(Response::new(QueryUtxoResponse {
-                    exists: true,
-                    script_pubkey: script_pubkey.clone(),
-                    amount: *amount,
-                    error: "".to_string(),
-                }));
-            }
-        }
-        warn!("UTXO not found: {}:{}", req.txid, req.vout);
-        let _ = self.send_alert("utxo_query_failed", &format!("UTXO not found: {}:{}", req.txid, req.vout), 2).await;
         Ok(Response::new(QueryUtxoResponse {
-            exists: false,
-            script_pubkey: "".to_string(),
-            amount: 0,
-            error: "UTXO not found".to_string(),
+            exists,
+            script_pubkey: utxos
+                .get(&req.txid)
+                .map(|(script, _)| script.clone())
+                .unwrap_or_default(),
+            amount: utxos.get(&req.txid).map(|(_, amount)| *amount).unwrap_or(0),
+            error: if exists {
+                "".to_string()
+            } else {
+                "UTXO not found".to_string()
+            },
         }))
     }
 
-    async fn add_utxo(&self, request: Request<AddUtxoRequest>) -> Result<Response<AddUtxoResponse>, Status> {
-        let token = request.metadata().get("authorization").ok_or_else(|| Status::unauthenticated("Missing token"))?;
-        let user_id = self.authenticate(token.to_str().map_err(|e| Status::invalid_argument("Invalid token format"))?).await?;
+    async fn add_utxo(
+        &self,
+        request: Request<AddUtxoRequest>,
+    ) -> Result<Response<AddUtxoResponse>, Status> {
+        let token = request
+            .metadata()
+            .get("authorization")
+            .ok_or_else(|| Status::unauthenticated("Missing token"))?;
+        let user_id = self
+            .authenticate(
+                token
+                    .to_str()
+                    .map_err(|e| Status::invalid_argument("Invalid token format"))?,
+            )
+            .await?;
         self.authorize(&user_id, "AddUtxo").await?;
         self.rate_limiter.until_ready().await;
 
         self.requests_total.inc();
-        let start = Instant::now();
-        info!("Adding UTXO: {}:{}", request.get_ref().txid, request.get_ref().vout);
+        let start = std::time::Instant::now();
         let req = request.into_inner();
         let mut utxos = self.utxos.lock().await;
-        let utxo_map = utxos.entry(req.txid.clone()).or_insert_with(HashMap::new);
-        utxo_map.insert(req.vout, (req.script_pubkey.clone(), req.amount));
+        utxos.insert(
+            req.txid.clone(),
+            (req.script_pubkey.clone(), req.amount),
+        );
 
         self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
-        info!("Successfully added UTXO: {}:{}", req.txid, req.vout);
         Ok(Response::new(AddUtxoResponse {
             success: true,
             error: "".to_string(),
         }))
     }
 
-    async fn remove_utxo(&self, request: Request<RemoveUtxoRequest>) -> Result<Response<RemoveUtxoResponse>, Status> {
-        let token = request.metadata().get("authorization").ok_or_else(|| Status::unauthenticated("Missing token"))?;
-        let user_id = self.authenticate(token.to_str().map_err(|e| Status::invalid_argument("Invalid token format"))?).await?;
+    async fn remove_utxo(
+        &self,
+        request: Request<RemoveUtxoRequest>,
+    ) -> Result<Response<RemoveUtxoResponse>, Status> {
+        let token = request
+            .metadata()
+            .get("authorization")
+            .ok_or_else(|| Status::unauthenticated("Missing token"))?;
+        let user_id = self
+            .authenticate(
+                token
+                    .to_str()
+                    .map_err(|e| Status::invalid_argument("Invalid token format"))?,
+            )
+            .await?;
         self.authorize(&user_id, "RemoveUtxo").await?;
         self.rate_limiter.until_ready().await;
 
         self.requests_total.inc();
-        let start = Instant::now();
-        info!("Removing UTXO: {}:{}", request.get_ref().txid, request.get_ref().vout);
+        let start = std::time::Instant::now();
         let req = request.into_inner();
         let mut utxos = self.utxos.lock().await;
-        let success = if let Some(utxo_map) = utxos.get_mut(&req.txid) {
-            utxo_map.remove(&req.vout).is_some()
-        } else {
-            false
-        };
+        let removed = utxos.remove(&req.txid).is_some();
+
+        if !removed {
+            warn!("UTXO not found for txid: {}", req.txid);
+            let _ = self
+                .send_alert(
+                    "remove_utxo_not_found",
+                    &format!("UTXO not found for txid: {}", req.txid),
+                    2,
+                )
+                .await;
+        }
 
         self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
-        if success {
-            info!("Successfully removed UTXO: {}:{}", req.txid, req.vout);
-            Ok(Response::new(RemoveUtxoResponse {
-                success: true,
-                error: "".to_string(),
-            }))
-        } else {
-            warn!("UTXO not found for removal: {}:{}", req.txid, req.vout);
-            let _ = self.send_alert("utxo_remove_failed", &format!("UTXO not found for removal: {}:{}", req.txid, req.vout), 2).await;
-            Ok(Response::new(RemoveUtxoResponse {
-                success: false,
-                error: "UTXO not found".to_string(),
-            }))
-        }
+        Ok(Response::new(RemoveUtxoResponse {
+            success: removed,
+            error: if removed {
+                "".to_string()
+            } else {
+                "UTXO not found".to_string()
+            },
+        }))
     }
 
-    async fn batch_add_utxo(&self, request: Request<BatchAddUtxoRequest>) -> Result<Response<BatchAddUtxoResponse>, Status> {
-        let token = request.metadata().get("authorization").ok_or_else(|| Status::unauthenticated("Missing token"))?;
-        let user_id = self.authenticate(token.to_str().map_err(|e| Status::invalid_argument("Invalid token format"))?).await?;
+    async fn batch_add_utxo(
+        &self,
+        request: Request<BatchAddUtxoRequest>,
+    ) -> Result<Response<BatchAddUtxoResponse>, Status> {
+        let token = request
+            .metadata()
+            .get("authorization")
+            .ok_or_else(|| Status::unauthenticated("Missing token"))?;
+        let user_id = self
+            .authenticate(
+                token
+                    .to_str()
+                    .map_err(|e| Status::invalid_argument("Invalid token format"))?,
+            )
+            .await?;
         self.authorize(&user_id, "BatchAddUtxo").await?;
         self.rate_limiter.until_ready().await;
 
         self.requests_total.inc();
-        let start = Instant::now();
-        info!("Batch adding {} UTXOs", request.get_ref().utxos.len());
+        let start = std::time::Instant::now();
         let req = request.into_inner();
-        let mut results = vec![];
         let mut utxos = self.utxos.lock().await;
+        let mut results = vec![];
 
         for utxo in req.utxos {
-            let utxo_map = utxos.entry(utxo.txid.clone()).or_insert_with(HashMap::new);
-            utxo_map.insert(utxo.vout, (utxo.script_pubkey.clone(), utxo.amount));
+            utxos.insert(
+                utxo.txid.clone(),
+                (utxo.script_pubkey.clone(), utxo.amount),
+            );
             results.push(AddUtxoResponse {
                 success: true,
                 error: "".to_string(),
             });
-            info!("Successfully added UTXO: {}:{}", utxo.txid, utxo.vout);
         }
 
         self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
-        info!("Completed batch adding {} UTXOs", results.len());
         Ok(Response::new(BatchAddUtxoResponse { results }))
     }
 
-    async fn get_metrics(&self, request: Request<GetMetricsRequest>) -> Result<Response<GetMetricsResponse>, Status> {
-        let token = request.metadata().get("authorization").ok_or_else(|| Status::unauthenticated("Missing token"))?;
-        let user_id = self.authenticate(token.to_str().map_err(|e| Status::invalid_argument("Invalid token format"))?).await?;
+    async fn get_metrics(
+        &self,
+        request: Request<GetMetricsRequest>,
+    ) -> Result<Response<GetMetricsResponse>, Status> {
+        let token = request
+            .metadata()
+            .get("authorization")
+            .ok_or_else(|| Status::unauthenticated("Missing token"))?;
+        let user_id = self
+            .authenticate(
+                token
+                    .to_str()
+                    .map_err(|e| Status::invalid_argument("Invalid token format"))?,
+            )
+            .await?;
         self.authorize(&user_id, "GetMetrics").await?;
 
         Ok(Response::new(GetMetricsResponse {
