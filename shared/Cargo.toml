@@ -1,7 +1,20 @@
 [package]
 name = "shared"
-version = "0.1.0"
+version = "0.0.3"
 edition = "2021"
 
 [lib]
+name = "shared"
 path = "src/lib.rs"
+
+[dependencies]
+tonic = { workspace = true }
+prost = { workspace = true }
+prometheus = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+governor = { workspace = true }
+tokio = { workspace = true }
+
+[build-dependencies]
+tonic-build = { workspace = true }
