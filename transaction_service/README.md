@@ -1,83 +1,80 @@
 # Transaction Service
 
-This service implements a gRPC server for transaction validation, queuing, and indexing in the Galaxy project, using rust-sv. It integrates with `storage_service`, `consensus_service`, `index_service`, and `auth_service`, supporting rate limiting, logging, sharding, and metrics for BSV transactions.
+The Transaction Service handles transaction validation, processing, and indexing for Bitcoin SV (BSV), optimized from the ground-up for ultra high-throughput processing.
 
-## Running
-```bash
-cd transaction_service
-cargo run
+## Features
+
+- **Transaction Validation**: Validates transactions with `ValidateTransaction` and `BatchValidateTransaction` RPCs, enforcing consensus rules.
+- **Transaction Processing**: Processes transactions with `ProcessTransaction` RPC, including validation, indexing, and queuing.
+- **Transaction Indexing**: Indexes transactions with `IndexTransaction` RPC.
+- **Metrics**: Monitors performance with Prometheus metrics via `GetMetrics` RPC, including `requests_total`, `avg_latency_ms`, `errors_total`, `cache_hits`, `alert_count`, and `index_throughput`.
+
+## Configuration
+
+The service uses `tests/config.toml` for configuration:
+- **Sharding**: Configures `shard_id` and `shard_count` for distributed processing.
+- **Metrics**: Enables Prometheus endpoint (`enable_prometheus`, port: `9090`) and sets alert thresholds (`alert_threshold`) and log level (`log_level`).
+
+Example `tests/config.toml`:
+```toml
+[sharding]
+shard_id = 0
+shard_count = 4
+
+[metrics]
+enable_prometheus = true
+prometheus_port = 9090
+alert_threshold = 5
+log_level = "info"
 ```
-Note: Ensure `storage_service` (localhost:50053), `consensus_service` (localhost:50055), `index_service` (localhost:50062), and `auth_service` (localhost:50060) are running.
+
+## Dependencies
+
+- **Rust Crates**: `tonic`, `prometheus`, `hex`, `tracing`, `governor`, `tokio`, `futures`, `async-channel`.
+- **Internal Services**: `storage_service` (`:50053`), `consensus_service` (`:50055`), `auth_service` (`:50060`), `index_service` (`:50062`), `alert_service` (`:50061`).
+- **Proto Files**: `transaction.proto`, `storage.proto`, `consensus.proto`, `auth.proto`, `index.proto`, `alert.proto`, `metrics.proto`.
+
+## Metrics
+
+Exposed via `GetMetrics` RPC and Prometheus endpoint (`:9090`):
+- `transaction_requests_total`: Total transaction requests.
+- `transaction_latency_ms`: Average transaction processing latency (ms).
+- `transaction_alert_count`: Total alerts sent.
+- `transaction_index_throughput`: Indexed transactions per second.
+- `errors_total`: Total errors (placeholder, currently 0).
+- `cache_hits`: Cache hits (not applicable, set to 0).
+
+## Consensus and Size Limits
+
+- **Transaction Size**: Enforces a temporary 32GB limit via `consensus_service`.
+- **OP_RETURN**: Enforces a 4.3GB limit via `consensus_service`.
+- The service relies on `consensus_service` for transaction validation rules, ensuring compatibility with BSV’s large transaction and OP_RETURN capabilities.
+
+## Usage
+
+1. Start the service:
+   ```bash
+   cargo run --bin transaction_service
+   ```
+   Listens on `[::1]:50052`.
+
+2. Example gRPC calls (using `grpcurl`):
+   ```bash
+   grpcurl -plaintext -d '{"tx_hex": "01000000..."}' [::1]:50052 transaction.Transaction/ValidateTransaction
+   grpcurl -plaintext -d '{"tx_hex": "01000000..."}' [::1]:50052 transaction.Transaction/ProcessTransaction
+   grpcurl -plaintext -d '{"tx_hexes": ["01000000...", "02000000..."]}' [::1]:50052 transaction.Transaction/BatchValidateTransaction
+   ```
 
 ## Testing
-Use `grpcurl` to test the available methods. Note: Methods require valid hex-encoded transactions and JWT tokens in the `authorization` header.
 
-### ValidateTransaction
-```bash
-grpcurl -plaintext -H "authorization: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1c2VyMSIsInJvbGUiOiJjbGllbnQiLCJleHAiOjE5MjA2NzY1MDl9.8X8z7z3Y8Qz5z5z7z3Y8Qz5z5z7z3Y8Qz5z5z7z3Y8Q" -d '{"tx_hex": "01000000010000000000000000000000000000000000000000000000000000000000000000ffffffff0100ffffffff0100ffffffff"}' localhost:50052 transaction.Transaction/ValidateTransaction
-```
-Expected response (example):
-```json
-{
-  "is_valid": true,
-  "error": ""
-}
-```
+- Use `tests/config.toml` to configure test parameters.
+- Run integration tests with `cargo test` to verify transaction validation, processing, and indexing.
 
-### ProcessTransaction
-```bash
-grpcurl -plaintext -H "authorization: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1c2VyMSIsInJvbGUiOiJjbGllbnQiLCJleHAiOjE5MjA2NzY1MDl9.8X8z7z3Y8Qz5z5z7z3Y8Qz5z5z7z3Y8Qz5z5z7z3Y8Q" -d '{"tx_hex": "01000000010000000000000000000000000000000000000000000000000000000000000000ffffffff0100ffffffff0100ffffffff"}' localhost:50052 transaction.Transaction/ProcessTransaction
-```
-Expected response (example):
-```json
-{
-  "success": true,
-  "error": ""
-}
-```
+## Notes
 
-### BatchValidateTransaction
-```bash
-grpcurl -plaintext -H "authorization: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1c2VyMSIsInJvbGUiOiJjbGllbnQiLCJleHAiOjE5MjA2NzY1MDl9.8X8z7z3Y8Qz5z5z7z3Y8Qz5z5z7z3Y8Qz5z5z7z3Y8Q" -d '{"tx_hexes": ["01000000010000000000000000000000000000000000000000000000000000000000000000ffffffff0100ffffffff0100ffffffff", "01000000010000000000000000000000000000000000000000000000000000000000000000ffffffff0100ffffffff0100ffffffff"]}' localhost:50052 transaction.Transaction/BatchValidateTransaction
-```
-Expected response (example):
-```json
-{
-  "results": [
-    {
-      "is_valid": true,
-      "error": ""
-    },
-    {
-      "is_valid": true,
-      "error": ""
-    }
-  ]
-}
-```
+- The service uses an async channel for transaction queuing.
+- Alerts are sent via `alert_service` for failures (e.g., validation, indexing, queuing).
+- Designed for high-throughput, supporting BSV’s massive transaction sizes (up to 32GB) and OP_RETURN data (up to 4.3GB) through `consensus_service` validation.
 
-### IndexTransaction
-```bash
-grpcurl -plaintext -H "authorization: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1c2VyMSIsInJvbGUiOiJjbGllbnQiLCJleHAiOjE5MjA2NzY1MDl9.8X8z7z3Y8Qz5z5z7z3Y8Qz5z5z7z3Y8Qz5z5z7z3Y8Q" -d '{"tx_hex": "01000000010000000000000000000000000000000000000000000000000000000000000000ffffffff0100ffffffff0100ffffffff"}' localhost:50052 transaction.Transaction/IndexTransaction
-```
-Expected response (example):
-```json
-{
-  "success": true,
-  "error": ""
-}
-```
-
-### GetMetrics
-```bash
-grpcurl -plaintext -H "authorization: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1c2VyMSIsInJvbGUiOiJjbGllbnQiLCJleHAiOjE5MjA2NzY1MDl9.8X8z7z3Y8Qz5z5z7z3Y8Qz5z5z7z3Y8Qz5z5z7z3Y8Q" -d '{}' localhost:50052 transaction.Transaction/GetMetrics
-```
-Expected response (example):
-```json
-{
-  "service_name": "transaction_service",
-  "requests_total": 100,
-  "avg_latency_ms": 8.0,
-  "errors_total": 0
-}
-```
+---
+*Last updated: 2025-07-03*
