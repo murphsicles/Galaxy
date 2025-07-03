@@ -244,12 +244,21 @@ impl ValidationServiceImpl {
 
 #[tonic::async_trait]
 impl Validation for ValidationServiceImpl {
-    async fn generate_spv_proof(&self, request: Request<GenerateSPVProofRequest>) -> Result<Response<GenerateSPVProofResponse>, Status> {
-        let token = request.metadata()
+    async fn generate_spv_proof(
+        &self,
+        request: Request<GenerateSPVProofRequest>,
+    ) -> Result<Response<GenerateSPVProofResponse>, Status> {
+        let token = request
+            .metadata()
             .get("authorization")
             .ok_or_else(|| Status::unauthenticated("Missing token"))?;
-        let user_id = self.authenticate(token.to_str()
-            .map_err(|e| Status::invalid_argument("Invalid token format"))?).await?;
+        let user_id = self
+            .authenticate(
+                token
+                    .to_str()
+                    .map_err(|e| Status::invalid_argument("Invalid token format"))?,
+            )
+            .await?;
         self.authorize(&user_id, "GenerateSPVProof").await?;
         self.rate_limiter.until_ready().await;
 
@@ -267,33 +276,57 @@ impl Validation for ValidationServiceImpl {
         }))
     }
 
-    async fn verify_spv_proof(&self, request: Request<VerifySPVProofRequest>) -> Result<Response<VerifySPVProofResponse>, Status> {
-        let token = request.metadata()
+    async fn verify_spv_proof(
+        &self,
+        request: Request<VerifySPVProofRequest>,
+    ) -> Result<Response<VerifySPVProofResponse>, Status> {
+        let token = request
+            .metadata()
             .get("authorization")
             .ok_or_else(|| Status::unauthenticated("Missing token"))?;
-        let user_id = self.authenticate(token.to_str()
-            .map_err(|e| Status::invalid_argument("Invalid token format"))?).await?;
+        let user_id = self
+            .authenticate(
+                token
+                    .to_str()
+                    .map_err(|e| Status::invalid_argument("Invalid token format"))?,
+            )
+            .await?;
         self.authorize(&user_id, "VerifySPVProof").await?;
         self.rate_limiter.until_ready().await;
 
         self.proof_requests.inc();
         let start = std::time::Instant::now();
         let req = request.into_inner();
-        let is_valid = self.verify_spv_proof(&req.txid, &req.merkle_path, &req.block_headers).await?;
+        let is_valid = self
+            .verify_spv_proof(&req.txid, &req.merkle_path, &req.block_headers)
+            .await?;
 
         self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
         Ok(Response::new(VerifySPVProofResponse {
             success: is_valid,
-            error: if is_valid { "".to_string() } else { "Proof verification failed".to_string() },
+            error: if is_valid {
+                "".to_string()
+            } else {
+                "Proof verification failed".to_string()
+            },
         }))
     }
 
-    async fn batch_generate_spv_proof(&self, request: Request<BatchGenerateSPVProofRequest>) -> Result<Response<BatchGenerateSPVProofResponse>, Status> {
-        let token = request.metadata()
+    async fn batch_generate_spv_proof(
+        &self,
+        request: Request<BatchGenerateSPVProofRequest>,
+    ) -> Result<Response<BatchGenerateSPVProofResponse>, Status> {
+        let token = request
+            .metadata()
             .get("authorization")
             .ok_or_else(|| Status::unauthenticated("Missing token"))?;
-        let user_id = self.authenticate(token.to_str()
-            .map_err(|e| Status::invalid_argument("Invalid token format"))?).await?;
+        let user_id = self
+            .authenticate(
+                token
+                    .to_str()
+                    .map_err(|e| Status::invalid_argument("Invalid token format"))?,
+            )
+            .await?;
         self.authorize(&user_id, "BatchGenerateSPVProof").await?;
         self.rate_limiter.until_ready().await;
 
@@ -333,7 +366,8 @@ impl Validation for ValidationServiceImpl {
         Ok(Response::new(BatchGenerateSPVProofResponse { results }))
     }
 
-    type StreamSPVProofsStream = Pin<Box<dyn Stream<Item = Result<StreamSPVProofsResponse, Status>> + Send>>;
+    type StreamSPVProofsStream =
+        Pin<Box<dyn Stream<Item = Result<StreamSPVProofsResponse, Status>> + Send>>;
 
     async fn stream_spv_proofs(
         &self,
@@ -448,4 +482,4 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await?;
 
     Ok(())
-}
+                }
