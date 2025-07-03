@@ -1,7 +1,11 @@
 [package]
 name = "block_service"
-version = "0.0.3"
+version = "0.0.4"
 edition = "2021"
+
+[lib]
+name = "block_service"
+path = "src/lib.rs"
 
 [[bin]]
 name = "block_service"
