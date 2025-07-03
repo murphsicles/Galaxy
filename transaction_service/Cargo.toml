@@ -1,18 +1,29 @@
 [package]
 name = "transaction_service"
-version = "0.1.0"
+version = "0.0.4"
 edition = "2021"
 
+[lib]
+name = "transaction_service"
+path = "src/lib.rs"
+
+[[bin]]
+name = "transaction_service"
+path = "src/main.rs"
+
 [dependencies]
-tokio = { version = "1", features = ["full"] } # Async runtime
-tonic = "0.8"                                  # gRPC support
-prost = "0.11"                                 # Protocol Buffers
-sv = { git = "https://github.com/murphsicles/rust-sv", tag = "v0.4.0" } # BSV-specific library
-hex = "0.4"                                    # Hex decoding
-async-channel = "2.3"                          # Async transaction queuing
-shared = { path = "../shared" }                # Link to shared crate
-storage_service = { path = "../storage_service" } # For UTXO validation
-consensus_service = { path = "../consensus_service" } # For consensus validation
+tonic = { workspace = true }
+prost = { workspace = true }
+prometheus = { workspace = true }
+sv = { workspace = true }
+hex = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+governor = { workspace = true }
+tokio = { workspace = true }
+futures = { workspace = true }
+async-channel = { workspace = true }
+shared = { path = "../shared" }
 
 [build-dependencies]
-tonic-build = "0.8"                            # For compiling .proto files
+tonic-build = { workspace = true }
