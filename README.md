@@ -20,12 +20,12 @@
 - **Security**:
   - Token-based authentication with JWTs.
   - Role-based access control (RBAC) for miners and clients.
-  - Rate limiting to prevent abuse.
+  - Rate limiting to prevent abuse (1000 req/s per service).
 - **Microservices Architecture**:
   - `network_service`: P2P networking with peer pool management.
   - `transaction_service`: Transaction validation, queuing, and indexing.
   - `block_service`: Block validation, assembly, and indexing with merkle root computation.
-  - `storage_service`: UTXO management with Tiger Beetle and keep-alive.
+  - `storage_service`: UTXO management with Tiger Beetle integration.
   - `consensus_service`: Enforces BSV consensus rules.
   - `overlay_service`: Manages private blockchains with streaming, storage, and indexing.
   - `validation_service`: Generates/verifies SPV proofs with caching and streaming.
@@ -45,6 +45,7 @@
 - **Monitoring**:
   - Alert notifications for critical events (e.g., consensus violations, performance issues).
   - Transaction and block indexing for efficient querying.
+  - Prometheus metrics for TPS, latency, and errors across all services.
 
 ## 🛠️ Setup
 
@@ -136,12 +137,13 @@ Test services using `grpcurl` with JWT tokens in the `authorization` header. Ens
 
 ### Testnet Integration
 Galaxy is configured to connect to BSV testnet nodes. See `tests/config.toml` for settings:
-- Testnet nodes for `network_service`
-- Tiger Beetle server address for `storage_service`
-- Sharding parameters and node mappings
-- Authentication settings
-- Alert and indexing configurations
-- Test cases for all services
+- Testnet nodes for `network_service`.
+- Tiger Beetle server address for `storage_service`.
+- Sharding parameters and node mappings.
+- Authentication settings.
+- Alert and indexing configurations.
+- Overlay consensus rules (e.g., `restrict_op_return`).
+- Test cases for all services.
 
 Run the full pipeline test:
 ```bash
@@ -155,6 +157,13 @@ Monitor performance using the `GetMetrics` endpoint on each service (e.g., `loca
 ```bash
 grpcurl -plaintext -H "authorization: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1c2VyMSIsInJvbGUiOiJjbGllbnQiLCJleHAiOjE5MjA2NzY1MDl9.8X8z7z3Y8Qz5z5z7z3Y8Qz5z5z7z3Y8Qz5z5z7z3Y8Q" -d '{}' localhost:50057 validation.Validation/GetMetrics
 ```
+Metrics include:
+- `*_requests_total`: Total requests per service (e.g., `block_requests_total`).
+- `*_latency_ms`: Average request latency (ms).
+- `*_alert_count`: Total alerts sent.
+- `*_index_throughput`: Indexed items per second (where applicable).
+- `*_cache_hits`: Cache hits (e.g., `validation_cache_hits`).
+- `errors_total`: Total errors (placeholder, currently 0).
 
 ### Alerts
 Subscribe to alerts using the `alert_service`:
@@ -163,7 +172,7 @@ grpcurl -plaintext -H "authorization: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzd
 ```
 
 ### Logging
-View logs with the `tracing` crate at the `INFO` level (configurable in `tests/config.toml` under `[auth][log_level]`).
+View logs with the `tracing` crate at the `INFO` level (configurable in `tests/config.toml` under `[metrics][log_level]`).
 
 See individual service READMEs for detailed test commands.
 
@@ -193,8 +202,6 @@ Galaxy is optimized for ultra-high performance:
 - **Rate Limiting**: Prevents endpoint abuse with 1000 req/s limit.
 - **Alerting**: Real-time notifications for network health.
 - **Indexing**: Efficient querying for transactions and blocks.
-
-These optimizations position Galaxy to surpass competitors like Teranode, targeting over 100,000,000 TPS per shard.
 
 ## 📚 Project Structure
 
