@@ -1,7 +1,7 @@
 # 🚀 Galaxy
 **The Ultra High-Performance BSV Node**
 
-![Rust](https://img.shields.io/badge/Rust-1.80+-orange?logo=rust)
+![Rust](https://img.shields.io/badge/Rust-1.88+-orange?logo=rust)
 ![Build Status](https://github.com/murphsicles/Galaxy/actions/workflows/ci.yml/badge.svg)
 ![Dependencies](https://img.shields.io/badge/dependencies-up%20to%20date-green)
 ![License](https://img.shields.io/badge/license-Open%20BSV-blue)
@@ -50,7 +50,7 @@
 ## 🛠️ Setup
 
 ### Prerequisites
-- Rust 1.80+ (stable)
+- Rust 1.88+ (stable)
 - Cargo
 - Tiger Beetle server (for `storage_service`, see [Tiger Beetle](https://github.com/tigerbeetle/tigerbeetle))
 - `grpcurl` for testing
