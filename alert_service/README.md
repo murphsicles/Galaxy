@@ -1,40 +1,76 @@
 # Alert Service
 
-This service implements a gRPC server for network health monitoring and notifications in the Galaxy project. It supports sending alerts for critical events (e.g., consensus violations, performance issues) and subscribing to alert streams, integrating with `auth_service` for secure access.
+The Alert Service manages alert notifications for Bitcoin SV (BSV) node operations, optimized from the ground-up for ultra high-throughput processing to support robust monitoring across services.
 
-## Running
-```bash
-cd alert_service
-cargo run
+## Features
+
+- **Alert Processing**: Processes and logs alerts with `SendAlert` RPC.
+- **Metrics**: Monitors performance with Prometheus metrics via `GetMetrics` RPC, including `requests_total`, `avg_latency_ms`, `errors_total`, `cache_hits`, `alert_count`, and `index_throughput`.
+
+## Configuration
+
+The service uses `tests/config.toml` for configuration:
+- **Sharding**: Configures `shard_id` and `shard_count` for distributed processing.
+- **Metrics**: Enables Prometheus endpoint (`enable_prometheus`, port: `9090`) and sets alert thresholds (`alert_threshold`) and log level (`log_level`).
+
+Example `tests/config.toml`:
+```toml
+[sharding]
+shard_id = 0
+shard_count = 4
+
+[metrics]
+enable_prometheus = true
+prometheus_port = 9090
+alert_threshold = 5
+log_level = "info"
 ```
-Note: Ensure `auth_service` (localhost:50060) is running. Configure `[alert]` in `tests/config.toml` for severity thresholds and event types.
+
+## Dependencies
+
+- **Rust Crates**: `tonic`, `prometheus`, `tracing`, `governor`, `tokio`.
+- **Internal Services**: `auth_service` (`:50060`).
+- **Proto Files**: `alert.proto`, `auth.proto`, `metrics.proto`.
+
+## Metrics
+
+Exposed via `GetMetrics` RPC and Prometheus endpoint (`:9090`):
+- `alert_requests_total`: Total alert requests.
+- `alert_latency_ms`: Average alert processing latency (ms).
+- `alert_alert_count`: Total alerts processed.
+- `errors_total`: Total errors (placeholder, currently 0).
+- `cache_hits`: Cache hits (not applicable, set to 0).
+- `index_throughput`: Indexed items per second (not applicable, set to 0).
+
+## Consensus and Size Limits
+
+- **Block Size**: No direct block size limit enforced; relies on `block_service` (temporary 32GB limit) and `consensus_service`.
+- **OP_RETURN**: No direct OP_RETURN limit enforced; relies on `transaction_service` and `consensus_service` (4.3GB limit).
+- **Transaction Size**: No direct transaction size limit enforced; relies on `consensus_service` (temporary 32GB limit).
+- The service supports BSV’s massive transaction and block sizes by handling alerts from other services.
+
+## Usage
+
+1. Start the service:
+   ```bash
+   cargo run --bin alert_service
+   ```
+   Listens on `[::1]:50061`.
+
+2. Example gRPC calls (using `grpcurl`):
+   ```bash
+   grpcurl -plaintext -d '{"event_type": "error", "message": "Test alert", "severity": 2}' [::1]:50061 alert.Alert/SendAlert
+   ```
 
 ## Testing
-Use `grpcurl` to test the available methods. Note: Methods require valid JWT tokens in the `authorization` header.
 
-### SendAlert
-```bash
-grpcurl -plaintext -H "authorization: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1c2VyMSIsInJvbGUiOiJjbGllbnQiLCJleHAiOjE5MjA2NzY1MDl9.8X8z7z3Y8Qz5z5z7z3Y8Qz5z5z7z3Y8Qz5z5z7z3Y8Q" -d '{"event_type": "consensus_violation", "message": "Block size exceeds limit", "severity": 3}' localhost:50061 alert.Alert/SendAlert
-```
-Expected response:
-```json
-{
-  "success": true,
-  "error": ""
-}
-```
+- Use `tests/config.toml` to configure test parameters.
+- Run integration tests with `cargo test` to verify alert processing.
 
-### SubscribeToAlerts
-```bash
-# Use a gRPC client supporting streaming
-grpcurl -plaintext -H "authorization: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1c2VyMSIsInJvbGUiOiJjbGllbnQiLCJleHAiOjE5MjA2NzY1MDl9.8X8z7z3Y8Qz5z5z7z3Y8Qz5z5z7z3Y8Qz5z5z7z3Y8Q" -d '{"event_type": "consensus_violation"}' localhost:50061 alert.Alert/SubscribeToAlerts
-```
-Expected response (example, streamed):
-```json
-{
-  "event_type": "consensus_violation",
-  "message": "Block size exceeds limit",
-  "severity": 3,
-  "timestamp": 1625097600
-}
-```
+## Notes
+
+- Alerts are logged and processed for failures across services (e.g., validation, indexing, broadcast).
+- Designed for high-throughput, supporting BSV’s massive transaction and block sizes through integration with other services.
+
+---
+*Last updated: 2025-07-03*
