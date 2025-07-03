@@ -32,7 +32,7 @@ async-stream = "0.3.6"
 async-channel = "2.3.1"
 lru = "0.12.5"
 jsonwebtoken = "9.3.0"
-sv = { git = "https://github.com/bitcoin-sv/rust-sv", branch = "master" }
+sv = { git = "https://github.com/murphsicles/rust-sv", tag = "v0.4.0" }
 
 [profile.release]
 opt-level = 3
