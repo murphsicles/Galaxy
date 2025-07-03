@@ -1,7 +1,11 @@
 [package]
 name = "auth_service"
-version = "0.0.3"
+version = "0.0.4"
 edition = "2021"
+
+[lib]
+name = "auth_service"
+path = "src/lib.rs"
 
 [[bin]]
 name = "auth_service"
@@ -17,6 +21,7 @@ tracing-subscriber = { workspace = true }
 governor = { workspace = true }
 tokio = { workspace = true }
 futures = { workspace = true }
+shared = { path = "../shared" }
 
 [build-dependencies]
 tonic-build = { workspace = true }
