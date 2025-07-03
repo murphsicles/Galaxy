@@ -2,8 +2,8 @@
 members = [
     "network_service",
     "transaction_service",
-    "block_service",
     "storage_service",
+    "block_service",
     "consensus_service",
     "overlay_service",
     "validation_service",
@@ -11,9 +11,28 @@ members = [
     "auth_service",
     "alert_service",
     "index_service",
-    "shared"
+    "shared",
 ]
 resolver = "2"
+
+[workspace.dependencies]
+tonic = "0.12.3"
+tonic-build = "0.12.3"
+prost = "0.13.3"
+prometheus = "0.14.1"
+tigerbeetle = "0.16.0"
+sled = "0.34.7"
+hex = "0.4.3"
+tracing = "0.1.40"
+tracing-subscriber = "0.3.18"
+governor = "0.6.0"
+tokio = { version = "1.40.0", features = ["full"] }
+futures = "0.3.31"
+async-stream = "0.3.6"
+async-channel = "2.3.1"
+lru = "0.12.5"
+jsonwebtoken = "9.3.0"
+sv = { git = "https://github.com/bitcoin-sv/rust-sv", branch = "master" }
 
 [profile.release]
 opt-level = 3
