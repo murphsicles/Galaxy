@@ -1,30 +1,33 @@
-use tonic::{transport::{Server, Channel}, Request, Response, Status};
-use transaction::transaction_server::{Transaction, TransactionServer};
-use transaction::{
-    ValidateTransactionRequest, ValidateTransactionResponse, ProcessTransactionRequest,
-    ProcessTransactionResponse, BatchValidateTransactionRequest,
-    BatchValidateTransactionResponse, IndexTransactionRequest, IndexTransactionResponse,
-    GetMetricsRequest, GetMetricsResponse
-};
-use storage::storage_client::StorageClient;
-use storage::QueryUtxoRequest;
-use consensus::consensus_client::ConsensusClient;
-use consensus::ValidateTransactionConsensusRequest;
-use auth::auth_client::AuthClient;
-use auth::{AuthenticateRequest, AuthorizeRequest};
 use alert::alert_client::AlertClient;
 use alert::SendAlertRequest;
+use async_channel::Sender;
+use auth::auth_client::AuthClient;
+use auth::{AuthenticateRequest, AuthorizeRequest};
+use consensus::consensus_client::ConsensusClient;
+use consensus::ValidateTransactionConsensusRequest;
+use governor::{Quota, RateLimiter};
+use prometheus::{Counter, Gauge, Registry};
+use shared::ShardManager;
+use std::num::NonZeroU32;
+use std::sync::Arc;
+use storage::storage_client::StorageClient;
+use storage::QueryUtxoRequest;
 use sv::transaction::Transaction;
 use sv::util::{deserialize, serialize};
-use prometheus::{Counter, Gauge, Registry};
-use governor::{Quota, RateLimiter};
-use std::num::NonZeroU32;
-use tracing::{info, warn};
-use shared::ShardManager;
-use toml;
-use std::sync::Arc;
 use tokio::sync::Mutex;
-use async_channel::Sender;
+use toml;
+use tonic::{
+    transport::{Channel, Server},
+    Request, Response, Status,
+};
+use tracing::{info, warn};
+use transaction::transaction_server::{Transaction, TransactionServer};
+use transaction::{
+    BatchValidateTransactionRequest, BatchValidateTransactionResponse, GetMetricsRequest,
+    GetMetricsResponse, IndexTransactionRequest, IndexTransactionResponse,
+    ProcessTransactionRequest, ProcessTransactionResponse, ValidateTransactionRequest,
+    ValidateTransactionResponse,
+};
 
 tonic::include_proto!("transaction");
 tonic::include_proto!("storage");
@@ -45,7 +48,8 @@ struct TransactionServiceImpl {
     latency_ms: Gauge,
     alert_count: Counter,
     index_throughput: Gauge,
-    rate_limiter: Arc<RateLimiter<String, governor::state::direct::NotKeyed, governor::clock::DefaultClock>>,
+    rate_limiter:
+        Arc<RateLimiter<String, governor::state::direct::NotKeyed, governor::clock::DefaultClock>>,
     shard_manager: Arc<ShardManager>,
 }
 
@@ -53,9 +57,7 @@ impl TransactionServiceImpl {
     async fn new() -> Self {
         let config_str = include_str!("../../tests/config.toml");
         let config: toml::Value = toml::from_str(config_str).expect("Failed to parse config");
-        let shard_id = config["sharding"]["shard_id"]
-            .as_integer()
-            .unwrap_or(0) as u32;
+        let shard_id = config["sharding"]["shard_id"].as_integer().unwrap_or(0) as u32;
 
         let storage_client = StorageClient::connect("http://[::1]:50053")
             .await
@@ -71,21 +73,28 @@ impl TransactionServiceImpl {
             .expect("Failed to connect to alert_service");
         let (tx_queue, _) = async_channel::unbounded();
         let registry = Arc::new(Registry::new());
-        let requests_total = Counter::new("transaction_requests_total", "Total transaction requests")
-            .unwrap();
-        let latency_ms = Gauge::new("transaction_latency_ms", "Average transaction processing latency")
-            .unwrap();
-        let alert_count = Counter::new("transaction_alert_count", "Total alerts sent")
-            .unwrap();
-        let index_throughput = Gauge::new("transaction_index_throughput", "Indexed transactions per second")
-            .unwrap();
+        let requests_total =
+            Counter::new("transaction_requests_total", "Total transaction requests").unwrap();
+        let latency_ms = Gauge::new(
+            "transaction_latency_ms",
+            "Average transaction processing latency",
+        )
+        .unwrap();
+        let alert_count = Counter::new("transaction_alert_count", "Total alerts sent").unwrap();
+        let index_throughput = Gauge::new(
+            "transaction_index_throughput",
+            "Indexed transactions per second",
+        )
+        .unwrap();
         registry.register(Box::new(requests_total.clone())).unwrap();
         registry.register(Box::new(latency_ms.clone())).unwrap();
         registry.register(Box::new(alert_count.clone())).unwrap();
-        registry.register(Box::new(index_throughput.clone())).unwrap();
-        let rate_limiter = Arc::new(RateLimiter::direct(
-            Quota::per_second(NonZeroU32::new(1000).unwrap()),
-        ));
+        registry
+            .register(Box::new(index_throughput.clone()))
+            .unwrap();
+        let rate_limiter = Arc::new(RateLimiter::direct(Quota::per_second(
+            NonZeroU32::new(1000).unwrap(),
+        )));
         let shard_manager = Arc::new(ShardManager::new());
 
         TransactionServiceImpl {
@@ -138,7 +147,12 @@ impl TransactionServiceImpl {
         Ok(())
     }
 
-    async fn send_alert(&self, event_type: &str, message: &str, severity: u32) -> Result<(), Status> {
+    async fn send_alert(
+        &self,
+        event_type: &str,
+        message: &str,
+        severity: u32,
+    ) -> Result<(), Status> {
         let alert_request = SendAlertRequest {
             event_type: event_type.to_string(),
             message: message.to_string(),
@@ -185,30 +199,28 @@ impl Transaction for TransactionServiceImpl {
         self.requests_total.inc();
         let start = std::time::Instant::now();
         let req = request.into_inner();
-        let tx_bytes = hex::decode(&req.tx_hex)
-            .map_err(|e| {
-                warn!("Invalid transaction hex: {}", e);
-                let _ = self
-                    .send_alert(
-                        "validate_invalid_tx",
-                        &format!("Invalid transaction hex: {}", e),
-                        2,
-                    )
-                    .await;
-                Status::invalid_argument(format!("Invalid transaction hex: {}", e))
-            })?;
-        let tx: Transaction = deserialize(&tx_bytes)
-            .map_err(|e| {
-                warn!("Invalid transaction: {}", e);
-                let _ = self
-                    .send_alert(
-                        "validate_invalid_tx_deserialization",
-                        &format!("Invalid transaction: {}", e),
-                        2,
-                    )
-                    .await;
-                Status::invalid_argument(format!("Invalid transaction: {}", e))
-            })?;
+        let tx_bytes = hex::decode(&req.tx_hex).map_err(|e| {
+            warn!("Invalid transaction hex: {}", e);
+            let _ = self
+                .send_alert(
+                    "validate_invalid_tx",
+                    &format!("Invalid transaction hex: {}", e),
+                    2,
+                )
+                .await;
+            Status::invalid_argument(format!("Invalid transaction hex: {}", e))
+        })?;
+        let tx: Transaction = deserialize(&tx_bytes).map_err(|e| {
+            warn!("Invalid transaction: {}", e);
+            let _ = self
+                .send_alert(
+                    "validate_invalid_tx_deserialization",
+                    &format!("Invalid transaction: {}", e),
+                    2,
+                )
+                .await;
+            Status::invalid_argument(format!("Invalid transaction: {}", e))
+        })?;
 
         let consensus_request = ValidateTransactionConsensusRequest {
             tx_hex: req.tx_hex.clone(),
@@ -231,11 +243,17 @@ impl Transaction for TransactionServiceImpl {
             .into_inner();
 
         if !consensus_response.success {
-            warn!("Transaction validation failed: {}", consensus_response.error);
+            warn!(
+                "Transaction validation failed: {}",
+                consensus_response.error
+            );
             let _ = self
                 .send_alert(
                     "validate_tx_failed",
-                    &format!("Transaction validation failed: {}", consensus_response.error),
+                    &format!(
+                        "Transaction validation failed: {}",
+                        consensus_response.error
+                    ),
                     2,
                 )
                 .await;
@@ -273,30 +291,28 @@ impl Transaction for TransactionServiceImpl {
         self.requests_total.inc();
         let start = std::time::Instant::now();
         let req = request.into_inner();
-        let tx_bytes = hex::decode(&req.tx_hex)
-            .map_err(|e| {
-                warn!("Invalid transaction hex: {}", e);
-                let _ = self
-                    .send_alert(
-                        "process_invalid_tx",
-                        &format!("Invalid transaction hex: {}", e),
-                        2,
-                    )
-                    .await;
-                Status::invalid_argument(format!("Invalid transaction hex: {}", e))
-            })?;
-        let tx: Transaction = deserialize(&tx_bytes)
-            .map_err(|e| {
-                warn!("Invalid transaction: {}", e);
-                let _ = self
-                    .send_alert(
-                        "process_invalid_tx_deserialization",
-                        &format!("Invalid transaction: {}", e),
-                        2,
-                    )
-                    .await;
-                Status::invalid_argument(format!("Invalid transaction: {}", e))
-            })?;
+        let tx_bytes = hex::decode(&req.tx_hex).map_err(|e| {
+            warn!("Invalid transaction hex: {}", e);
+            let _ = self
+                .send_alert(
+                    "process_invalid_tx",
+                    &format!("Invalid transaction hex: {}", e),
+                    2,
+                )
+                .await;
+            Status::invalid_argument(format!("Invalid transaction hex: {}", e))
+        })?;
+        let tx: Transaction = deserialize(&tx_bytes).map_err(|e| {
+            warn!("Invalid transaction: {}", e);
+            let _ = self
+                .send_alert(
+                    "process_invalid_tx_deserialization",
+                    &format!("Invalid transaction: {}", e),
+                    2,
+                )
+                .await;
+            Status::invalid_argument(format!("Invalid transaction: {}", e))
+        })?;
 
         let storage_request = QueryUtxoRequest {
             txid: tx.txid().to_string(),
@@ -334,20 +350,17 @@ impl Transaction for TransactionServiceImpl {
             }));
         }
 
-        self.tx_queue
-            .send(req.tx_hex.clone())
-            .await
-            .map_err(|e| {
-                warn!("Failed to queue transaction: {}", e);
-                let _ = self
-                    .send_alert(
-                        "process_queue_failed",
-                        &format!("Failed to queue transaction: {}", e),
-                        2,
-                    )
-                    .await;
-                Status::internal(format!("Failed to queue transaction: {}", e))
-            })?;
+        self.tx_queue.send(req.tx_hex.clone()).await.map_err(|e| {
+            warn!("Failed to queue transaction: {}", e);
+            let _ = self
+                .send_alert(
+                    "process_queue_failed",
+                    &format!("Failed to queue transaction: {}", e),
+                    2,
+                )
+                .await;
+            Status::internal(format!("Failed to queue transaction: {}", e))
+        })?;
 
         self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
         Ok(Response::new(ProcessTransactionResponse {
@@ -380,30 +393,28 @@ impl Transaction for TransactionServiceImpl {
         let mut results = vec![];
 
         for tx_hex in req.tx_hexes {
-            let tx_bytes = hex::decode(&tx_hex)
-                .map_err(|e| {
-                    warn!("Invalid transaction hex: {}", e);
-                    let _ = self
-                        .send_alert(
-                            "batch_validate_invalid_tx",
-                            &format!("Invalid transaction hex: {}", e),
-                            2,
-                        )
-                        .await;
-                    Status::invalid_argument(format!("Invalid transaction hex: {}", e))
-                })?;
-            let _tx: Transaction = deserialize(&tx_bytes)
-                .map_err(|e| {
-                    warn!("Invalid transaction: {}", e);
-                    let _ = self
-                        .send_alert(
-                            "batch_validate_invalid_tx_deserialization",
-                            &format!("Invalid transaction: {}", e),
-                            2,
-                        )
-                        .await;
-                    Status::invalid_argument(format!("Invalid transaction: {}", e))
-                })?;
+            let tx_bytes = hex::decode(&tx_hex).map_err(|e| {
+                warn!("Invalid transaction hex: {}", e);
+                let _ = self
+                    .send_alert(
+                        "batch_validate_invalid_tx",
+                        &format!("Invalid transaction hex: {}", e),
+                        2,
+                    )
+                    .await;
+                Status::invalid_argument(format!("Invalid transaction hex: {}", e))
+            })?;
+            let _tx: Transaction = deserialize(&tx_bytes).map_err(|e| {
+                warn!("Invalid transaction: {}", e);
+                let _ = self
+                    .send_alert(
+                        "batch_validate_invalid_tx_deserialization",
+                        &format!("Invalid transaction: {}", e),
+                        2,
+                    )
+                    .await;
+                Status::invalid_argument(format!("Invalid transaction: {}", e))
+            })?;
 
             let consensus_request = ValidateTransactionConsensusRequest {
                 tx_hex: tx_hex.clone(),
@@ -456,30 +467,28 @@ impl Transaction for TransactionServiceImpl {
         self.requests_total.inc();
         let start = std::time::Instant::now();
         let req = request.into_inner();
-        let tx_bytes = hex::decode(&req.tx_hex)
-            .map_err(|e| {
-                warn!("Invalid transaction hex: {}", e);
-                let _ = self
-                    .send_alert(
-                        "index_invalid_tx",
-                        &format!("Invalid transaction hex: {}", e),
-                        2,
-                    )
-                    .await;
-                Status::invalid_argument(format!("Invalid transaction hex: {}", e))
-            })?;
-        let _tx: Transaction = deserialize(&tx_bytes)
-            .map_err(|e| {
-                warn!("Invalid transaction: {}", e);
-                let _ = self
-                    .send_alert(
-                        "index_invalid_tx_deserialization",
-                        &format!("Invalid transaction: {}", e),
-                        2,
-                    )
-                    .await;
-                Status::invalid_argument(format!("Invalid transaction: {}", e))
-            })?;
+        let tx_bytes = hex::decode(&req.tx_hex).map_err(|e| {
+            warn!("Invalid transaction hex: {}", e);
+            let _ = self
+                .send_alert(
+                    "index_invalid_tx",
+                    &format!("Invalid transaction hex: {}", e),
+                    2,
+                )
+                .await;
+            Status::invalid_argument(format!("Invalid transaction hex: {}", e))
+        })?;
+        let _tx: Transaction = deserialize(&tx_bytes).map_err(|e| {
+            warn!("Invalid transaction: {}", e);
+            let _ = self
+                .send_alert(
+                    "index_invalid_tx_deserialization",
+                    &format!("Invalid transaction: {}", e),
+                    2,
+                )
+                .await;
+            Status::invalid_argument(format!("Invalid transaction: {}", e))
+        })?;
 
         self.index_throughput.set(1.0); // Placeholder
         self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
@@ -511,7 +520,7 @@ impl Transaction for TransactionServiceImpl {
             requests_total: self.requests_total.get() as u64,
             avg_latency_ms: self.latency_ms.get(),
             errors_total: 0, // Placeholder
-            cache_hits: 0, // Not applicable
+            cache_hits: 0,   // Not applicable
             alert_count: self.alert_count.get() as u64,
             index_throughput: self.index_throughput.get(),
         }))
@@ -535,4 +544,4 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await?;
 
     Ok(())
-                     }
+}
