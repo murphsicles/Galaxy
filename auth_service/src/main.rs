@@ -1,19 +1,19 @@
-use tonic::{transport::Server, Request, Response, Status};
 use auth::auth_server::{Auth, AuthServer};
 use auth::{
     AuthenticateRequest, AuthenticateResponse, AuthorizeRequest, AuthorizeResponse,
     GetMetricsRequest, GetMetricsResponse,
 };
+use governor::{Quota, RateLimiter};
 use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation};
 use prometheus::{Counter, Gauge, Registry};
-use governor::{Quota, RateLimiter};
-use std::num::NonZeroU32;
-use tracing::{info, warn};
 use shared::ShardManager;
-use toml;
+use std::collections::HashMap;
+use std::num::NonZeroU32;
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use std::collections::HashMap;
+use toml;
+use tonic::{transport::Server, Request, Response, Status};
+use tracing::{info, warn};
 
 tonic::include_proto!("auth");
 tonic::include_proto!("metrics");
@@ -27,7 +27,8 @@ struct AuthServiceImpl {
     registry: Arc<Registry>,
     requests_total: Counter,
     latency_ms: Gauge,
-    rate_limiter: Arc<RateLimiter<String, governor::state::direct::NotKeyed, governor::clock::DefaultClock>>,
+    rate_limiter:
+        Arc<RateLimiter<String, governor::state::direct::NotKeyed, governor::clock::DefaultClock>>,
     shard_manager: Arc<ShardManager>,
 }
 
@@ -35,9 +36,7 @@ impl AuthServiceImpl {
     async fn new() -> Self {
         let config_str = include_str!("../../tests/config.toml");
         let config: toml::Value = toml::from_str(config_str).expect("Failed to parse config");
-        let shard_id = config["sharding"]["shard_id"]
-            .as_integer()
-            .unwrap_or(0) as u32;
+        let shard_id = config["sharding"]["shard_id"].as_integer().unwrap_or(0) as u32;
         let jwt_secret = config["auth"]["jwt_secret"]
             .as_str()
             .unwrap_or("secret")
@@ -52,9 +51,9 @@ impl AuthServiceImpl {
         let latency_ms = Gauge::new("auth_latency_ms", "Average auth request latency").unwrap();
         registry.register(Box::new(requests_total.clone())).unwrap();
         registry.register(Box::new(latency_ms.clone())).unwrap();
-        let rate_limiter = Arc::new(RateLimiter::direct(
-            Quota::per_second(NonZeroU32::new(1000).unwrap()),
-        ));
+        let rate_limiter = Arc::new(RateLimiter::direct(Quota::per_second(
+            NonZeroU32::new(1000).unwrap(),
+        )));
         let shard_manager = Arc::new(ShardManager::new());
 
         AuthServiceImpl {
@@ -153,9 +152,9 @@ impl Auth for AuthServiceImpl {
             service_name: "auth_service".to_string(),
             requests_total: self.requests_total.get() as u64,
             avg_latency_ms: self.latency_ms.get(),
-            errors_total: 0, // Placeholder
-            cache_hits: 0, // Not applicable
-            alert_count: 0, // Not applicable
+            errors_total: 0,       // Placeholder
+            cache_hits: 0,         // Not applicable
+            alert_count: 0,        // Not applicable
             index_throughput: 0.0, // Not applicable
         }))
     }
