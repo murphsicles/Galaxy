@@ -1,29 +1,32 @@
-use tonic::{transport::{Server, Channel}, Request, Response, Status, Streaming};
-use validation::validation_server::{Validation, ValidationServer};
-use validation::{
-    GenerateSPVProofRequest, GenerateSPVProofResponse, BatchGenerateSPVProofRequest,
-    BatchGenerateSPVProofResponse, StreamSPVProofsRequest, StreamSPVProofsResponse,
-    VerifySPVProofRequest, VerifySPVProofResponse, GetMetricsRequest, GetMetricsResponse
-};
-use block::block_client::BlockClient;
-use block::GetBlockHeadersRequest;
-use storage::storage_client::StorageClient;
-use storage::QueryUtxoRequest;
-use auth::auth_client::AuthClient;
-use auth::{AuthenticateRequest, AuthorizeRequest};
 use alert::alert_client::AlertClient;
 use alert::SendAlertRequest;
-use sv::transaction::Transaction;
-use sv::util::{deserialize, serialize, hash::Sha256d};
+use auth::auth_client::AuthClient;
+use auth::{AuthenticateRequest, AuthorizeRequest};
+use block::block_client::BlockClient;
+use block::GetBlockHeadersRequest;
+use governor::{Jitter, Quota, RateLimiter};
 use lru::LruCache;
-use std::sync::Arc;
-use tokio::sync::Mutex;
 use prometheus::{Counter, Gauge, Registry};
-use governor::{Quota, RateLimiter, Jitter};
-use std::num::NonZeroU32;
-use tracing::{info, warn};
 use shared::ShardManager;
+use std::num::NonZeroU32;
+use std::sync::Arc;
+use storage::storage_client::StorageClient;
+use storage::QueryUtxoRequest;
+use sv::transaction::Transaction;
+use sv::util::{deserialize, hash::Sha256d, serialize};
+use tokio::sync::Mutex;
 use toml;
+use tonic::{
+    transport::{Channel, Server},
+    Request, Response, Status, Streaming,
+};
+use tracing::{info, warn};
+use validation::validation_server::{Validation, ValidationServer};
+use validation::{
+    BatchGenerateSPVProofRequest, BatchGenerateSPVProofResponse, GenerateSPVProofRequest,
+    GenerateSPVProofResponse, GetMetricsRequest, GetMetricsResponse, StreamSPVProofsRequest,
+    StreamSPVProofsResponse, VerifySPVProofRequest, VerifySPVProofResponse,
+};
 
 tonic::include_proto!("validation");
 tonic::include_proto!("block");
@@ -44,7 +47,8 @@ struct ValidationServiceImpl {
     latency_ms: Gauge,
     cache_hits: Counter,
     alert_count: Counter,
-    rate_limiter: Arc<RateLimiter<String, governor::state::direct::NotKeyed, governor::clock::DefaultClock>>,
+    rate_limiter:
+        Arc<RateLimiter<String, governor::state::direct::NotKeyed, governor::clock::DefaultClock>>,
     shard_manager: Arc<ShardManager>,
 }
 
@@ -68,15 +72,19 @@ impl ValidationServiceImpl {
             .expect("Failed to connect to alert_service");
         let proof_cache = Arc::new(Mutex::new(LruCache::new(NonZeroU32::new(1000).unwrap())));
         let registry = Arc::new(Registry::new());
-        let proof_requests = Counter::new("validation_requests_total", "Total SPV proof requests").unwrap();
-        let latency_ms = Gauge::new("validation_latency_ms", "Average proof generation latency").unwrap();
+        let proof_requests =
+            Counter::new("validation_requests_total", "Total SPV proof requests").unwrap();
+        let latency_ms =
+            Gauge::new("validation_latency_ms", "Average proof generation latency").unwrap();
         let cache_hits = Counter::new("validation_cache_hits", "Total cache hits").unwrap();
         let alert_count = Counter::new("validation_alert_count", "Total alerts sent").unwrap();
         registry.register(Box::new(proof_requests.clone())).unwrap();
         registry.register(Box::new(latency_ms.clone())).unwrap();
         registry.register(Box::new(cache_hits.clone())).unwrap();
         registry.register(Box::new(alert_count.clone())).unwrap();
-        let rate_limiter = Arc::new(RateLimiter::direct(Quota::per_second(NonZeroU32::new(1000).unwrap())));
+        let rate_limiter = Arc::new(RateLimiter::direct(Quota::per_second(
+            NonZeroU32::new(1000).unwrap(),
+        )));
         let shard_manager = Arc::new(ShardManager::new());
 
         ValidationServiceImpl {
@@ -96,8 +104,11 @@ impl ValidationServiceImpl {
     }
 
     async fn authenticate(&self, token: &str) -> Result<String, Status> {
-        let auth_request = AuthenticateRequest { token: token.to_string() };
-        let auth_response = self.auth_client
+        let auth_request = AuthenticateRequest {
+            token: token.to_string(),
+        };
+        let auth_response = self
+            .auth_client
             .authenticate(auth_request)
             .await
             .map_err(|e| Status::unauthenticated(format!("Authentication failed: {}", e)))?
@@ -114,7 +125,8 @@ impl ValidationServiceImpl {
             service: "validation_service".to_string(),
             method: method.to_string(),
         };
-        let auth_response = self.auth_client
+        let auth_response = self
+            .auth_client
             .authorize(auth_request)
             .await
             .map_err(|e| Status::permission_denied(format!("Authorization failed: {}", e)))?
@@ -125,13 +137,19 @@ impl ValidationServiceImpl {
         Ok(())
     }
 
-    async fn send_alert(&self, event_type: &str, message: &str, severity: u32) -> Result<(), Status> {
+    async fn send_alert(
+        &self,
+        event_type: &str,
+        message: &str,
+        severity: u32,
+    ) -> Result<(), Status> {
         let alert_request = SendAlertRequest {
             event_type: event_type.to_string(),
             message: message.to_string(),
             severity,
         };
-        let alert_response = self.alert_client
+        let alert_response = self
+            .alert_client
             .send_alert(alert_request)
             .await
             .map_err(|e| {
@@ -158,45 +176,74 @@ impl ValidationServiceImpl {
             return Ok(cached.clone());
         }
 
-        let tx_bytes = hex::decode(txid)
-            .map_err(|e| {
-                warn!("Invalid txid: {}", e);
-                let _ = self.send_alert("spv_invalid_txid", &format!("Invalid txid: {}", e), 2).await;
-                Status::invalid_argument(format!("Invalid txid: {}", e))
-            })?;
-        let tx: Transaction = deserialize(&tx_bytes)
-            .map_err(|e| {
-                warn!("Invalid transaction: {}", e);
-                let _ = self.send_alert("spv_invalid_transaction", &format!("Invalid transaction: {}", e), 2).await;
-                Status::invalid_argument(format!("Invalid transaction: {}", e))
-            })?;
+        let tx_bytes = hex::decode(txid).map_err(|e| {
+            warn!("Invalid txid: {}", e);
+            let _ = self
+                .send_alert("spv_invalid_txid", &format!("Invalid txid: {}", e), 2)
+                .await;
+            Status::invalid_argument(format!("Invalid txid: {}", e))
+        })?;
+        let tx: Transaction = deserialize(&tx_bytes).map_err(|e| {
+            warn!("Invalid transaction: {}", e);
+            let _ = self
+                .send_alert(
+                    "spv_invalid_transaction",
+                    &format!("Invalid transaction: {}", e),
+                    2,
+                )
+                .await;
+            Status::invalid_argument(format!("Invalid transaction: {}", e))
+        })?;
 
-        let block_request = GetBlockHeadersRequest { block_hash: tx.txid().to_string() };
-        let block_response = self.block_client
+        let block_request = GetBlockHeadersRequest {
+            block_hash: tx.txid().to_string(),
+        };
+        let block_response = self
+            .block_client
             .get_block_headers(block_request)
             .await
             .map_err(|e| {
                 warn!("Failed to fetch block headers: {}", e);
-                let _ = self.send_alert("spv_block_fetch_failed", &format!("Failed to fetch block headers: {}", e), 2).await;
+                let _ = self
+                    .send_alert(
+                        "spv_block_fetch_failed",
+                        &format!("Failed to fetch block headers: {}", e),
+                        2,
+                    )
+                    .await;
                 Status::internal(format!("Failed to fetch block headers: {}", e))
             })?
             .into_inner();
 
         if block_response.headers.is_empty() {
             warn!("No block headers found for txid: {}", txid);
-            let _ = self.send_alert("spv_no_headers", &format!("No block headers found for txid: {}", txid), 3).await;
+            let _ = self
+                .send_alert(
+                    "spv_no_headers",
+                    &format!("No block headers found for txid: {}", txid),
+                    3,
+                )
+                .await;
             return Err(Status::not_found("No block headers found"));
         }
 
-        let merkle_path = self.calculate_merkle_path(&tx).await
-            .map_err(|e| {
-                warn!("Failed to calculate merkle path: {}", e);
-                let _ = self.send_alert("spv_merkle_path_failed", &format!("Failed to calculate merkle path: {}", e), 2).await;
-                Status::internal(format!("Failed to calculate merkle path: {}", e))
-            })?;
+        let merkle_path = self.calculate_merkle_path(&tx).await.map_err(|e| {
+            warn!("Failed to calculate merkle path: {}", e);
+            let _ = self
+                .send_alert(
+                    "spv_merkle_path_failed",
+                    &format!("Failed to calculate merkle path: {}", e),
+                    2,
+                )
+                .await;
+            Status::internal(format!("Failed to calculate merkle path: {}", e))
+        })?;
 
         let merkle_path_hex = hex::encode(serialize(&merkle_path));
-        proof_cache.put(txid.to_string(), (merkle_path_hex.clone(), block_response.headers.clone()));
+        proof_cache.put(
+            txid.to_string(),
+            (merkle_path_hex.clone(), block_response.headers.clone()),
+        );
         self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
 
         Ok((merkle_path_hex, block_response.headers))
@@ -207,35 +254,60 @@ impl ValidationServiceImpl {
         Ok(vec![]) // Placeholder
     }
 
-    async fn verify_spv_proof(&self, txid: &str, merkle_path: &str, block_headers: &[String]) -> Result<bool, Status> {
+    async fn verify_spv_proof(
+        &self,
+        txid: &str,
+        merkle_path: &str,
+        block_headers: &[String],
+    ) -> Result<bool, Status> {
         let start = std::time::Instant::now();
         self.proof_requests.inc();
 
-        let tx_bytes = hex::decode(txid)
-            .map_err(|e| {
-                warn!("Invalid txid: {}", e);
-                let _ = self.send_alert("spv_verify_invalid_txid", &format!("Invalid txid: {}", e), 2).await;
-                Status::invalid_argument(format!("Invalid txid: {}", e))
-            })?;
-        let _tx: Transaction = deserialize(&tx_bytes)
-            .map_err(|e| {
-                warn!("Invalid transaction: {}", e);
-                let _ = self.send_alert("spv_verify_invalid_transaction", &format!("Invalid transaction: {}", e), 2).await;
-                Status::invalid_argument(format!("Invalid transaction: {}", e))
-            })?;
+        let tx_bytes = hex::decode(txid).map_err(|e| {
+            warn!("Invalid txid: {}", e);
+            let _ = self
+                .send_alert(
+                    "spv_verify_invalid_txid",
+                    &format!("Invalid txid: {}", e),
+                    2,
+                )
+                .await;
+            Status::invalid_argument(format!("Invalid txid: {}", e))
+        })?;
+        let _tx: Transaction = deserialize(&tx_bytes).map_err(|e| {
+            warn!("Invalid transaction: {}", e);
+            let _ = self
+                .send_alert(
+                    "spv_verify_invalid_transaction",
+                    &format!("Invalid transaction: {}", e),
+                    2,
+                )
+                .await;
+            Status::invalid_argument(format!("Invalid transaction: {}", e))
+        })?;
 
-        let merkle_path_bytes = hex::decode(merkle_path)
-            .map_err(|e| {
-                warn!("Invalid merkle path: {}", e);
-                let _ = self.send_alert("spv_verify_invalid_merkle_path", &format!("Invalid merkle path: {}", e), 2).await;
-                Status::invalid_argument(format!("Invalid merkle path: {}", e))
-            })?;
-        let _merkle_path: Vec<Sha256d> = deserialize(&merkle_path_bytes)
-            .map_err(|e| {
-                warn!("Invalid merkle path deserialization: {}", e);
-                let _ = self.send_alert("spv_verify_merkle_path_deserialization", &format!("Invalid merkle path: {}", e), 2).await;
-                Status::invalid_argument(format!("Invalid merkle path deserialization: {}", e))
-            })?;
+        let merkle_path_bytes = hex::decode(merkle_path).map_err(|e| {
+            warn!("Invalid merkle path: {}", e);
+            let _ = self
+                .send_alert(
+                    "spv_verify_invalid_merkle_path",
+                    &format!("Invalid merkle path: {}", e),
+                    2,
+                )
+                .await;
+            Status::invalid_argument(format!("Invalid merkle path: {}", e))
+        })?;
+        let _merkle_path: Vec<Sha256d> = deserialize(&merkle_path_bytes).map_err(|e| {
+            warn!("Invalid merkle path deserialization: {}", e);
+            let _ = self
+                .send_alert(
+                    "spv_verify_merkle_path_deserialization",
+                    &format!("Invalid merkle path: {}", e),
+                    2,
+                )
+                .await;
+            Status::invalid_argument(format!("Invalid merkle path deserialization: {}", e))
+        })?;
 
         self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
         Ok(true) // Placeholder
@@ -482,4 +554,4 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await?;
 
     Ok(())
-                }
+}
