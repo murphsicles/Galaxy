@@ -1,26 +1,28 @@
-use tonic::{transport::{Server, Channel}, Request, Response, Status};
-use index::index_server::{Index, IndexServer};
-use index::{
-    QueryTransactionRequest, QueryTransactionResponse, IndexTransactionRequest,
-    IndexTransactionResponse, QueryBlockRequest, QueryBlockResponse, GetMetricsRequest,
-    GetMetricsResponse
-};
-use auth::auth_client::AuthClient;
-use auth::{AuthenticateRequest, AuthorizeRequest};
 use alert::alert_client::AlertClient;
 use alert::SendAlertRequest;
-use sv::transaction::Transaction;
-use sv::block::Block;
-use sv::util::{deserialize, serialize};
-use sled::Db;
-use prometheus::{Counter, Gauge, Registry};
+use auth::auth_client::AuthClient;
+use auth::{AuthenticateRequest, AuthorizeRequest};
 use governor::{Quota, RateLimiter};
-use std::num::NonZeroU32;
-use tracing::{info, warn};
+use index::index_server::{Index, IndexServer};
+use index::{
+    GetMetricsRequest, GetMetricsResponse, IndexTransactionRequest, IndexTransactionResponse,
+    QueryBlockRequest, QueryBlockResponse, QueryTransactionRequest, QueryTransactionResponse,
+};
+use prometheus::{Counter, Gauge, Registry};
 use shared::ShardManager;
-use toml;
+use sled::Db;
+use std::num::NonZeroU32;
 use std::sync::Arc;
+use sv::block::Block;
+use sv::transaction::Transaction;
+use sv::util::{deserialize, serialize};
 use tokio::sync::Mutex;
+use toml;
+use tonic::{
+    transport::{Channel, Server},
+    Request, Response, Status,
+};
+use tracing::{info, warn};
 
 tonic::include_proto!("index");
 tonic::include_proto!("auth");
@@ -37,7 +39,8 @@ struct IndexServiceImpl {
     latency_ms: Gauge,
     alert_count: Counter,
     index_throughput: Gauge,
-    rate_limiter: Arc<RateLimiter<String, governor::state::direct::NotKeyed, governor::clock::DefaultClock>>,
+    rate_limiter:
+        Arc<RateLimiter<String, governor::state::direct::NotKeyed, governor::clock::DefaultClock>>,
     shard_manager: Arc<ShardManager>,
 }
 
@@ -45,9 +48,7 @@ impl IndexServiceImpl {
     async fn new() -> Self {
         let config_str = include_str!("../../tests/config.toml");
         let config: toml::Value = toml::from_str(config_str).expect("Failed to parse config");
-        let shard_id = config["sharding"]["shard_id"]
-            .as_integer()
-            .unwrap_or(0) as u32;
+        let shard_id = config["sharding"]["shard_id"].as_integer().unwrap_or(0) as u32;
 
         let auth_client = AuthClient::connect("http://[::1]:50060")
             .await
@@ -55,23 +56,24 @@ impl IndexServiceImpl {
         let alert_client = AlertClient::connect("http://[::1]:50061")
             .await
             .expect("Failed to connect to alert_service");
-        let db = Arc::new(Mutex::new(sled::open("index_db").expect("Failed to open sled database")));
+        let db = Arc::new(Mutex::new(
+            sled::open("index_db").expect("Failed to open sled database"),
+        ));
         let registry = Arc::new(Registry::new());
-        let requests_total = Counter::new("index_requests_total", "Total index requests")
-            .unwrap();
-        let latency_ms = Gauge::new("index_latency_ms", "Average index request latency")
-            .unwrap();
-        let alert_count = Counter::new("index_alert_count", "Total alerts sent")
-            .unwrap();
-        let index_throughput = Gauge::new("index_throughput", "Indexed transactions per second")
-            .unwrap();
+        let requests_total = Counter::new("index_requests_total", "Total index requests").unwrap();
+        let latency_ms = Gauge::new("index_latency_ms", "Average index request latency").unwrap();
+        let alert_count = Counter::new("index_alert_count", "Total alerts sent").unwrap();
+        let index_throughput =
+            Gauge::new("index_throughput", "Indexed transactions per second").unwrap();
         registry.register(Box::new(requests_total.clone())).unwrap();
         registry.register(Box::new(latency_ms.clone())).unwrap();
         registry.register(Box::new(alert_count.clone())).unwrap();
-        registry.register(Box::new(index_throughput.clone())).unwrap();
-        let rate_limiter = Arc::new(RateLimiter::direct(
-            Quota::per_second(NonZeroU32::new(1000).unwrap()),
-        ));
+        registry
+            .register(Box::new(index_throughput.clone()))
+            .unwrap();
+        let rate_limiter = Arc::new(RateLimiter::direct(Quota::per_second(
+            NonZeroU32::new(1000).unwrap(),
+        )));
         let shard_manager = Arc::new(ShardManager::new());
 
         IndexServiceImpl {
@@ -122,7 +124,12 @@ impl IndexServiceImpl {
         Ok(())
     }
 
-    async fn send_alert(&self, event_type: &str, message: &str, severity: u32) -> Result<(), Status> {
+    async fn send_alert(
+        &self,
+        event_type: &str,
+        message: &str,
+        severity: u32,
+    ) -> Result<(), Status> {
         let alert_request = SendAlertRequest {
             event_type: event_type.to_string(),
             message: message.to_string(),
@@ -174,18 +181,17 @@ impl Index for IndexServiceImpl {
 
         let tx_hex = match db.get(key.as_bytes()) {
             Ok(Some(value)) => {
-                let tx: Transaction = deserialize(&value)
-                    .map_err(|e| {
-                        warn!("Invalid transaction: {}", e);
-                        let _ = self
-                            .send_alert(
-                                "query_tx_invalid_deserialization",
-                                &format!("Invalid transaction: {}", e),
-                                2,
-                            )
-                            .await;
-                        Status::internal(format!("Invalid transaction: {}", e))
-                    })?;
+                let tx: Transaction = deserialize(&value).map_err(|e| {
+                    warn!("Invalid transaction: {}", e);
+                    let _ = self
+                        .send_alert(
+                            "query_tx_invalid_deserialization",
+                            &format!("Invalid transaction: {}", e),
+                            2,
+                        )
+                        .await;
+                    Status::internal(format!("Invalid transaction: {}", e))
+                })?;
                 hex::encode(serialize(&tx))
             }
             Ok(None) => {
@@ -249,45 +255,42 @@ impl Index for IndexServiceImpl {
         self.requests_total.inc();
         let start = std::time::Instant::now();
         let req = request.into_inner();
-        let tx_bytes = hex::decode(&req.tx_hex)
-            .map_err(|e| {
-                warn!("Invalid transaction hex: {}", e);
-                let _ = self
-                    .send_alert(
-                        "index_tx_invalid_hex",
-                        &format!("Invalid transaction hex: {}", e),
-                        2,
-                    )
-                    .await;
-                Status::invalid_argument(format!("Invalid transaction hex: {}", e))
-            })?;
-        let tx: Transaction = deserialize(&tx_bytes)
-            .map_err(|e| {
-                warn!("Invalid transaction: {}", e);
-                let _ = self
-                    .send_alert(
-                        "index_tx_invalid_deserialization",
-                        &format!("Invalid transaction: {}", e),
-                        2,
-                    )
-                    .await;
-                Status::invalid_argument(format!("Invalid transaction: {}", e))
-            })?;
+        let tx_bytes = hex::decode(&req.tx_hex).map_err(|e| {
+            warn!("Invalid transaction hex: {}", e);
+            let _ = self
+                .send_alert(
+                    "index_tx_invalid_hex",
+                    &format!("Invalid transaction hex: {}", e),
+                    2,
+                )
+                .await;
+            Status::invalid_argument(format!("Invalid transaction hex: {}", e))
+        })?;
+        let tx: Transaction = deserialize(&tx_bytes).map_err(|e| {
+            warn!("Invalid transaction: {}", e);
+            let _ = self
+                .send_alert(
+                    "index_tx_invalid_deserialization",
+                    &format!("Invalid transaction: {}", e),
+                    2,
+                )
+                .await;
+            Status::invalid_argument(format!("Invalid transaction: {}", e))
+        })?;
 
         let db = self.db.lock().await;
         let key = format!("tx:{}", tx.txid());
-        db.insert(key.as_bytes(), serialize(&tx))
-            .map_err(|e| {
-                warn!("Failed to index transaction: {}", e);
-                let _ = self
-                    .send_alert(
-                        "index_tx_failed",
-                        &format!("Failed to index transaction: {}", e),
-                        2,
-                    )
-                    .await;
-                Status::internal(format!("Failed to index transaction: {}", e))
-            })?;
+        db.insert(key.as_bytes(), serialize(&tx)).map_err(|e| {
+            warn!("Failed to index transaction: {}", e);
+            let _ = self
+                .send_alert(
+                    "index_tx_failed",
+                    &format!("Failed to index transaction: {}", e),
+                    2,
+                )
+                .await;
+            Status::internal(format!("Failed to index transaction: {}", e))
+        })?;
 
         self.index_throughput.set(1.0); // Placeholder
         self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
@@ -323,18 +326,17 @@ impl Index for IndexServiceImpl {
 
         let block_hex = match db.get(key.as_bytes()) {
             Ok(Some(value)) => {
-                let block: Block = deserialize(&value)
-                    .map_err(|e| {
-                        warn!("Invalid block: {}", e);
-                        let _ = self
-                            .send_alert(
-                                "query_block_invalid_deserialization",
-                                &format!("Invalid block: {}", e),
-                                2,
-                            )
-                            .await;
-                        Status::internal(format!("Invalid block: {}", e))
-                    })?;
+                let block: Block = deserialize(&value).map_err(|e| {
+                    warn!("Invalid block: {}", e);
+                    let _ = self
+                        .send_alert(
+                            "query_block_invalid_deserialization",
+                            &format!("Invalid block: {}", e),
+                            2,
+                        )
+                        .await;
+                    Status::internal(format!("Invalid block: {}", e))
+                })?;
                 hex::encode(serialize(&block))
             }
             Ok(None) => {
@@ -403,7 +405,7 @@ impl Index for IndexServiceImpl {
             requests_total: self.requests_total.get() as u64,
             avg_latency_ms: self.latency_ms.get(),
             errors_total: 0, // Placeholder
-            cache_hits: 0, // Not applicable
+            cache_hits: 0,   // Not applicable
             alert_count: self.alert_count.get() as u64,
             index_throughput: self.index_throughput.get(),
         }))
