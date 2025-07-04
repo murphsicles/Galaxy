@@ -1,28 +1,31 @@
-use tonic::{transport::{Server, Channel}, Request, Response, Status, Streaming};
-use mining::mining_server::{Mining, MiningServer};
-use mining::{
-    GenerateBlockTemplateRequest, GenerateBlockTemplateResponse, SubmitMinedBlockRequest,
-    SubmitMinedBlockResponse, StreamMiningWorkRequest, StreamMiningWorkResponse,
-    GetMetricsRequest, GetMetricsResponse
-};
-use block::block_client::BlockClient;
-use block::AssembleBlockRequest;
-use auth::auth_client::AuthClient;
-use auth::{AuthenticateRequest, AuthorizeRequest};
 use alert::alert_client::AlertClient;
 use alert::SendAlertRequest;
+use async_stream::try_stream;
+use auth::auth_client::AuthClient;
+use auth::{AuthenticateRequest, AuthorizeRequest};
+use block::block_client::BlockClient;
+use block::AssembleBlockRequest;
+use governor::{Quota, RateLimiter};
+use mining::mining_server::{Mining, MiningServer};
+use mining::{
+    GenerateBlockTemplateRequest, GenerateBlockTemplateResponse, GetMetricsRequest,
+    GetMetricsResponse, StreamMiningWorkRequest, StreamMiningWorkResponse, SubmitMinedBlockRequest,
+    SubmitMinedBlockResponse,
+};
+use prometheus::{Counter, Gauge, Registry};
+use shared::ShardManager;
+use std::num::NonZeroU32;
+use std::sync::Arc;
 use sv::block::Block;
 use sv::util::{deserialize, serialize};
-use prometheus::{Counter, Gauge, Registry};
-use governor::{Quota, RateLimiter};
-use std::num::NonZeroU32;
-use tracing::{info, warn};
-use shared::ShardManager;
-use toml;
-use std::sync::Arc;
 use tokio::sync::Mutex;
-use async_stream::try_stream;
 use tokio_stream::Stream;
+use toml;
+use tonic::{
+    transport::{Channel, Server},
+    Request, Response, Status, Streaming,
+};
+use tracing::{info, warn};
 
 tonic::include_proto!("mining");
 tonic::include_proto!("block");
@@ -39,7 +42,8 @@ struct MiningServiceImpl {
     requests_total: Counter,
     latency_ms: Gauge,
     alert_count: Counter,
-    rate_limiter: Arc<RateLimiter<String, governor::state::direct::NotKeyed, governor::clock::DefaultClock>>,
+    rate_limiter:
+        Arc<RateLimiter<String, governor::state::direct::NotKeyed, governor::clock::DefaultClock>>,
     shard_manager: Arc<ShardManager>,
 }
 
@@ -47,9 +51,7 @@ impl MiningServiceImpl {
     async fn new() -> Self {
         let config_str = include_str!("../../tests/config.toml");
         let config: toml::Value = toml::from_str(config_str).expect("Failed to parse config");
-        let shard_id = config["sharding"]["shard_id"]
-            .as_integer()
-            .unwrap_or(0) as u32;
+        let shard_id = config["sharding"]["shard_id"].as_integer().unwrap_or(0) as u32;
 
         let block_client = BlockClient::connect("http://[::1]:50054")
             .await
@@ -61,18 +63,16 @@ impl MiningServiceImpl {
             .await
             .expect("Failed to connect to alert_service");
         let registry = Arc::new(Registry::new());
-        let requests_total = Counter::new("mining_requests_total", "Total mining requests")
-            .unwrap();
-        let latency_ms = Gauge::new("mining_latency_ms", "Average mining request latency")
-            .unwrap();
-        let alert_count = Counter::new("mining_alert_count", "Total alerts sent")
-            .unwrap();
+        let requests_total =
+            Counter::new("mining_requests_total", "Total mining requests").unwrap();
+        let latency_ms = Gauge::new("mining_latency_ms", "Average mining request latency").unwrap();
+        let alert_count = Counter::new("mining_alert_count", "Total alerts sent").unwrap();
         registry.register(Box::new(requests_total.clone())).unwrap();
         registry.register(Box::new(latency_ms.clone())).unwrap();
         registry.register(Box::new(alert_count.clone())).unwrap();
-        let rate_limiter = Arc::new(RateLimiter::direct(
-            Quota::per_second(NonZeroU32::new(1000).unwrap()),
-        ));
+        let rate_limiter = Arc::new(RateLimiter::direct(Quota::per_second(
+            NonZeroU32::new(1000).unwrap(),
+        )));
         let shard_manager = Arc::new(ShardManager::new());
 
         MiningServiceImpl {
@@ -122,7 +122,12 @@ impl MiningServiceImpl {
         Ok(())
     }
 
-    async fn send_alert(&self, event_type: &str, message: &str, severity: u32) -> Result<(), Status> {
+    async fn send_alert(
+        &self,
+        event_type: &str,
+        message: &str,
+        severity: u32,
+    ) -> Result<(), Status> {
         let alert_request = SendAlertRequest {
             event_type: event_type.to_string(),
             message: message.to_string(),
@@ -206,11 +211,17 @@ impl Mining for MiningServiceImpl {
         }
 
         if block_response.block_hex.len() > 34_359_738_368 {
-            warn!("Block size exceeds 32GB: {}", block_response.block_hex.len());
+            warn!(
+                "Block size exceeds 32GB: {}",
+                block_response.block_hex.len()
+            );
             let _ = self
                 .send_alert(
                     "generate_block_template_size_exceeded",
-                    &format!("Block size exceeds 32GB: {}", block_response.block_hex.len()),
+                    &format!(
+                        "Block size exceeds 32GB: {}",
+                        block_response.block_hex.len()
+                    ),
                     3,
                 )
                 .await;
@@ -250,30 +261,28 @@ impl Mining for MiningServiceImpl {
         self.requests_total.inc();
         let start = std::time::Instant::now();
         let req = request.into_inner();
-        let block_bytes = hex::decode(&req.block_hex)
-            .map_err(|e| {
-                warn!("Invalid block hex: {}", e);
-                let _ = self
-                    .send_alert(
-                        "submit_mined_block_invalid_hex",
-                        &format!("Invalid block hex: {}", e),
-                        2,
-                    )
-                    .await;
-                Status::invalid_argument(format!("Invalid block hex: {}", e))
-            })?;
-        let block: Block = deserialize(&block_bytes)
-            .map_err(|e| {
-                warn!("Invalid block: {}", e);
-                let _ = self
-                    .send_alert(
-                        "submit_mined_block_invalid_deserialization",
-                        &format!("Invalid block: {}", e),
-                        2,
-                    )
-                    .await;
-                Status::invalid_argument(format!("Invalid block: {}", e))
-            })?;
+        let block_bytes = hex::decode(&req.block_hex).map_err(|e| {
+            warn!("Invalid block hex: {}", e);
+            let _ = self
+                .send_alert(
+                    "submit_mined_block_invalid_hex",
+                    &format!("Invalid block hex: {}", e),
+                    2,
+                )
+                .await;
+            Status::invalid_argument(format!("Invalid block hex: {}", e))
+        })?;
+        let block: Block = deserialize(&block_bytes).map_err(|e| {
+            warn!("Invalid block: {}", e);
+            let _ = self
+                .send_alert(
+                    "submit_mined_block_invalid_deserialization",
+                    &format!("Invalid block: {}", e),
+                    2,
+                )
+                .await;
+            Status::invalid_argument(format!("Invalid block: {}", e))
+        })?;
 
         if block.serialized_size() > 34_359_738_368 {
             warn!("Block size exceeds 32GB: {}", block.serialized_size());
@@ -332,7 +341,8 @@ impl Mining for MiningServiceImpl {
         }))
     }
 
-    type StreamMiningWorkStream = Pin<Box<dyn Stream<Item = Result<StreamMiningWorkResponse, Status>> + Send>>;
+    type StreamMiningWorkStream =
+        Pin<Box<dyn Stream<Item = Result<StreamMiningWorkResponse, Status>> + Send>>;
 
     async fn stream_mining_work(
         &self,
@@ -456,7 +466,7 @@ impl Mining for MiningServiceImpl {
             requests_total: self.requests_total.get() as u64,
             avg_latency_ms: self.latency_ms.get(),
             errors_total: 0, // Placeholder
-            cache_hits: 0, // Not applicable
+            cache_hits: 0,   // Not applicable
             alert_count: self.alert_count.get() as u64,
             index_throughput: 0.0, // Not applicable
         }))
