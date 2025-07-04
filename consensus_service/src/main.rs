@@ -1,26 +1,29 @@
-use tonic::{transport::{Server, Channel}, Request, Response, Status};
-use consensus::consensus_server::{Consensus, ConsensusServer};
-use consensus::{
-    ValidateBlockConsensusRequest, ValidateBlockConsensusResponse,
-    ValidateTransactionConsensusRequest, ValidateTransactionConsensusResponse,
-    BatchValidateTransactionConsensusRequest, BatchValidateTransactionConsensusResponse,
-    GetMetricsRequest, GetMetricsResponse
-};
-use auth::auth_client::AuthClient;
-use auth::{AuthenticateRequest, AuthorizeRequest};
 use alert::alert_client::AlertClient;
 use alert::SendAlertRequest;
+use auth::auth_client::AuthClient;
+use auth::{AuthenticateRequest, AuthorizeRequest};
+use consensus::consensus_server::{Consensus, ConsensusServer};
+use consensus::{
+    BatchValidateTransactionConsensusRequest, BatchValidateTransactionConsensusResponse,
+    GetMetricsRequest, GetMetricsResponse, ValidateBlockConsensusRequest,
+    ValidateBlockConsensusResponse, ValidateTransactionConsensusRequest,
+    ValidateTransactionConsensusResponse,
+};
+use governor::{Quota, RateLimiter};
+use prometheus::{Counter, Gauge, Registry};
+use shared::ShardManager;
+use std::num::NonZeroU32;
+use std::sync::Arc;
 use sv::block::Block;
 use sv::transaction::Transaction;
 use sv::util::{deserialize, serialize};
-use prometheus::{Counter, Gauge, Registry};
-use governor::{Quota, RateLimiter};
-use std::num::NonZeroU32;
-use tracing::{info, warn};
-use shared::ShardManager;
-use toml;
-use std::sync::Arc;
 use tokio::sync::Mutex;
+use toml;
+use tonic::{
+    transport::{Channel, Server},
+    Request, Response, Status,
+};
+use tracing::{info, warn};
 
 tonic::include_proto!("consensus");
 tonic::include_proto!("auth");
@@ -35,7 +38,8 @@ struct ConsensusServiceImpl {
     requests_total: Counter,
     latency_ms: Gauge,
     alert_count: Counter,
-    rate_limiter: Arc<RateLimiter<String, governor::state::direct::NotKeyed, governor::clock::DefaultClock>>,
+    rate_limiter:
+        Arc<RateLimiter<String, governor::state::direct::NotKeyed, governor::clock::DefaultClock>>,
     shard_manager: Arc<ShardManager>,
 }
 
@@ -43,9 +47,7 @@ impl ConsensusServiceImpl {
     async fn new() -> Self {
         let config_str = include_str!("../../tests/config.toml");
         let config: toml::Value = toml::from_str(config_str).expect("Failed to parse config");
-        let shard_id = config["sharding"]["shard_id"]
-            .as_integer()
-            .unwrap_or(0) as u32;
+        let shard_id = config["sharding"]["shard_id"].as_integer().unwrap_or(0) as u32;
 
         let auth_client = AuthClient::connect("http://[::1]:50060")
             .await
@@ -54,18 +56,17 @@ impl ConsensusServiceImpl {
             .await
             .expect("Failed to connect to alert_service");
         let registry = Arc::new(Registry::new());
-        let requests_total = Counter::new("consensus_requests_total", "Total consensus requests")
-            .unwrap();
-        let latency_ms = Gauge::new("consensus_latency_ms", "Average consensus request latency")
-            .unwrap();
-        let alert_count = Counter::new("consensus_alert_count", "Total alerts sent")
-            .unwrap();
+        let requests_total =
+            Counter::new("consensus_requests_total", "Total consensus requests").unwrap();
+        let latency_ms =
+            Gauge::new("consensus_latency_ms", "Average consensus request latency").unwrap();
+        let alert_count = Counter::new("consensus_alert_count", "Total alerts sent").unwrap();
         registry.register(Box::new(requests_total.clone())).unwrap();
         registry.register(Box::new(latency_ms.clone())).unwrap();
         registry.register(Box::new(alert_count.clone())).unwrap();
-        let rate_limiter = Arc::new(RateLimiter::direct(
-            Quota::per_second(NonZeroU32::new(1000).unwrap()),
-        ));
+        let rate_limiter = Arc::new(RateLimiter::direct(Quota::per_second(
+            NonZeroU32::new(1000).unwrap(),
+        )));
         let shard_manager = Arc::new(ShardManager::new());
 
         ConsensusServiceImpl {
@@ -114,7 +115,12 @@ impl ConsensusServiceImpl {
         Ok(())
     }
 
-    async fn send_alert(&self, event_type: &str, message: &str, severity: u32) -> Result<(), Status> {
+    async fn send_alert(
+        &self,
+        event_type: &str,
+        message: &str,
+        severity: u32,
+    ) -> Result<(), Status> {
         let alert_request = SendAlertRequest {
             event_type: event_type.to_string(),
             message: message.to_string(),
@@ -139,14 +145,20 @@ impl ConsensusServiceImpl {
 
     async fn validate_block_rules(&self, block: &Block) -> Result<(), String> {
         if block.serialized_size() > 34_359_738_368 {
-            return Err(format!("Block size exceeds 32GB: {}", block.serialized_size()));
+            return Err(format!(
+                "Block size exceeds 32GB: {}",
+                block.serialized_size()
+            ));
         }
         Ok(())
     }
 
     async fn validate_transaction_rules(&self, tx: &Transaction) -> Result<(), String> {
         if tx.serialized_size() > 34_359_738_368 {
-            return Err(format!("Transaction size exceeds 32GB: {}", tx.serialized_size()));
+            return Err(format!(
+                "Transaction size exceeds 32GB: {}",
+                tx.serialized_size()
+            ));
         }
         for output in &tx.output {
             if output.script.is_op_return() && output.script.serialized_size() > 4_294_967_296 {
@@ -183,45 +195,40 @@ impl Consensus for ConsensusServiceImpl {
         self.requests_total.inc();
         let start = std::time::Instant::now();
         let req = request.into_inner();
-        let block_bytes = hex::decode(&req.block_hex)
-            .map_err(|e| {
-                warn!("Invalid block hex: {}", e);
-                let _ = self
-                    .send_alert(
-                        "validate_block_invalid_hex",
-                        &format!("Invalid block hex: {}", e),
-                        2,
-                    )
-                    .await;
-                Status::invalid_argument(format!("Invalid block hex: {}", e))
-            })?;
-        let block: Block = deserialize(&block_bytes)
-            .map_err(|e| {
-                warn!("Invalid block: {}", e);
-                let _ = self
-                    .send_alert(
-                        "validate_block_invalid_deserialization",
-                        &format!("Invalid block: {}", e),
-                        2,
-                    )
-                    .await;
-                Status::invalid_argument(format!("Invalid block: {}", e))
-            })?;
+        let block_bytes = hex::decode(&req.block_hex).map_err(|e| {
+            warn!("Invalid block hex: {}", e);
+            let _ = self
+                .send_alert(
+                    "validate_block_invalid_hex",
+                    &format!("Invalid block hex: {}", e),
+                    2,
+                )
+                .await;
+            Status::invalid_argument(format!("Invalid block hex: {}", e))
+        })?;
+        let block: Block = deserialize(&block_bytes).map_err(|e| {
+            warn!("Invalid block: {}", e);
+            let _ = self
+                .send_alert(
+                    "validate_block_invalid_deserialization",
+                    &format!("Invalid block: {}", e),
+                    2,
+                )
+                .await;
+            Status::invalid_argument(format!("Invalid block: {}", e))
+        })?;
 
-        let result = self
-            .validate_block_rules(&block)
-            .await
-            .map_err(|e| {
-                warn!("Block validation failed: {}", e);
-                let _ = self
-                    .send_alert(
-                        "validate_block_failed",
-                        &format!("Block validation failed: {}", e),
-                        2,
-                    )
-                    .await;
-                Status::invalid_argument(e)
-            })?;
+        let result = self.validate_block_rules(&block).await.map_err(|e| {
+            warn!("Block validation failed: {}", e);
+            let _ = self
+                .send_alert(
+                    "validate_block_failed",
+                    &format!("Block validation failed: {}", e),
+                    2,
+                )
+                .await;
+            Status::invalid_argument(e)
+        })?;
 
         self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
         Ok(Response::new(ValidateBlockConsensusResponse {
@@ -245,51 +252,47 @@ impl Consensus for ConsensusServiceImpl {
                     .map_err(|e| Status::invalid_argument("Invalid token format"))?,
             )
             .await?;
-        self.authorize(&user_id, "ValidateTransactionConsensus").await?;
+        self.authorize(&user_id, "ValidateTransactionConsensus")
+            .await?;
         self.rate_limiter.until_ready().await;
 
         self.requests_total.inc();
         let start = std::time::Instant::now();
         let req = request.into_inner();
-        let tx_bytes = hex::decode(&req.tx_hex)
-            .map_err(|e| {
-                warn!("Invalid transaction hex: {}", e);
-                let _ = self
-                    .send_alert(
-                        "validate_tx_invalid_hex",
-                        &format!("Invalid transaction hex: {}", e),
-                        2,
-                    )
-                    .await;
-                Status::invalid_argument(format!("Invalid transaction hex: {}", e))
-            })?;
-        let tx: Transaction = deserialize(&tx_bytes)
-            .map_err(|e| {
-                warn!("Invalid transaction: {}", e);
-                let _ = self
-                    .send_alert(
-                        "validate_tx_invalid_deserialization",
-                        &format!("Invalid transaction: {}", e),
-                        2,
-                    )
-                    .await;
-                Status::invalid_argument(format!("Invalid transaction: {}", e))
-            })?;
+        let tx_bytes = hex::decode(&req.tx_hex).map_err(|e| {
+            warn!("Invalid transaction hex: {}", e);
+            let _ = self
+                .send_alert(
+                    "validate_tx_invalid_hex",
+                    &format!("Invalid transaction hex: {}", e),
+                    2,
+                )
+                .await;
+            Status::invalid_argument(format!("Invalid transaction hex: {}", e))
+        })?;
+        let tx: Transaction = deserialize(&tx_bytes).map_err(|e| {
+            warn!("Invalid transaction: {}", e);
+            let _ = self
+                .send_alert(
+                    "validate_tx_invalid_deserialization",
+                    &format!("Invalid transaction: {}", e),
+                    2,
+                )
+                .await;
+            Status::invalid_argument(format!("Invalid transaction: {}", e))
+        })?;
 
-        let result = self
-            .validate_transaction_rules(&tx)
-            .await
-            .map_err(|e| {
-                warn!("Transaction validation failed: {}", e);
-                let _ = self
-                    .send_alert(
-                        "validate_tx_failed",
-                        &format!("Transaction validation failed: {}", e),
-                        2,
-                    )
-                    .await;
-                Status::invalid_argument(e)
-            })?;
+        let result = self.validate_transaction_rules(&tx).await.map_err(|e| {
+            warn!("Transaction validation failed: {}", e);
+            let _ = self
+                .send_alert(
+                    "validate_tx_failed",
+                    &format!("Transaction validation failed: {}", e),
+                    2,
+                )
+                .await;
+            Status::invalid_argument(e)
+        })?;
 
         self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
         Ok(Response::new(ValidateTransactionConsensusResponse {
@@ -313,7 +316,8 @@ impl Consensus for ConsensusServiceImpl {
                     .map_err(|e| Status::invalid_argument("Invalid token format"))?,
             )
             .await?;
-        self.authorize(&user_id, "BatchValidateTransactionConsensus").await?;
+        self.authorize(&user_id, "BatchValidateTransactionConsensus")
+            .await?;
         self.rate_limiter.until_ready().await;
 
         self.requests_total.inc();
@@ -322,45 +326,40 @@ impl Consensus for ConsensusServiceImpl {
         let mut results = vec![];
 
         for tx_hex in req.tx_hexes {
-            let tx_bytes = hex::decode(&tx_hex)
-                .map_err(|e| {
-                    warn!("Invalid transaction hex: {}", e);
-                    let _ = self
-                        .send_alert(
-                            "batch_validate_tx_invalid_hex",
-                            &format!("Invalid transaction hex: {}", e),
-                            2,
-                        )
-                        .await;
-                    Status::invalid_argument(format!("Invalid transaction hex: {}", e))
-                })?;
-            let tx: Transaction = deserialize(&tx_bytes)
-                .map_err(|e| {
-                    warn!("Invalid transaction: {}", e);
-                    let _ = self
-                        .send_alert(
-                            "batch_validate_tx_invalid_deserialization",
-                            &format!("Invalid transaction: {}", e),
-                            2,
-                        )
-                        .await;
-                    Status::invalid_argument(format!("Invalid transaction: {}", e))
-                })?;
+            let tx_bytes = hex::decode(&tx_hex).map_err(|e| {
+                warn!("Invalid transaction hex: {}", e);
+                let _ = self
+                    .send_alert(
+                        "batch_validate_tx_invalid_hex",
+                        &format!("Invalid transaction hex: {}", e),
+                        2,
+                    )
+                    .await;
+                Status::invalid_argument(format!("Invalid transaction hex: {}", e))
+            })?;
+            let tx: Transaction = deserialize(&tx_bytes).map_err(|e| {
+                warn!("Invalid transaction: {}", e);
+                let _ = self
+                    .send_alert(
+                        "batch_validate_tx_invalid_deserialization",
+                        &format!("Invalid transaction: {}", e),
+                        2,
+                    )
+                    .await;
+                Status::invalid_argument(format!("Invalid transaction: {}", e))
+            })?;
 
-            let result = self
-                .validate_transaction_rules(&tx)
-                .await
-                .map_err(|e| {
-                    warn!("Transaction validation failed: {}", e);
-                    let _ = self
-                        .send_alert(
-                            "batch_validate_tx_failed",
-                            &format!("Transaction validation failed: {}", e),
-                            2,
-                        )
-                        .await;
-                    Status::invalid_argument(e)
-                })?;
+            let result = self.validate_transaction_rules(&tx).await.map_err(|e| {
+                warn!("Transaction validation failed: {}", e);
+                let _ = self
+                    .send_alert(
+                        "batch_validate_tx_failed",
+                        &format!("Transaction validation failed: {}", e),
+                        2,
+                    )
+                    .await;
+                Status::invalid_argument(e)
+            })?;
 
             results.push(ValidateTransactionConsensusResponse {
                 success: result.is_ok(),
@@ -369,7 +368,9 @@ impl Consensus for ConsensusServiceImpl {
         }
 
         self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
-        Ok(Response::new(BatchValidateTransactionConsensusResponse { results }))
+        Ok(Response::new(BatchValidateTransactionConsensusResponse {
+            results,
+        }))
     }
 
     async fn get_metrics(
@@ -394,7 +395,7 @@ impl Consensus for ConsensusServiceImpl {
             requests_total: self.requests_total.get() as u64,
             avg_latency_ms: self.latency_ms.get(),
             errors_total: 0, // Placeholder
-            cache_hits: 0, // Not applicable
+            cache_hits: 0,   // Not applicable
             alert_count: self.alert_count.get() as u64,
             index_throughput: 0.0, // Not applicable
         }))
