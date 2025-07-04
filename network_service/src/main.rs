@@ -1,26 +1,29 @@
-use tonic::{transport::{Server, Channel}, Request, Response, Status, Streaming};
-use network::network_server::{Network, NetworkServer};
-use network::{
-    PingRequest, PingResponse, DiscoverPeersRequest, DiscoverPeersResponse,
-    BroadcastTransactionRequest, BroadcastTransactionResponse, BroadcastBlockRequest,
-    BroadcastBlockResponse, GetMetricsRequest, GetMetricsResponse
-};
-use transaction::transaction_client::TransactionClient;
-use block::block_client::BlockClient;
-use auth::auth_client::AuthClient;
-use auth::{AuthenticateRequest, AuthorizeRequest};
 use alert::alert_client::AlertClient;
 use alert::SendAlertRequest;
+use auth::auth_client::AuthClient;
+use auth::{AuthenticateRequest, AuthorizeRequest};
+use block::block_client::BlockClient;
+use governor::{Quota, RateLimiter};
+use network::network_server::{Network, NetworkServer};
+use network::{
+    BroadcastBlockRequest, BroadcastBlockResponse, BroadcastTransactionRequest,
+    BroadcastTransactionResponse, DiscoverPeersRequest, DiscoverPeersResponse, GetMetricsRequest,
+    GetMetricsResponse, PingRequest, PingResponse,
+};
+use prometheus::{Counter, Gauge, Registry};
+use shared::ShardManager;
+use std::num::NonZeroU32;
+use std::sync::Arc;
 use sv::transaction::Transaction;
 use sv::util::{deserialize, serialize};
-use prometheus::{Counter, Gauge, Registry};
-use governor::{Quota, RateLimiter};
-use std::num::NonZeroU32;
-use tracing::{info, warn};
-use shared::ShardManager;
-use toml;
-use std::sync::Arc;
 use tokio::sync::Mutex;
+use toml;
+use tonic::{
+    transport::{Channel, Server},
+    Request, Response, Status, Streaming,
+};
+use tracing::{info, warn};
+use transaction::transaction_client::TransactionClient;
 
 tonic::include_proto!("network");
 tonic::include_proto!("transaction");
@@ -40,7 +43,8 @@ struct NetworkServiceImpl {
     requests_total: Counter,
     latency_ms: Gauge,
     alert_count: Counter,
-    rate_limiter: Arc<RateLimiter<String, governor::state::direct::NotKeyed, governor::clock::DefaultClock>>,
+    rate_limiter:
+        Arc<RateLimiter<String, governor::state::direct::NotKeyed, governor::clock::DefaultClock>>,
     shard_manager: Arc<ShardManager>,
 }
 
@@ -48,9 +52,7 @@ impl NetworkServiceImpl {
     async fn new() -> Self {
         let config_str = include_str!("../../tests/config.toml");
         let config: toml::Value = toml::from_str(config_str).expect("Failed to parse config");
-        let shard_id = config["sharding"]["shard_id"]
-            .as_integer()
-            .unwrap_or(0) as u32;
+        let shard_id = config["sharding"]["shard_id"].as_integer().unwrap_or(0) as u32;
 
         let transaction_client = TransactionClient::connect("http://[::1]:50052")
             .await
@@ -73,18 +75,16 @@ impl NetworkServiceImpl {
                 .collect(),
         ));
         let registry = Arc::new(Registry::new());
-        let requests_total = Counter::new("network_requests_total", "Total network requests")
-            .unwrap();
-        let latency_ms = Gauge::new("network_latency_ms", "Average request latency (ms)")
-            .unwrap();
-        let alert_count = Counter::new("network_alert_count", "Total alerts sent")
-            .unwrap();
+        let requests_total =
+            Counter::new("network_requests_total", "Total network requests").unwrap();
+        let latency_ms = Gauge::new("network_latency_ms", "Average request latency (ms)").unwrap();
+        let alert_count = Counter::new("network_alert_count", "Total alerts sent").unwrap();
         registry.register(Box::new(requests_total.clone())).unwrap();
         registry.register(Box::new(latency_ms.clone())).unwrap();
         registry.register(Box::new(alert_count.clone())).unwrap();
-        let rate_limiter = Arc::new(RateLimiter::direct(
-            Quota::per_second(NonZeroU32::new(1000).unwrap()),
-        ));
+        let rate_limiter = Arc::new(RateLimiter::direct(Quota::per_second(
+            NonZeroU32::new(1000).unwrap(),
+        )));
         let shard_manager = Arc::new(ShardManager::new());
 
         NetworkServiceImpl {
@@ -136,7 +136,12 @@ impl NetworkServiceImpl {
         Ok(())
     }
 
-    async fn send_alert(&self, event_type: &str, message: &str, severity: u32) -> Result<(), Status> {
+    async fn send_alert(
+        &self,
+        event_type: &str,
+        message: &str,
+        severity: u32,
+    ) -> Result<(), Status> {
         let alert_request = SendAlertRequest {
             event_type: event_type.to_string(),
             message: message.to_string(),
@@ -162,10 +167,7 @@ impl NetworkServiceImpl {
 
 #[tonic::async_trait]
 impl Network for NetworkServiceImpl {
-    async fn ping(
-        &self,
-        request: Request<PingRequest>,
-    ) -> Result<Response<PingResponse>, Status> {
+    async fn ping(&self, request: Request<PingRequest>) -> Result<Response<PingResponse>, Status> {
         let token = request
             .metadata()
             .get("authorization")
@@ -243,30 +245,28 @@ impl Network for NetworkServiceImpl {
         self.requests_total.inc();
         let start = std::time::Instant::now();
         let req = request.into_inner();
-        let tx_bytes = hex::decode(&req.tx_hex)
-            .map_err(|e| {
-                warn!("Invalid transaction hex: {}", e);
-                let _ = self
-                    .send_alert(
-                        "broadcast_invalid_tx",
-                        &format!("Invalid transaction hex: {}", e),
-                        2,
-                    )
-                    .await;
-                Status::invalid_argument(format!("Invalid transaction hex: {}", e))
-            })?;
-        let tx: Transaction = deserialize(&tx_bytes)
-            .map_err(|e| {
-                warn!("Invalid transaction: {}", e);
-                let _ = self
-                    .send_alert(
-                        "broadcast_invalid_tx_deserialization",
-                        &format!("Invalid transaction: {}", e),
-                        2,
-                    )
-                    .await;
-                Status::invalid_argument(format!("Invalid transaction: {}", e))
-            })?;
+        let tx_bytes = hex::decode(&req.tx_hex).map_err(|e| {
+            warn!("Invalid transaction hex: {}", e);
+            let _ = self
+                .send_alert(
+                    "broadcast_invalid_tx",
+                    &format!("Invalid transaction hex: {}", e),
+                    2,
+                )
+                .await;
+            Status::invalid_argument(format!("Invalid transaction hex: {}", e))
+        })?;
+        let tx: Transaction = deserialize(&tx_bytes).map_err(|e| {
+            warn!("Invalid transaction: {}", e);
+            let _ = self
+                .send_alert(
+                    "broadcast_invalid_tx_deserialization",
+                    &format!("Invalid transaction: {}", e),
+                    2,
+                )
+                .await;
+            Status::invalid_argument(format!("Invalid transaction: {}", e))
+        })?;
 
         let tx_request = transaction::ProcessTransactionRequest {
             tx_hex: req.tx_hex.clone(),
@@ -328,18 +328,17 @@ impl Network for NetworkServiceImpl {
         self.requests_total.inc();
         let start = std::time::Instant::now();
         let req = request.into_inner();
-        let block_bytes = hex::decode(&req.block_hex)
-            .map_err(|e| {
-                warn!("Invalid block hex: {}", e);
-                let _ = self
-                    .send_alert(
-                        "broadcast_invalid_block",
-                        &format!("Invalid block hex: {}", e),
-                        2,
-                    )
-                    .await;
-                Status::invalid_argument(format!("Invalid block hex: {}", e))
-            })?;
+        let block_bytes = hex::decode(&req.block_hex).map_err(|e| {
+            warn!("Invalid block hex: {}", e);
+            let _ = self
+                .send_alert(
+                    "broadcast_invalid_block",
+                    &format!("Invalid block hex: {}", e),
+                    2,
+                )
+                .await;
+            Status::invalid_argument(format!("Invalid block hex: {}", e))
+        })?;
 
         let block_request = block::ValidateBlockRequest {
             block_hex: req.block_hex.clone(),
@@ -402,7 +401,7 @@ impl Network for NetworkServiceImpl {
             requests_total: self.requests_total.get() as u64,
             avg_latency_ms: self.latency_ms.get(),
             errors_total: 0, // Placeholder
-            cache_hits: 0, // Not applicable
+            cache_hits: 0,   // Not applicable
             alert_count: self.alert_count.get() as u64,
             index_throughput: 0.0, // Not applicable
         }))
