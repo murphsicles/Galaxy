@@ -1,18 +1,20 @@
-use tonic::{transport::Server, Request, Response, Status, Streaming};
 use alert::alert_server::{Alert, AlertServer};
-use alert::{SendAlertRequest, SendAlertResponse, SubscribeToAlertsRequest, SubscribeToAlertsResponse};
+use alert::{
+    SendAlertRequest, SendAlertResponse, SubscribeToAlertsRequest, SubscribeToAlertsResponse,
+};
+use async_stream::try_stream;
 use auth::auth_client::AuthClient;
 use auth::{AuthenticateRequest, AuthorizeRequest};
-use prometheus::{Counter, Gauge, Registry};
 use governor::{Quota, RateLimiter};
-use std::num::NonZeroU32;
-use tracing::{info, warn};
+use prometheus::{Counter, Gauge, Registry};
 use shared::ShardManager;
-use toml;
+use std::num::NonZeroU32;
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use async_stream::try_stream;
 use tokio_stream::Stream;
+use toml;
+use tonic::{transport::Server, Request, Response, Status, Streaming};
+use tracing::{info, warn};
 
 tonic::include_proto!("alert");
 tonic::include_proto!("auth");
@@ -25,7 +27,8 @@ struct AlertServiceImpl {
     requests_total: Counter,
     latency_ms: Gauge,
     alert_count: Counter,
-    rate_limiter: Arc<RateLimiter<String, governor::state::direct::NotKeyed, governor::clock::DefaultClock>>,
+    rate_limiter:
+        Arc<RateLimiter<String, governor::state::direct::NotKeyed, governor::clock::DefaultClock>>,
     shard_manager: Arc<ShardManager>,
 }
 
@@ -33,26 +36,21 @@ impl AlertServiceImpl {
     async fn new() -> Self {
         let config_str = include_str!("../../tests/config.toml");
         let config: toml::Value = toml::from_str(config_str).expect("Failed to parse config");
-        let shard_id = config["sharding"]["shard_id"]
-            .as_integer()
-            .unwrap_or(0) as u32;
+        let shard_id = config["sharding"]["shard_id"].as_integer().unwrap_or(0) as u32;
 
         let auth_client = AuthClient::connect("http://[::1]:50060")
             .await
             .expect("Failed to connect to auth_service");
         let registry = Arc::new(Registry::new());
-        let requests_total = Counter::new("alert_requests_total", "Total alert requests")
-            .unwrap();
-        let latency_ms = Gauge::new("alert_latency_ms", "Average alert request latency")
-            .unwrap();
-        let alert_count = Counter::new("alert_alert_count", "Total alerts sent")
-            .unwrap();
+        let requests_total = Counter::new("alert_requests_total", "Total alert requests").unwrap();
+        let latency_ms = Gauge::new("alert_latency_ms", "Average alert request latency").unwrap();
+        let alert_count = Counter::new("alert_alert_count", "Total alerts sent").unwrap();
         registry.register(Box::new(requests_total.clone())).unwrap();
         registry.register(Box::new(latency_ms.clone())).unwrap();
         registry.register(Box::new(alert_count.clone())).unwrap();
-        let rate_limiter = Arc::new(RateLimiter::direct(
-            Quota::per_second(NonZeroU32::new(1000).unwrap()),
-        ));
+        let rate_limiter = Arc::new(RateLimiter::direct(Quota::per_second(
+            NonZeroU32::new(1000).unwrap(),
+        )));
         let shard_manager = Arc::new(ShardManager::new());
 
         AlertServiceImpl {
@@ -138,7 +136,8 @@ impl Alert for AlertServiceImpl {
         }))
     }
 
-    type SubscribeToAlertsStream = Pin<Box<dyn Stream<Item = Result<SubscribeToAlertsResponse, Status>> + Send>>;
+    type SubscribeToAlertsStream =
+        Pin<Box<dyn Stream<Item = Result<SubscribeToAlertsResponse, Status>> + Send>>;
 
     async fn subscribe_to_alerts(
         &self,
@@ -211,7 +210,7 @@ impl Alert for AlertServiceImpl {
             requests_total: self.requests_total.get() as u64,
             avg_latency_ms: self.latency_ms.get(),
             errors_total: 0, // Placeholder
-            cache_hits: 0, // Not applicable
+            cache_hits: 0,   // Not applicable
             alert_count: self.alert_count.get() as u64,
             index_throughput: 0.0, // Not applicable
         }))
