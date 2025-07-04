@@ -1,5 +1,5 @@
-use toml;
 use std::collections::HashMap;
+use toml;
 
 #[derive(Debug)]
 pub struct ShardManager {
