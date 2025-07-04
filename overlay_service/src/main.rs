@@ -1,30 +1,32 @@
-use tonic::{transport::{Server, Channel}, Request, Response, Status, Streaming};
-use overlay::overlay_server::{Overlay, OverlayServer};
-use overlay::{
-    CreateOverlayRequest, CreateOverlayResponse, JoinOverlayRequest, JoinOverlayResponse,
-    LeaveOverlayRequest, LeaveOverlayResponse, StreamOverlayDataRequest,
-    StreamOverlayDataResponse, ValidateOverlayConsensusRequest, ValidateOverlayConsensusResponse,
-    AssembleOverlayBlockRequest, AssembleOverlayBlockResponse, GetMetricsRequest,
-    GetMetricsResponse
-};
-use auth::auth_client::AuthClient;
-use auth::{AuthenticateRequest, AuthorizeRequest};
 use alert::alert_client::AlertClient;
 use alert::SendAlertRequest;
+use async_stream::try_stream;
+use auth::auth_client::AuthClient;
+use auth::{AuthenticateRequest, AuthorizeRequest};
+use governor::{Quota, RateLimiter};
+use overlay::overlay_server::{Overlay, OverlayServer};
+use overlay::{
+    AssembleOverlayBlockRequest, AssembleOverlayBlockResponse, CreateOverlayRequest,
+    CreateOverlayResponse, GetMetricsRequest, GetMetricsResponse, JoinOverlayRequest,
+    JoinOverlayResponse, LeaveOverlayRequest, LeaveOverlayResponse, StreamOverlayDataRequest,
+    StreamOverlayDataResponse, ValidateOverlayConsensusRequest, ValidateOverlayConsensusResponse,
+};
+use prometheus::{Counter, Gauge, Registry};
+use shared::ShardManager;
+use sled::Db;
+use std::num::NonZeroU32;
+use std::sync::Arc;
 use sv::block::Block;
 use sv::transaction::Transaction;
 use sv::util::{deserialize, serialize};
-use sled::Db;
-use prometheus::{Counter, Gauge, Registry};
-use governor::{Quota, RateLimiter};
-use std::num::NonZeroU32;
-use tracing::{info, warn};
-use shared::ShardManager;
-use toml;
-use std::sync::Arc;
 use tokio::sync::Mutex;
-use async_stream::try_stream;
 use tokio_stream::Stream;
+use toml;
+use tonic::{
+    transport::{Channel, Server},
+    Request, Response, Status, Streaming,
+};
+use tracing::{info, warn};
 
 tonic::include_proto!("overlay");
 tonic::include_proto!("auth");
@@ -40,7 +42,8 @@ struct OverlayServiceImpl {
     requests_total: Counter,
     latency_ms: Gauge,
     alert_count: Counter,
-    rate_limiter: Arc<RateLimiter<String, governor::state::direct::NotKeyed, governor::clock::DefaultClock>>,
+    rate_limiter:
+        Arc<RateLimiter<String, governor::state::direct::NotKeyed, governor::clock::DefaultClock>>,
     shard_manager: Arc<ShardManager>,
 }
 
@@ -48,9 +51,7 @@ impl OverlayServiceImpl {
     async fn new() -> Self {
         let config_str = include_str!("../../tests/config.toml");
         let config: toml::Value = toml::from_str(config_str).expect("Failed to parse config");
-        let shard_id = config["sharding"]["shard_id"]
-            .as_integer()
-            .unwrap_or(0) as u32;
+        let shard_id = config["sharding"]["shard_id"].as_integer().unwrap_or(0) as u32;
 
         let auth_client = AuthClient::connect("http://[::1]:50060")
             .await
@@ -58,20 +59,21 @@ impl OverlayServiceImpl {
         let alert_client = AlertClient::connect("http://[::1]:50061")
             .await
             .expect("Failed to connect to alert_service");
-        let db = Arc::new(Mutex::new(sled::open("overlay_db").expect("Failed to open sled database")));
+        let db = Arc::new(Mutex::new(
+            sled::open("overlay_db").expect("Failed to open sled database"),
+        ));
         let registry = Arc::new(Registry::new());
-        let requests_total = Counter::new("overlay_requests_total", "Total overlay requests")
-            .unwrap();
-        let latency_ms = Gauge::new("overlay_latency_ms", "Average overlay request latency")
-            .unwrap();
-        let alert_count = Counter::new("overlay_alert_count", "Total alerts sent")
-            .unwrap();
+        let requests_total =
+            Counter::new("overlay_requests_total", "Total overlay requests").unwrap();
+        let latency_ms =
+            Gauge::new("overlay_latency_ms", "Average overlay request latency").unwrap();
+        let alert_count = Counter::new("overlay_alert_count", "Total alerts sent").unwrap();
         registry.register(Box::new(requests_total.clone())).unwrap();
         registry.register(Box::new(latency_ms.clone())).unwrap();
         registry.register(Box::new(alert_count.clone())).unwrap();
-        let rate_limiter = Arc::new(RateLimiter::direct(
-            Quota::per_second(NonZeroU32::new(1000).unwrap()),
-        ));
+        let rate_limiter = Arc::new(RateLimiter::direct(Quota::per_second(
+            NonZeroU32::new(1000).unwrap(),
+        )));
         let shard_manager = Arc::new(ShardManager::new());
 
         OverlayServiceImpl {
@@ -121,7 +123,12 @@ impl OverlayServiceImpl {
         Ok(())
     }
 
-    async fn send_alert(&self, event_type: &str, message: &str, severity: u32) -> Result<(), Status> {
+    async fn send_alert(
+        &self,
+        event_type: &str,
+        message: &str,
+        severity: u32,
+    ) -> Result<(), Status> {
         let alert_request = SendAlertRequest {
             event_type: event_type.to_string(),
             message: message.to_string(),
@@ -146,7 +153,10 @@ impl OverlayServiceImpl {
 
     async fn validate_overlay_consensus(&self, block: &Block) -> Result<(), String> {
         if block.serialized_size() > 34_359_738_368 {
-            return Err(format!("Block size exceeds 32GB: {}", block.serialized_size()));
+            return Err(format!(
+                "Block size exceeds 32GB: {}",
+                block.serialized_size()
+            ));
         }
         for tx in &block.transactions {
             for output in &tx.output {
@@ -231,7 +241,8 @@ impl Overlay for OverlayServiceImpl {
         let db = self.db.lock().await;
         let key = format!("overlay:{}", req.overlay_id);
 
-        if db.get(key.as_bytes())
+        if db
+            .get(key.as_bytes())
             .map_err(|e| {
                 warn!("Failed to access overlay: {}", e);
                 let _ = self
@@ -290,7 +301,8 @@ impl Overlay for OverlayServiceImpl {
         let db = self.db.lock().await;
         let key = format!("overlay:{}", req.overlay_id);
 
-        if db.get(key.as_bytes())
+        if db
+            .get(key.as_bytes())
             .map_err(|e| {
                 warn!("Failed to access overlay: {}", e);
                 let _ = self
@@ -325,7 +337,8 @@ impl Overlay for OverlayServiceImpl {
         }))
     }
 
-    type StreamOverlayDataStream = Pin<Box<dyn Stream<Item = Result<StreamOverlayDataResponse, Status>> + Send>>;
+    type StreamOverlayDataStream =
+        Pin<Box<dyn Stream<Item = Result<StreamOverlayDataResponse, Status>> + Send>>;
 
     async fn stream_overlay_data(
         &self,
@@ -429,45 +442,40 @@ impl Overlay for OverlayServiceImpl {
         self.requests_total.inc();
         let start = std::time::Instant::now();
         let req = request.into_inner();
-        let block_bytes = hex::decode(&req.block_hex)
-            .map_err(|e| {
-                warn!("Invalid block hex: {}", e);
-                let _ = self
-                    .send_alert(
-                        "validate_overlay_invalid_hex",
-                        &format!("Invalid block hex: {}", e),
-                        2,
-                    )
-                    .await;
-                Status::invalid_argument(format!("Invalid block hex: {}", e))
-            })?;
-        let block: Block = deserialize(&block_bytes)
-            .map_err(|e| {
-                warn!("Invalid block: {}", e);
-                let _ = self
-                    .send_alert(
-                        "validate_overlay_invalid_deserialization",
-                        &format!("Invalid block: {}", e),
-                        2,
-                    )
-                    .await;
-                Status::invalid_argument(format!("Invalid block: {}", e))
-            })?;
+        let block_bytes = hex::decode(&req.block_hex).map_err(|e| {
+            warn!("Invalid block hex: {}", e);
+            let _ = self
+                .send_alert(
+                    "validate_overlay_invalid_hex",
+                    &format!("Invalid block hex: {}", e),
+                    2,
+                )
+                .await;
+            Status::invalid_argument(format!("Invalid block hex: {}", e))
+        })?;
+        let block: Block = deserialize(&block_bytes).map_err(|e| {
+            warn!("Invalid block: {}", e);
+            let _ = self
+                .send_alert(
+                    "validate_overlay_invalid_deserialization",
+                    &format!("Invalid block: {}", e),
+                    2,
+                )
+                .await;
+            Status::invalid_argument(format!("Invalid block: {}", e))
+        })?;
 
-        let result = self
-            .validate_overlay_consensus(&block)
-            .await
-            .map_err(|e| {
-                warn!("Overlay validation failed: {}", e);
-                let _ = self
-                    .send_alert(
-                        "validate_overlay_failed",
-                        &format!("Overlay validation failed: {}", e),
-                        2,
-                    )
-                    .await;
-                Status::invalid_argument(e)
-            })?;
+        let result = self.validate_overlay_consensus(&block).await.map_err(|e| {
+            warn!("Overlay validation failed: {}", e);
+            let _ = self
+                .send_alert(
+                    "validate_overlay_failed",
+                    &format!("Overlay validation failed: {}", e),
+                    2,
+                )
+                .await;
+            Status::invalid_argument(e)
+        })?;
 
         self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
         Ok(Response::new(ValidateOverlayConsensusResponse {
@@ -501,30 +509,28 @@ impl Overlay for OverlayServiceImpl {
         let mut total_size = 0;
 
         for tx_hex in req.tx_hexes {
-            let tx_bytes = hex::decode(&tx_hex)
-                .map_err(|e| {
-                    warn!("Invalid transaction hex: {}", e);
-                    let _ = self
-                        .send_alert(
-                            "assemble_overlay_invalid_tx",
-                            &format!("Invalid transaction hex: {}", e),
-                            2,
-                        )
-                        .await;
-                    Status::invalid_argument(format!("Invalid transaction hex: {}", e))
-                })?;
-            let tx: Transaction = deserialize(&tx_bytes)
-                .map_err(|e| {
-                    warn!("Invalid transaction: {}", e);
-                    let _ = self
-                        .send_alert(
-                            "assemble_overlay_invalid_tx_deserialization",
-                            &format!("Invalid transaction: {}", e),
-                            2,
-                        )
-                        .await;
-                    Status::invalid_argument(format!("Invalid transaction: {}", e))
-                })?;
+            let tx_bytes = hex::decode(&tx_hex).map_err(|e| {
+                warn!("Invalid transaction hex: {}", e);
+                let _ = self
+                    .send_alert(
+                        "assemble_overlay_invalid_tx",
+                        &format!("Invalid transaction hex: {}", e),
+                        2,
+                    )
+                    .await;
+                Status::invalid_argument(format!("Invalid transaction hex: {}", e))
+            })?;
+            let tx: Transaction = deserialize(&tx_bytes).map_err(|e| {
+                warn!("Invalid transaction: {}", e);
+                let _ = self
+                    .send_alert(
+                        "assemble_overlay_invalid_tx_deserialization",
+                        &format!("Invalid transaction: {}", e),
+                        2,
+                    )
+                    .await;
+                Status::invalid_argument(format!("Invalid transaction: {}", e))
+            })?;
             total_size += tx.serialized_size();
             if total_size > 34_359_738_368 {
                 warn!("Block size exceeds 32GB: {}", total_size);
@@ -575,7 +581,7 @@ impl Overlay for OverlayServiceImpl {
             requests_total: self.requests_total.get() as u64,
             avg_latency_ms: self.latency_ms.get(),
             errors_total: 0, // Placeholder
-            cache_hits: 0, // Not applicable
+            cache_hits: 0,   // Not applicable
             alert_count: self.alert_count.get() as u64,
             index_throughput: 0.0, // Not applicable
         }))
