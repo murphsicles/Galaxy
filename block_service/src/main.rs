@@ -1,26 +1,29 @@
-use tonic::{transport::{Server, Channel}, Request, Response, Status};
+use alert::alert_client::AlertClient;
+use alert::SendAlertRequest;
+use auth::auth_client::AuthClient;
+use auth::{AuthenticateRequest, AuthorizeRequest};
 use block::block_server::{Block, BlockServer};
 use block::{
-    ValidateBlockRequest, ValidateBlockResponse, AssembleBlockRequest, AssembleBlockResponse,
-    IndexBlockRequest, IndexBlockResponse, GetBlockHeadersRequest, GetBlockHeadersResponse,
-    GetMetricsRequest, GetMetricsResponse
+    AssembleBlockRequest, AssembleBlockResponse, GetBlockHeadersRequest, GetBlockHeadersResponse,
+    GetMetricsRequest, GetMetricsResponse, IndexBlockRequest, IndexBlockResponse,
+    ValidateBlockRequest, ValidateBlockResponse,
 };
 use consensus::consensus_client::ConsensusClient;
 use consensus::ValidateBlockConsensusRequest;
-use auth::auth_client::AuthClient;
-use auth::{AuthenticateRequest, AuthorizeRequest};
-use alert::alert_client::AlertClient;
-use alert::SendAlertRequest;
+use governor::{Quota, RateLimiter};
+use prometheus::{Counter, Gauge, Registry};
+use shared::ShardManager;
+use std::num::NonZeroU32;
+use std::sync::Arc;
 use sv::block::Block;
 use sv::util::{deserialize, serialize};
-use prometheus::{Counter, Gauge, Registry};
-use governor::{Quota, RateLimiter};
-use std::num::NonZeroU32;
-use tracing::{info, warn};
-use shared::ShardManager;
-use toml;
-use std::sync::Arc;
 use tokio::sync::Mutex;
+use toml;
+use tonic::{
+    transport::{Channel, Server},
+    Request, Response, Status,
+};
+use tracing::{info, warn};
 
 tonic::include_proto!("block");
 tonic::include_proto!("consensus");
@@ -38,7 +41,8 @@ struct BlockServiceImpl {
     requests_total: Counter,
     latency_ms: Gauge,
     alert_count: Counter,
-    rate_limiter: Arc<RateLimiter<String, governor::state::direct::NotKeyed, governor::clock::DefaultClock>>,
+    rate_limiter:
+        Arc<RateLimiter<String, governor::state::direct::NotKeyed, governor::clock::DefaultClock>>,
     shard_manager: Arc<ShardManager>,
 }
 
@@ -46,9 +50,7 @@ impl BlockServiceImpl {
     async fn new() -> Self {
         let config_str = include_str!("../../tests/config.toml");
         let config: toml::Value = toml::from_str(config_str).expect("Failed to parse config");
-        let shard_id = config["sharding"]["shard_id"]
-            .as_integer()
-            .unwrap_or(0) as u32;
+        let shard_id = config["sharding"]["shard_id"].as_integer().unwrap_or(0) as u32;
 
         let consensus_client = ConsensusClient::connect("http://[::1]:50055")
             .await
@@ -61,18 +63,15 @@ impl BlockServiceImpl {
             .expect("Failed to connect to alert_service");
         let blocks = Arc::new(Mutex::new(Vec::new()));
         let registry = Arc::new(Registry::new());
-        let requests_total = Counter::new("block_requests_total", "Total block requests")
-            .unwrap();
-        let latency_ms = Gauge::new("block_latency_ms", "Average block request latency")
-            .unwrap();
-        let alert_count = Counter::new("block_alert_count", "Total alerts sent")
-            .unwrap();
+        let requests_total = Counter::new("block_requests_total", "Total block requests").unwrap();
+        let latency_ms = Gauge::new("block_latency_ms", "Average block request latency").unwrap();
+        let alert_count = Counter::new("block_alert_count", "Total alerts sent").unwrap();
         registry.register(Box::new(requests_total.clone())).unwrap();
         registry.register(Box::new(latency_ms.clone())).unwrap();
         registry.register(Box::new(alert_count.clone())).unwrap();
-        let rate_limiter = Arc::new(RateLimiter::direct(
-            Quota::per_second(NonZeroU32::new(1000).unwrap()),
-        ));
+        let rate_limiter = Arc::new(RateLimiter::direct(Quota::per_second(
+            NonZeroU32::new(1000).unwrap(),
+        )));
         let shard_manager = Arc::new(ShardManager::new());
 
         BlockServiceImpl {
@@ -123,7 +122,12 @@ impl BlockServiceImpl {
         Ok(())
     }
 
-    async fn send_alert(&self, event_type: &str, message: &str, severity: u32) -> Result<(), Status> {
+    async fn send_alert(
+        &self,
+        event_type: &str,
+        message: &str,
+        severity: u32,
+    ) -> Result<(), Status> {
         let alert_request = SendAlertRequest {
             event_type: event_type.to_string(),
             message: message.to_string(),
@@ -170,30 +174,28 @@ impl Block for BlockServiceImpl {
         self.requests_total.inc();
         let start = std::time::Instant::now();
         let req = request.into_inner();
-        let block_bytes = hex::decode(&req.block_hex)
-            .map_err(|e| {
-                warn!("Invalid block hex: {}", e);
-                let _ = self
-                    .send_alert(
-                        "validate_invalid_block",
-                        &format!("Invalid block hex: {}", e),
-                        2,
-                    )
-                    .await;
-                Status::invalid_argument(format!("Invalid block hex: {}", e))
-            })?;
-        let block: Block = deserialize(&block_bytes)
-            .map_err(|e| {
-                warn!("Invalid block: {}", e);
-                let _ = self
-                    .send_alert(
-                        "validate_invalid_block_deserialization",
-                        &format!("Invalid block: {}", e),
-                        2,
-                    )
-                    .await;
-                Status::invalid_argument(format!("Invalid block: {}", e))
-            })?;
+        let block_bytes = hex::decode(&req.block_hex).map_err(|e| {
+            warn!("Invalid block hex: {}", e);
+            let _ = self
+                .send_alert(
+                    "validate_invalid_block",
+                    &format!("Invalid block hex: {}", e),
+                    2,
+                )
+                .await;
+            Status::invalid_argument(format!("Invalid block hex: {}", e))
+        })?;
+        let block: Block = deserialize(&block_bytes).map_err(|e| {
+            warn!("Invalid block: {}", e);
+            let _ = self
+                .send_alert(
+                    "validate_invalid_block_deserialization",
+                    &format!("Invalid block: {}", e),
+                    2,
+                )
+                .await;
+            Status::invalid_argument(format!("Invalid block: {}", e))
+        })?;
 
         if block.serialized_size() > 34_359_738_368 {
             warn!("Block size exceeds 32GB: {}", block.serialized_size());
@@ -277,30 +279,28 @@ impl Block for BlockServiceImpl {
         let mut total_size = 0;
 
         for tx_hex in req.tx_hexes {
-            let tx_bytes = hex::decode(&tx_hex)
-                .map_err(|e| {
-                    warn!("Invalid transaction hex: {}", e);
-                    let _ = self
-                        .send_alert(
-                            "assemble_invalid_tx",
-                            &format!("Invalid transaction hex: {}", e),
-                            2,
-                        )
-                        .await;
-                    Status::invalid_argument(format!("Invalid transaction hex: {}", e))
-                })?;
-            let tx: sv::transaction::Transaction = deserialize(&tx_bytes)
-                .map_err(|e| {
-                    warn!("Invalid transaction: {}", e);
-                    let _ = self
-                        .send_alert(
-                            "assemble_invalid_tx_deserialization",
-                            &format!("Invalid transaction: {}", e),
-                            2,
-                        )
-                        .await;
-                    Status::invalid_argument(format!("Invalid transaction: {}", e))
-                })?;
+            let tx_bytes = hex::decode(&tx_hex).map_err(|e| {
+                warn!("Invalid transaction hex: {}", e);
+                let _ = self
+                    .send_alert(
+                        "assemble_invalid_tx",
+                        &format!("Invalid transaction hex: {}", e),
+                        2,
+                    )
+                    .await;
+                Status::invalid_argument(format!("Invalid transaction hex: {}", e))
+            })?;
+            let tx: sv::transaction::Transaction = deserialize(&tx_bytes).map_err(|e| {
+                warn!("Invalid transaction: {}", e);
+                let _ = self
+                    .send_alert(
+                        "assemble_invalid_tx_deserialization",
+                        &format!("Invalid transaction: {}", e),
+                        2,
+                    )
+                    .await;
+                Status::invalid_argument(format!("Invalid transaction: {}", e))
+            })?;
             total_size += tx.serialized_size();
             if total_size > 34_359_738_368 {
                 warn!("Block size exceeds 32GB: {}", total_size);
@@ -353,30 +353,28 @@ impl Block for BlockServiceImpl {
         self.requests_total.inc();
         let start = std::time::Instant::now();
         let req = request.into_inner();
-        let block_bytes = hex::decode(&req.block_hex)
-            .map_err(|e| {
-                warn!("Invalid block hex: {}", e);
-                let _ = self
-                    .send_alert(
-                        "index_invalid_block",
-                        &format!("Invalid block hex: {}", e),
-                        2,
-                    )
-                    .await;
-                Status::invalid_argument(format!("Invalid block hex: {}", e))
-            })?;
-        let _block: Block = deserialize(&block_bytes)
-            .map_err(|e| {
-                warn!("Invalid block: {}", e);
-                let _ = self
-                    .send_alert(
-                        "index_invalid_block_deserialization",
-                        &format!("Invalid block: {}", e),
-                        2,
-                    )
-                    .await;
-                Status::invalid_argument(format!("Invalid block: {}", e))
-            })?;
+        let block_bytes = hex::decode(&req.block_hex).map_err(|e| {
+            warn!("Invalid block hex: {}", e);
+            let _ = self
+                .send_alert(
+                    "index_invalid_block",
+                    &format!("Invalid block hex: {}", e),
+                    2,
+                )
+                .await;
+            Status::invalid_argument(format!("Invalid block hex: {}", e))
+        })?;
+        let _block: Block = deserialize(&block_bytes).map_err(|e| {
+            warn!("Invalid block: {}", e);
+            let _ = self
+                .send_alert(
+                    "index_invalid_block_deserialization",
+                    &format!("Invalid block: {}", e),
+                    2,
+                )
+                .await;
+            Status::invalid_argument(format!("Invalid block: {}", e))
+        })?;
 
         self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
         Ok(Response::new(IndexBlockResponse {
@@ -442,7 +440,7 @@ impl Block for BlockServiceImpl {
             requests_total: self.requests_total.get() as u64,
             avg_latency_ms: self.latency_ms.get(),
             errors_total: 0, // Placeholder
-            cache_hits: 0, // Not applicable
+            cache_hits: 0,   // Not applicable
             alert_count: self.alert_count.get() as u64,
             index_throughput: 0.0, // Not applicable
         }))
@@ -466,4 +464,4 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await?;
 
     Ok(())
-            }
+}
