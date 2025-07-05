@@ -12,11 +12,11 @@ async fn test_spv_proof_generation_and_verification() {
         .expect("Failed to connect to validation_service");
     let mut client = ValidationClient::new(channel);
 
-    // Test data: a sample transaction ID
-    let txid = "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef".to_string();
+    // Test data: a sample transaction hex (simplified for testing)
+    let tx_hex = "01000000010000000000000000000000000000000000000000000000000000000000000000ffffffff0100ffffffff0100ffffffff0000000000";
 
     // Generate SPV proof
-    let generate_request = tonic::Request::new(GenerateSPVProofRequest { txid: txid.clone() });
+    let generate_request = tonic::Request::new(GenerateSPVProofRequest { txid: tx_hex.clone() });
     let generate_response = client
         .generate_spv_proof(generate_request)
         .await
@@ -31,7 +31,7 @@ async fn test_spv_proof_generation_and_verification() {
 
     // Verify SPV proof
     let verify_request = tonic::Request::new(VerifySPVProofRequest {
-        txid,
+        txid: tx_hex,
         merkle_path: generate_response.merkle_path,
         block_headers: generate_response.block_headers,
     });
