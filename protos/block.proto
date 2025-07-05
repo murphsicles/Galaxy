@@ -16,7 +16,7 @@ service Block {
   rpc AssembleBlock(AssembleBlockRequest) returns (AssembleBlockResponse);
   rpc IndexBlock(IndexBlockRequest) returns (IndexBlockResponse);
   rpc GetBlockHeaders(GetBlockHeadersRequest) returns (GetBlockHeadersResponse);
-  rpc GetMetrics(GetMetricsRequest) returns (GetMetricsResponse);
+  rpc GetMetrics(metrics.GetMetricsRequest) returns (metrics.GetMetricsResponse);
 }
 
 message ValidateBlockRequest {
