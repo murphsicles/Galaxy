@@ -33,10 +33,12 @@ jobs:
           sudo apt-get install -y --no-install-recommends protobuf-compiler
           protoc --version || { echo "protoc installation failed"; exit 1; }
           mkdir -p protos/google/api
+          mkdir -p protos/google/protobuf
           curl -L -o protos/google/api/annotations.proto https://raw.githubusercontent.com/googleapis/googleapis/master/google/api/annotations.proto
           curl -L -o protos/google/api/http.proto https://raw.githubusercontent.com/googleapis/googleapis/master/google/api/http.proto
+          curl -L -o protos/google/protobuf/descriptor.proto https://raw.githubusercontent.com/protocolbuffers/protobuf/master/src/google/protobuf/descriptor.proto
           ls -R protos
-          echo "PATH=$PATH"  # Debug PATH
+          echo "PATH=$PATH"
       - name: Check formatting
         run: cargo fmt --all -- --check
       - name: Run clippy
