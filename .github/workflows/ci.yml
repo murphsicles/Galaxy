@@ -32,8 +32,9 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y protobuf-compiler
           mkdir -p protos/google/api
-          wget -O protos/google/api/annotations.proto https://raw.githubusercontent.com/googleapis/googleapis/master/google/api/annotations.proto
-          wget -O protos/google/api/http.proto https://raw.githubusercontent.com/googleapis/googleapis/master/google/api/http.proto
+          curl -L -o protos/google/api/annotations.proto https://raw.githubusercontent.com/googleapis/googleapis/master/google/api/annotations.proto
+          curl -L -o protos/google/api/http.proto https://raw.githubusercontent.com/googleapis/googleapis/master/google/api/http.proto
+          ls -R protos
       - name: Check formatting
         run: cargo fmt --all -- --check
       - name: Run clippy
