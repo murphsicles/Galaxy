@@ -31,10 +31,11 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y protobuf-compiler
-          mkdir -p protos/google/api
-          curl -L -o protos/google/api/annotations.proto https://raw.githubusercontent.com/googleapis/googleapis/master/google/api/annotations.proto
-          curl -L -o protos/google/api/http.proto https://raw.githubusercontent.com/googleapis/googleapis/master/google/api/http.proto
-          ls -R protos
+          protoc --version  # Verify protoc is installed
+      - name: Debug file structure
+        run: |
+          pwd  # Should be /home/runner/work/Galaxy/Galaxy
+          ls -R protos  # List all proto files
       - name: Check formatting
         run: cargo fmt --all -- --check
       - name: Run clippy
