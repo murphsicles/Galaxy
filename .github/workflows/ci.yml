@@ -50,14 +50,20 @@ jobs:
           echo "Checking specific proto files:"
           ls protos/network.proto protos/transaction.proto protos/block.proto protos/storage.proto protos/consensus.proto protos/overlay.proto protos/validation.proto protos/mining.proto protos/auth.proto protos/alert.proto protos/index.proto protos/metrics.proto || { echo "One or more proto files missing"; exit 1; }
           echo "PATH=$PATH"
+          echo "PROTOC=$PROTOC"
       - name: Verify protoc before build
         run: |
+          export PROTOC=/home/runner/protoc/bin/protoc
           protoc --version || { echo "protoc not accessible"; exit 1; }
           echo "PROTOC is set to: $PROTOC"
       - name: Check formatting
         run: cargo fmt --all -- --check
+        env:
+          PROTOC: /home/runner/protoc/bin/protoc
       - name: Run clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
+        env:
+          PROTOC: /home/runner/protoc/bin/protoc
       - name: Build
         run: cargo build --release
         env:
