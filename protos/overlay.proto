@@ -10,8 +10,11 @@ service Overlay {
     rpc CreateOverlay (CreateOverlayRequest) returns (CreateOverlayResponse);
     rpc SubmitOverlayTransaction (SubmitOverlayTxRequest) returns (SubmitOverlayTxResponse);
     rpc GetOverlayBlock (GetOverlayBlockRequest) returns (GetOverlayBlockResponse) {
-        option (google.api.http) = { buffer_size_hint: 4000000000 }; // 4GB for large blocks
-    };
+        option (google.api.http) = {
+            post: "/v1/overlay/block"
+            body: "*"
+        };
+    }
     rpc BatchSubmitOverlayTransaction (BatchSubmitOverlayTxRequest) returns (BatchSubmitOverlayTxResponse);
     rpc StreamOverlayTransactions (stream StreamOverlayTxRequest) returns (stream StreamOverlayTxResponse);
     rpc IndexOverlayTransaction (IndexOverlayTransactionRequest) returns (IndexOverlayTransactionResponse);
