@@ -1,35 +1,57 @@
+// protos/block.proto
 syntax = "proto3";
+
 package block;
 
+import "google/api/annotations.proto";
 import "metrics.proto";
 
 service Block {
-    rpc ValidateBlock (ValidateBlockRequest) returns (ValidateBlockResponse);
-    rpc AssembleBlock (AssembleBlockRequest) returns (AssembleBlockResponse) {
-        option (google.api.http) = { buffer_size_hint: 4000000000 }; // 4GB for large blocks
+  rpc ValidateBlock(ValidateBlockRequest) returns (ValidateBlockResponse) {
+    option (google.api.http) = {
+      post: "/v1/block/validate"
+      body: "*"
     };
-    rpc IndexBlock (IndexBlockRequest) returns (IndexBlockResponse);
-    rpc GetMetrics (metrics.GetMetricsRequest) returns (metrics.GetMetricsResponse);
+  }
+  rpc AssembleBlock(AssembleBlockRequest) returns (AssembleBlockResponse);
+  rpc IndexBlock(IndexBlockRequest) returns (IndexBlockResponse);
+  rpc GetBlockHeaders(GetBlockHeadersRequest) returns (GetBlockHeadersResponse);
+  rpc GetMetrics(GetMetricsRequest) returns (GetMetricsResponse);
 }
 
 message ValidateBlockRequest {
-    string block_hex = 1; // Hex-encoded block
+  string block_hex = 1;
 }
+
 message ValidateBlockResponse {
-    bool is_valid = 1;
-    string error = 2; // Error message if validation fails
+  bool success = 1;
+  string error = 2;
 }
+
 message AssembleBlockRequest {
-    repeated string tx_hexes = 1; // List of hex-encoded transactions
+  repeated string tx_hexes = 1;
 }
+
 message AssembleBlockResponse {
-    string block_hex = 1; // Hex-encoded assembled block
-    string error = 2; // Error message if assembly fails
+  bool success = 1;
+  string block_hex = 2;
+  string error = 3;
 }
+
 message IndexBlockRequest {
-    string block_hex = 1; // Hex-encoded block to index
+  string block_hex = 1;
 }
+
 message IndexBlockResponse {
-    bool success = 1;
-    string error = 2; // Error message if indexing fails
+  bool success = 1;
+  string error = 2;
+}
+
+message GetBlockHeadersRequest {
+  string block_hash = 1;
+}
+
+message GetBlockHeadersResponse {
+  repeated string headers = 1;
+  string error = 2;
 }
