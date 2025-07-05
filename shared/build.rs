@@ -9,7 +9,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "../protos/alert.proto",
                 "../protos/metrics.proto",
             ],
-            &["../protos"],
+            &["../protos", "../protos/google/api"],
         )?;
     Ok(())
 }
