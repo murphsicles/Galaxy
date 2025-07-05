@@ -1,10 +1,9 @@
 [package]
 name = "auth_service"
-version = "0.0.4"
+version = "0.0.4-alpha"
 edition = "2021"
 
 [lib]
-name = "auth_service"
 path = "src/lib.rs"
 
 [[bin]]
@@ -14,14 +13,12 @@ path = "src/main.rs"
 [dependencies]
 tonic = { workspace = true }
 prost = { workspace = true }
+prost-types = { workspace = true }
 prometheus = { workspace = true }
-jsonwebtoken = { workspace = true }
 tracing = { workspace = true }
-tracing-subscriber = { workspace = true }
+jsonwebtoken = { workspace = true }
 governor = { workspace = true }
-tokio = { workspace = true }
-futures = { workspace = true }
-shared = { path = "../shared" }
+tokio = { version = "1.40.0", features = ["full"] }
 
 [build-dependencies]
 tonic-build = { workspace = true }
