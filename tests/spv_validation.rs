@@ -16,7 +16,9 @@ async fn test_spv_proof_generation_and_verification() {
     let tx_hex = "01000000010000000000000000000000000000000000000000000000000000000000000000ffffffff0100ffffffff0100ffffffff0000000000";
 
     // Generate SPV proof
-    let generate_request = tonic::Request::new(GenerateSPVProofRequest { txid: tx_hex.clone() });
+    let generate_request = tonic::Request::new(GenerateSPVProofRequest {
+        txid: tx_hex.clone(),
+    });
     let generate_response = client
         .generate_spv_proof(generate_request)
         .await
