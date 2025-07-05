@@ -27,34 +27,40 @@ jobs:
             ~/.cargo/git/
             target/
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-      - name: Install protoc
+      - name: Install protoc and proto dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y unzip
-          curl -LO https://github.com/protocolbuffers/protobuf/releases/download/v25.1/protoc-25.1-linux-x86_64.zip
-          unzip protoc-25.1-linux-x86_64.zip -d /usr/local
-          sudo chmod +x /usr/local/bin/protoc
-          echo "PATH=/usr/local/bin:$PATH" >> $GITHUB_ENV
-          echo "PROTOC=/usr/local/bin/protoc" >> $GITHUB_ENV
-          protoc --version || { echo "protoc installation failed"; exit 1; }
-          which protoc || { echo "protoc not in PATH"; exit 1; }
-      - name: Install proto dependencies
-        run: |
+          sudo apt-get install -y --no-install-recommends unzip || { echo "Failed to install unzip"; exit 1; }
+          curl -LO https://github.com/protocolbuffers/protobuf/releases/download/v25.1/protoc-25.1-linux-x86_64.zip || { echo "Failed to download protoc"; exit 1; }
+          unzip protoc-25.1-linux-x86_64.zip -d /home/runner/protoc || { echo "Failed to unzip protoc"; exit 1; }
+          chmod +x /home/runner/protoc/bin/protoc || { echo "Failed to set protoc permissions"; exit 1; }
+          echo "PATH=/home/runner/protoc/bin:$PATH" >> $GITHUB_ENV
+          echo "PROTOC=/home/runner/protoc/bin/protoc" >> $GITHUB_ENV
+          protoc --version || { echo "protoc not found or failed to run"; exit 1; }
+          which protoc || { echo "protoc binary not in PATH"; exit 1; }
           mkdir -p protos/google/api
           mkdir -p protos/google/protobuf
-          curl -L -o protos/google/api/annotations.proto https://raw.githubusercontent.com/googleapis/googleapis/master/google/api/annotations.proto
-          curl -L -o protos/google/api/http.proto https://raw.githubusercontent.com/googleapis/googleapis/master/google/api/http.proto
-          curl -L -o protos/google/protobuf/descriptor.proto https://raw.githubusercontent.com/protocolbuffers/protobuf/master/src/google/protobuf/descriptor.proto
-          ls -R protos
+          curl -L -o protos/google/api/annotations.proto https://raw.githubusercontent.com/googleapis/googleapis/master/google/api/annotations.proto || { echo "Failed to download annotations.proto"; exit 1; }
+          curl -L -o protos/google/api/http.proto https://raw.githubusercontent.com/googleapis/googleapis/master/google/api/http.proto || { echo "Failed to download http.proto"; exit 1; }
+          curl -L -o protos/google/protobuf/descriptor.proto https://raw.githubusercontent.com/protocolbuffers/protobuf/master/src/google/protobuf/descriptor.proto || { echo "Failed to download descriptor.proto"; exit 1; }
+          echo "Listing proto files:"
+          ls -R protos || { echo "Failed to list protos directory"; exit 1; }
+          echo "Checking specific proto files:"
+          ls protos/network.proto protos/transaction.proto protos/block.proto protos/storage.proto protos/consensus.proto protos/overlay.proto protos/validation.proto protos/mining.proto protos/auth.proto protos/alert.proto protos/index.proto protos/metrics.proto || { echo "One or more proto files missing"; exit 1; }
+          echo "PATH=$PATH"
       - name: Verify protoc before build
         run: |
           protoc --version || { echo "protoc not accessible"; exit 1; }
           echo "PROTOC is set to: $PROTOC"
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      - name: Run clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
       - name: Build
         run: cargo build --release
         env:
-          PROTOC: /usr/local/bin/protoc
+          PROTOC: /home/runner/protoc/bin/protoc
       - name: Test
         run: cargo test --all
         env:
-          PROTOC: /usr/local/bin/protoc
+          PROTOC: /home/runner/protoc/bin/protoc
