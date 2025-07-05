@@ -27,16 +27,21 @@ jobs:
             ~/.cargo/git/
             target/
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-      - name: Setup environment
+      - name: Install protoc and proto dependencies
         run: |
-          echo "PROTOC=/usr/local/bin/protoc" >> $GITHUB_ENV
-      - name: Install protoc
-        uses: arduino/setup-protoc@v3
-        with:
-          version: '25.1'
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
-      - name: Install proto dependencies
-        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends unzip || { echo "Failed to install unzip"; exit 1; }
+          curl -LO https://github.com/protocolbuffers/protobuf/releases/download/v25.1/protoc-25.1-linux-x86_64.zip || { echo "Failed to download protoc"; exit 1; }
+          unzip protoc-25.1-linux-x86_64.zip -d /home/runner/protoc || { echo "Failed to unzip protoc"; exit 1; }
+          chmod +x /home/runner/protoc/bin/protoc || { echo "Failed to set protoc permissions"; exit 1; }
+          export PATH=/home/runner/protoc/bin:$PATH
+          export PROTOC=/home/runner/protoc/bin/protoc
+          echo "PATH=/home/runner/protoc/bin:$PATH" >> $GITHUB_ENV
+          echo "PROTOC=/home/runner/protoc/bin/protoc" >> $GITHUB_ENV
+          ls -l /home/runner/protoc/bin/protoc || { echo "protoc binary not found"; exit 1; }
+          $PROTOC --version || { echo "protoc not found or failed to run"; exit 1; }
+          which $PROTOC || { echo "protoc binary not in PATH"; exit 1; }
+          $PROTOC --proto_path=protos protos/block.proto --version || { echo "protoc test compilation failed"; exit 1; }
           mkdir -p protos/google/api
           mkdir -p protos/google/protobuf
           curl -L -o protos/google/api/annotations.proto https://raw.githubusercontent.com/googleapis/googleapis/master/google/api/annotations.proto || { echo "Failed to download annotations.proto"; exit 1; }
@@ -48,24 +53,19 @@ jobs:
           ls protos/network.proto protos/transaction.proto protos/block.proto protos/storage.proto protos/consensus.proto protos/overlay.proto protos/validation.proto protos/mining.proto protos/auth.proto protos/alert.proto protos/index.proto protos/metrics.proto || { echo "One or more proto files missing"; exit 1; }
           echo "PATH=$PATH"
           echo "PROTOC=$PROTOC"
-      - name: Verify protoc before build
-        run: |
-          protoc --version || { echo "protoc not accessible"; exit 1; }
-          echo "PROTOC is set to: $PROTOC"
-          $PROTOC --proto_path=protos protos/block.proto --version || { echo "protoc test compilation failed"; exit 1; }
       - name: Check formatting
         run: cargo fmt --all -- --check
         env:
-          PROTOC: /usr/local/bin/protoc
+          PROTOC: /home/runner/protoc/bin/protoc
       - name: Run clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
         env:
-          PROTOC: /usr/local/bin/protoc
+          PROTOC: /home/runner/protoc/bin/protoc
       - name: Build
         run: cargo build --release
         env:
-          PROTOC: /usr/local/bin/protoc
+          PROTOC: /home/runner/protoc/bin/protoc
       - name: Test
         run: cargo test --all
         env:
-          PROTOC: /usr/local/bin/protoc
+          PROTOC: /home/runner/protoc/bin/protoc
