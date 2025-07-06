@@ -1,0 +1,9 @@
+[package]
+name = "galaxy-tests"
+version = "0.0.4-alpha"
+edition = "2021"
+
+[dependencies]
+galaxy = { path = ".." }
+tonic = { workspace = true }
+tokio = { workspace = true }
