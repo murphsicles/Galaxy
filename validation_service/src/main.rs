@@ -29,13 +29,12 @@ use validation::{
     StreamSPVProofsResponse, VerifySPVProofRequest, VerifySPVProofResponse,
 };
 
-// Temporarily disable tonic::include_proto to bypass missing generated files
-// tonic::include_proto!("validation");
-// tonic::include_proto!("block");
-// tonic::include_proto!("storage");
-// tonic::include_proto!("auth");
-// tonic::include_proto!("alert");
-// tonic::include_proto!("metrics");
+tonic::include_proto!("validation");
+tonic::include_proto!("block");
+tonic::include_proto!("storage");
+tonic::include_proto!("auth");
+tonic::include_proto!("alert");
+tonic::include_proto!("metrics");
 
 #[derive(Debug)]
 struct ValidationServiceImpl {
