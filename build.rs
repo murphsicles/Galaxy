@@ -1,11 +1,5 @@
 // build.rs
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Skip proto compilation in CI, assuming pre-generated files are in src
-    if std::env::var("CI").is_ok() {
-        println!("Skipping proto compilation in CI environment");
-        return Ok(());
-    }
-
     tonic_build::configure()
         .build_server(true)
         .out_dir("src")
