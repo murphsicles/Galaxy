@@ -27,14 +27,45 @@ jobs:
             ~/.cargo/git/
             target/
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libc6 || { echo "Failed to install libc6"; exit 1; }
+      - name: Install protoc
+        uses: peaceiris/actions-protoc@v1
+        with:
+          version: '25.1'
       - name: Setup environment
         run: |
-          echo "CI=true" >> $GITHUB_ENV
+          echo "PROTOC=/usr/local/bin/protoc" >> $GITHUB_ENV
+      - name: Install proto dependencies
+        run: |
+          mkdir -p protos/google/api
+          mkdir -p protos/google/protobuf
+          curl -L -o protos/google/api/annotations.proto https://raw.githubusercontent.com/googleapis/googleapis/master/google/api/annotations.proto || { echo "Failed to download annotations.proto"; exit 1; }
+          curl -L -o protos/google/api/http.proto https://raw.githubusercontent.com/googleapis/googleapis/master/google/api/http.proto || { echo "Failed to download http.proto"; exit 1; }
+          curl -L -o protos/google/protobuf/descriptor.proto https://raw.githubusercontent.com/protocolbuffers/protobuf/master/src/google/protobuf/descriptor.proto || { echo "Failed to download descriptor.proto"; exit 1; }
+          echo "Listing proto files:"
+          ls -R protos || { echo "Failed to list protos directory"; exit 1; }
+          echo "Checking specific proto files:"
+          ls protos/network.proto protos/transaction.proto protos/block.proto protos/storage.proto protos/consensus.proto protos/overlay.proto protos/validation.proto protos/mining.proto protos/auth.proto protos/alert.proto protos/index.proto protos/metrics.proto || { echo "One or more proto files missing"; exit 1; }
+          echo "PATH=$PATH"
+          echo "PROTOC=$PROTOC"
+          protoc --version || { echo "protoc not accessible"; exit 1; }
+          $PROTOC --proto_path=protos protos/block.proto --version || { echo "protoc test compilation failed"; exit 1; }
       - name: Check formatting
         run: cargo fmt --all -- --check
+        env:
+          PROTOC: /usr/local/bin/protoc
       - name: Run clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
+        env:
+          PROTOC: /usr/local/bin/protoc
       - name: Build
         run: cargo build --release
+        env:
+          PROTOC: /usr/local/bin/protoc
       - name: Test
         run: cargo test --all
+        env:
+          PROTOC: /usr/local/bin/protoc
