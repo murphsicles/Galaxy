@@ -38,7 +38,7 @@ jobs:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
       - name: Setup environment
         run: |
-          echo "PROTOC=/usr/local/bin/protoc" >> $GITHUB_ENV
+          echo "PROTOC=/opt/hostedtoolcache/protoc/25.1/x64/bin/protoc" >> $GITHUB_ENV
       - name: Install proto dependencies
         run: |
           mkdir -p protos/google/api
@@ -52,21 +52,28 @@ jobs:
           ls protos/network.proto protos/transaction.proto protos/block.proto protos/storage.proto protos/consensus.proto protos/overlay.proto protos/validation.proto protos/mining.proto protos/auth.proto protos/alert.proto protos/index.proto protos/metrics.proto || { echo "One or more proto files missing"; exit 1; }
           echo "PATH=$PATH"
           echo "PROTOC=$PROTOC"
+          ls -l /opt/hostedtoolcache/protoc/25.1/x64/bin/protoc || { echo "protoc binary not found"; exit 1; }
+          which protoc || { echo "protoc not in PATH"; exit 1; }
           protoc --version || { echo "protoc not accessible"; exit 1; }
           $PROTOC --proto_path=protos protos/block.proto --version || { echo "protoc test compilation failed"; exit 1; }
+      - name: Check runner environment
+        run: |
+          whoami
+          df -h
+          echo "Runner OS: $RUNNER_OS"
       - name: Check formatting
         run: cargo fmt --all -- --check
         env:
-          PROTOC: /usr/local/bin/protoc
+          PROTOC: /opt/hostedtoolcache/protoc/25.1/x64/bin/protoc
       - name: Run clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
         env:
-          PROTOC: /usr/local/bin/protoc
+          PROTOC: /opt/hostedtoolcache/protoc/25.1/x64/bin/protoc
       - name: Build
         run: cargo build --release
         env:
-          PROTOC: /usr/local/bin/protoc
+          PROTOC: /opt/hostedtoolcache/protoc/25.1/x64/bin/protoc
       - name: Test
         run: cargo test --all
         env:
-          PROTOC: /usr/local/bin/protoc
+          PROTOC: /opt/hostedtoolcache/protoc/25.1/x64/bin/protoc
