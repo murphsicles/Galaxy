@@ -55,10 +55,9 @@ jobs:
           echo "PROTOC=$PROTOC"
           ls -l /home/runner/protoc/bin/protoc || { echo "protoc binary not found"; exit 1; }
           file /home/runner/protoc/bin/protoc || { echo "Failed to verify protoc binary"; exit 1; }
-          ldd /home/runner/protoc/bin/protoc || { echo "Failed to check protoc dependencies"; exit 1; }
           which protoc || { echo "protoc not in PATH"; exit 1; }
           protoc --version || { echo "protoc not accessible"; exit 1; }
-          $PROTOC --proto_path=protos protos/block.proto --version || { echo "protoc test compilation failed"; exit 1; }
+          $PROTOC --proto_path=protos --proto_out=. protos/block.proto || { echo "protoc test compilation failed"; exit 1; }
       - name: Check runner environment
         run: |
           whoami
