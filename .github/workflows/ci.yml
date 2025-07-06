@@ -32,9 +32,10 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends libc6 || { echo "Failed to install libc6"; exit 1; }
       - name: Install protoc
-        uses: peaceiris/actions-protoc@v1
+        uses: arduino/setup-protoc@v3
         with:
           version: '25.1'
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
       - name: Setup environment
         run: |
           echo "PROTOC=/usr/local/bin/protoc" >> $GITHUB_ENV
