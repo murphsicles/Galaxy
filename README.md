@@ -227,6 +227,7 @@ Galaxy is optimized for ultra-high performance:
 
 Contributions are welcome! Please open an issue or pull request on GitHub.
 
+
 ## 📝 License
 
 Licensed under the Open BSV License. See [LICENSE](LICENSE) for details.
