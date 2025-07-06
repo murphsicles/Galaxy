@@ -57,7 +57,7 @@ jobs:
           file /home/runner/protoc/bin/protoc || { echo "Failed to verify protoc binary"; exit 1; }
           which protoc || { echo "protoc not in PATH"; exit 1; }
           protoc --version || { echo "protoc not accessible"; exit 1; }
-          $PROTOC --proto_path=protos --proto_out=. protos/block.proto || { echo "protoc test compilation failed"; exit 1; }
+          $PROTOC --proto_path=protos --include_imports --descriptor_set_out=/tmp/block.desc protos/block.proto || { echo "protoc test compilation failed"; exit 1; }
       - name: Check runner environment
         run: |
           whoami
