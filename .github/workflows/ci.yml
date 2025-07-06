@@ -30,15 +30,14 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libc6 || { echo "Failed to install libc6"; exit 1; }
+          sudo apt-get install -y --no-install-recommends unzip libc6 || { echo "Failed to install unzip or libc6"; exit 1; }
       - name: Install protoc
-        uses: arduino/setup-protoc@v3
-        with:
-          version: '25.1'
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
-      - name: Setup environment
         run: |
-          echo "PROTOC=/opt/hostedtoolcache/protoc/25.1/x64/bin/protoc" >> $GITHUB_ENV
+          curl -LO https://github.com/protocolbuffers/protobuf/releases/download/v25.1/protoc-25.1-linux-x86_64.zip || { echo "Failed to download protoc"; exit 1; }
+          unzip protoc-25.1-linux-x86_64.zip -d /home/runner/protoc || { echo "Failed to unzip protoc"; exit 1; }
+          chmod +x /home/runner/protoc/bin/protoc || { echo "Failed to set protoc permissions"; exit 1; }
+          echo "PATH=/home/runner/protoc/bin:$PATH" >> $GITHUB_ENV
+          echo "PROTOC=/home/runner/protoc/bin/protoc" >> $GITHUB_ENV
       - name: Install proto dependencies
         run: |
           mkdir -p protos/google/api
@@ -52,7 +51,7 @@ jobs:
           ls protos/network.proto protos/transaction.proto protos/block.proto protos/storage.proto protos/consensus.proto protos/overlay.proto protos/validation.proto protos/mining.proto protos/auth.proto protos/alert.proto protos/index.proto protos/metrics.proto || { echo "One or more proto files missing"; exit 1; }
           echo "PATH=$PATH"
           echo "PROTOC=$PROTOC"
-          ls -l /opt/hostedtoolcache/protoc/25.1/x64/bin/protoc || { echo "protoc binary not found"; exit 1; }
+          ls -l /home/runner/protoc/bin/protoc || { echo "protoc binary not found"; exit 1; }
           which protoc || { echo "protoc not in PATH"; exit 1; }
           protoc --version || { echo "protoc not accessible"; exit 1; }
           $PROTOC --proto_path=protos protos/block.proto --version || { echo "protoc test compilation failed"; exit 1; }
@@ -64,16 +63,16 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
         env:
-          PROTOC: /opt/hostedtoolcache/protoc/25.1/x64/bin/protoc
+          PROTOC: /home/runner/protoc/bin/protoc
       - name: Run clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
         env:
-          PROTOC: /opt/hostedtoolcache/protoc/25.1/x64/bin/protoc
+          PROTOC: /home/runner/protoc/bin/protoc
       - name: Build
         run: cargo build --release
         env:
-          PROTOC: /opt/hostedtoolcache/protoc/25.1/x64/bin/protoc
+          PROTOC: /home/runner/protoc/bin/protoc
       - name: Test
         run: cargo test --all
         env:
-          PROTOC: /opt/hostedtoolcache/protoc/25.1/x64/bin/protoc
+          PROTOC: /home/runner/protoc/bin/protoc
