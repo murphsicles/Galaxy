@@ -1,5 +1,4 @@
 // protos/google/protobuf/descriptor.proto
-// Source: https://raw.githubusercontent.com/protocolbuffers/protobuf/master/src/google/protobuf/descriptor.proto
 syntax = "proto3";
 
 package google.protobuf;
@@ -8,39 +7,29 @@ option go_package = "google.golang.org/protobuf/types/descriptorpb";
 option java_package = "com.google.protobuf";
 option java_outer_classname = "DescriptorProtos";
 option csharp_namespace = "Google.Protobuf.Reflection";
-option optimize_for = SPEED;
+option objc_class_prefix = "GPB";
+option php_namespace = "Google\\Protobuf";
+option ruby_package = "Google::Protobuf";
 
-// The protocol compiler can output a FileDescriptorSet containing the .proto
-// files it parses.
 message FileDescriptorSet {
   repeated FileDescriptorProto file = 1;
 }
 
-// Describes a complete .proto file.
 message FileDescriptorProto {
-  string name = 1;  // file name, relative to root of source tree
-  string package = 2;  // e.g. "foo", "foo.bar", etc.
-  repeated string dependency = 3;  // Names of files imported by this file.
-  repeated int32 public_dependency = 10;  // Indexes of the public imported files
-                                          // in the dependency list above.
-  repeated int32 weak_dependency = 11;  // Indexes of the weak imported files in
-                                        // the dependency list.
-  // All top-level definitions in this file.
+  string name = 1;
+  string package = 2;
+  repeated string dependency = 3;
+  repeated int32 public_dependency = 10;
+  repeated int32 weak_dependency = 11;
   repeated DescriptorProto message_type = 4;
   repeated EnumDescriptorProto enum_type = 5;
   repeated ServiceDescriptorProto service = 6;
   repeated FieldDescriptorProto extension = 7;
-  // This field contains optional information about the original source code.
-  // You may safely remove this entire field without harming runtime
-  // functionality of the descriptors -- the information is needed only by
-  // tools that generate code and similar tools.
+  FileOptions options = 8;
   SourceCodeInfo source_code_info = 9;
-  // The syntax of the proto file.
-  // The supported values are "proto2" and "proto3".
   string syntax = 12;
 }
 
-// Describes a message type.
 message DescriptorProto {
   string name = 1;
   repeated FieldDescriptorProto field = 2;
@@ -50,105 +39,109 @@ message DescriptorProto {
   message ExtensionRange {
     int32 start = 1;
     int32 end = 2;
-    Options options = 3;
+    ExtensionRangeOptions options = 3;
   }
   repeated ExtensionRange extension_range = 5;
-  repeated OneofDescriptorProto oneof_decl = 8;
-  Options options = 7;
+  MessageOptions options = 7;
   message ReservedRange {
-    int32 start = 1;  // Inclusive.
-    int32 end = 2;    // Exclusive.
+    int32 start = 1;
+    int32 end = 2;
   }
   repeated ReservedRange reserved_range = 9;
-  // Reserved field names, which may not be used by fields in the same message.
-  // A given name may only be reserved once.
   repeated string reserved_name = 10;
 }
 
-// Describes a field within a message.
+message ExtensionRangeOptions {
+  repeated UninterpretedOption uninterpreted_option = 999;
+  message Declaration {
+    int32 number = 1;
+    string full_name = 2;
+    string type = 3;
+    bool reserved = 5;
+    bool repeated = 6;
+  }
+  repeated Declaration declaration = 2;
+  enum Verification {
+    DECLARATION = 0;
+    VERIFIED = 1;
+    UNVERIFIED = 2;
+  }
+  Verification verification = 3;
+}
+
 message FieldDescriptorProto {
   enum Type {
-    // 0 is reserved for errors.
-    // Order is weird for historical reasons.
     TYPE_DOUBLE = 1;
     TYPE_FLOAT = 2;
-    TYPE_INT64 = 3;   // Not ZigZag encoded.  Negative numbers take 10 bytes.
+    TYPE_INT64 = 3;
     TYPE_UINT64 = 4;
-    TYPE_INT32 = 5;   // Not ZigZag encoded.  Negative numbers take 10 bytes.
+    TYPE_INT32 = 5;
     TYPE_FIXED64 = 6;
     TYPE_FIXED32 = 7;
     TYPE_BOOL = 8;
     TYPE_STRING = 9;
-    TYPE_GROUP = 10;  // Tag-delimited aggregate.
-    TYPE_MESSAGE = 11;  // Length-delimited aggregate.
+    TYPE_GROUP = 10;
+    TYPE_MESSAGE = 11;
     TYPE_BYTES = 12;
     TYPE_UINT32 = 13;
     TYPE_ENUM = 14;
     TYPE_SFIXED32 = 15;
     TYPE_SFIXED64 = 16;
-    TYPE_SINT32 = 17;  // Uses ZigZag encoding.
-    TYPE_SINT64 = 18;  // Uses ZigZag encoding.
+    TYPE_SINT32 = 17;
+    TYPE_SINT64 = 18;
   }
   enum Label {
-    // 0 is reserved for errors
     LABEL_OPTIONAL = 1;
-    LABEL_REQUIRED = 2;
     LABEL_REPEATED = 3;
+    LABEL_REQUIRED = 2;
   }
   string name = 1;
   int32 number = 3;
-  Label label = 5;
-  Type type = 4;
-  string type_name = 6;  // Used when type is TYPE_MESSAGE or TYPE_ENUM.
-  string extendee = 2;  // Used when type is an extension.
+  Label label = 4;
+  Type type = 5;
+  string type_name = 6;
+  string extendee = 2;
   string default_value = 7;
-  int32 oneof_index = 9;  // Index in .oneof_decl. Only set if field is in a oneof.
+  int32 oneof_index = 9;
   string json_name = 10;
   FieldOptions options = 8;
 }
 
-// Describes a oneof.
 message OneofDescriptorProto {
   string name = 1;
   OneofOptions options = 2;
 }
 
-// Describes an enum type.
 message EnumDescriptorProto {
   string name = 1;
   repeated EnumValueDescriptorProto value = 2;
   EnumOptions options = 3;
   message EnumReservedRange {
-    int32 start = 1;  // Inclusive.
-    int32 end = 2;    // Exclusive.
+    int32 start = 1;
+    int32 end = 2;
   }
   repeated EnumReservedRange reserved_range = 4;
   repeated string reserved_name = 5;
 }
 
-// Describes a value within an enum.
 message EnumValueDescriptorProto {
   string name = 1;
   int32 number = 2;
   EnumValueOptions options = 3;
 }
 
-// Describes a service.
 message ServiceDescriptorProto {
   string name = 1;
   repeated MethodDescriptorProto method = 2;
   ServiceOptions options = 3;
 }
 
-// Describes a method of a service.
 message MethodDescriptorProto {
   string name = 1;
   string input_type = 2;
   string output_type = 3;
   MethodOptions options = 4;
-  // Identifies if client streams multiple client messages
   bool client_streaming = 5;
-  // Identifies if server streams multiple server messages
   bool server_streaming = 6;
 }
 
@@ -159,9 +152,9 @@ message FileOptions {
   bool java_generate_equals_and_hash = 20 [deprecated=true];
   bool java_string_check_utf8 = 27;
   enum OptimizeMode {
-    SPEED = 1;        // Generate complete code for parsing, serialization, etc.
-    CODE_SIZE = 2;    // Generate code optimized for size.
-    LITE_RUNTIME = 3; // Generate code optimized for lite runtime.
+    SPEED = 1;
+    CODE_SIZE = 2;
+    LITE_RUNTIME = 3;
   }
   OptimizeMode optimize_for = 9;
   string go_package = 11;
@@ -178,23 +171,18 @@ message FileOptions {
   string php_namespace = 41;
   string php_metadata_namespace = 44;
   string ruby_package = 45;
-  // Any proto2 extension fields for FileOptions should go here.
-  // Allows other language bindings to add their own options.
   repeated UninterpretedOption uninterpreted_option = 999;
 }
 
-// Describes the options for a message.
 message MessageOptions {
   bool message_set_wire_format = 1;
   bool no_standard_descriptor_accessor = 2;
   bool deprecated = 3;
   bool map_entry = 7;
   bool deprecated_legacy_json_field_conflicts = 11 [deprecated=true];
-  // Any proto2 extension fields for MessageOptions should go here.
   repeated UninterpretedOption uninterpreted_option = 999;
 }
 
-// Describes the options for a field.
 message FieldOptions {
   enum CType {
     STRING = 0;
@@ -213,15 +201,33 @@ message FieldOptions {
   bool unverified_lazy = 15;
   bool deprecated = 3;
   bool weak = 10;
+  bool debug_redact = 16;
+  enum OptionRetention {
+    RETENTION_UNKNOWN = 0;
+    RETENTION_RUNTIME = 1;
+    RETENTION_SOURCE = 2;
+  }
+  OptionRetention retention = 17;
+  enum OptionTargetType {
+    TARGET_TYPE_UNKNOWN = 0;
+    TARGET_TYPE_FILE = 1;
+    TARGET_TYPE_EXTENSION_RANGE = 2;
+    TARGET_TYPE_MESSAGE = 3;
+    TARGET_TYPE_FIELD = 4;
+    TARGET_TYPE_ONEOF = 5;
+    TARGET_TYPE_ENUM = 6;
+    TARGET_TYPE_ENUM_ENTRY = 7;
+    TARGET_TYPE_SERVICE = 8;
+    TARGET_TYPE_METHOD = 9;
+  }
+  repeated OptionTargetType targets = 18;
   repeated UninterpretedOption uninterpreted_option = 999;
 }
 
-// Describes the options for a oneof.
 message OneofOptions {
   repeated UninterpretedOption uninterpreted_option = 999;
 }
 
-// Describes the options for an enum.
 message EnumOptions {
   bool allow_alias = 2;
   bool deprecated = 3;
@@ -229,19 +235,16 @@ message EnumOptions {
   repeated UninterpretedOption uninterpreted_option = 999;
 }
 
-// Describes the options for an enum value.
 message EnumValueOptions {
   bool deprecated = 1;
   repeated UninterpretedOption uninterpreted_option = 999;
 }
 
-// Describes the options for a service.
 message ServiceOptions {
   bool deprecated = 33;
   repeated UninterpretedOption uninterpreted_option = 999;
 }
 
-// Describes the options for a method.
 message MethodOptions {
   bool deprecated = 33;
   enum IdempotencyLevel {
@@ -253,10 +256,6 @@ message MethodOptions {
   repeated UninterpretedOption uninterpreted_option = 999;
 }
 
-// A message representing a option the parser does not recognize. This only
-// appears in options protos created by the compiler::Parser class.
-// DescriptorPool never constructs these directly, so they do not need
-// reflection-based accessors.
 message UninterpretedOption {
   message NamePart {
     string name_part = 1;
@@ -271,23 +270,29 @@ message UninterpretedOption {
   string aggregate_value = 8;
 }
 
-// The location of a piece of source code, used in SourceCodeInfo.
 message SourceCodeInfo {
   message Location {
-    // Identifies which part of the source code this comment applies to.
-    // The path is a sequence of numbers indicating the index of the element
-    // in the proto structure.
     repeated int32 path = 1 [packed = true];
-    // The span is the range of text in the source file, given as
-    // [start_line, start_column, end_line, end_column].
     repeated int32 span = 2 [packed = true];
-    // Leading detached comments are comments that appear before the element
-    // but are not associated with it. For example, multiple comments before
-    // a message that are not attached to any field.
-    repeated string leading_detached_comments = 3;
-    string leading_comments = 4;
-    string trailing_comments = 5;
+    string leading_comments = 3;
+    string trailing_comments = 4;
+    repeated string leading_detached_comments = 6;
   }
-  // A list of locations describing the source code.
   repeated Location location = 1;
+}
+
+message GeneratedCodeInfo {
+  message Annotation {
+    repeated int32 path = 1 [packed = true];
+    string source_file = 2;
+    int32 begin = 3;
+    int32 end = 4;
+    enum Semantic {
+      NONE = 0;
+      SET = 1;
+      ALIAS = 2;
+    }
+    Semantic semantic = 5;
+  }
+  repeated Annotation annotation = 1;
 }
