@@ -3,16 +3,13 @@ name = "alert_service"
 version = "0.0.4-alpha"
 edition = "2021"
 
-[lib]
-path = "src/lib.rs"
-
 [[bin]]
 name = "alert_service"
 path = "src/main.rs"
 
 [dependencies]
 tonic = { workspace = true }
-prost = { workspace = true }
+protobuf = { workspace = true }
 prost-types = { workspace = true }
 prometheus = { workspace = true }
 tracing = { workspace = true }
