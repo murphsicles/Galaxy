@@ -24,7 +24,7 @@ members = [
 resolver = "2"
 
 [workspace.dependencies]
-protobuf = "3.4.0"  # Replace prost and tonic
+protobuf = "3.4.0"  # Replace tonic and prost
 prometheus = "0.14.0"
 sv = { git = "https://github.com/murphsicles/rust-sv", tag = "v0.4.0" }
 toml = "0.8.19"
