@@ -18,6 +18,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("cargo:warning=Pre-compiled proto files found, skipping compilation");
         return Ok(());
     }
+    let protoc = std::env::var("PROTOC").ok().unwrap_or("protoc".to_string());
+    println!("cargo:warning=Using protoc: {}", protoc);
+    if !std::path::Path::new(&protoc).exists() {
+        eprintln!("protoc binary not found at: {}", protoc);
+        std::process::exit(1);
+    }
+    let src_dir = std::path::Path::new("src");
+    if !src_dir.exists() {
+        std::fs::create_dir_all(src_dir)?;
+        println!("cargo:warning=Created src directory");
+    }
     tonic_build::configure()
         .build_server(true)
         .out_dir("src")
