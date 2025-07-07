@@ -1,0 +1,293 @@
+// protos/google/protobuf/descriptor.proto
+// Source: https://raw.githubusercontent.com/protocolbuffers/protobuf/master/src/google/protobuf/descriptor.proto
+syntax = "proto3";
+
+package google.protobuf;
+
+option go_package = "google.golang.org/protobuf/types/descriptorpb";
+option java_package = "com.google.protobuf";
+option java_outer_classname = "DescriptorProtos";
+option csharp_namespace = "Google.Protobuf.Reflection";
+option optimize_for = SPEED;
+
+// The protocol compiler can output a FileDescriptorSet containing the .proto
+// files it parses.
+message FileDescriptorSet {
+  repeated FileDescriptorProto file = 1;
+}
+
+// Describes a complete .proto file.
+message FileDescriptorProto {
+  string name = 1;  // file name, relative to root of source tree
+  string package = 2;  // e.g. "foo", "foo.bar", etc.
+  repeated string dependency = 3;  // Names of files imported by this file.
+  repeated int32 public_dependency = 10;  // Indexes of the public imported files
+                                          // in the dependency list above.
+  repeated int32 weak_dependency = 11;  // Indexes of the weak imported files in
+                                        // the dependency list.
+  // All top-level definitions in this file.
+  repeated DescriptorProto message_type = 4;
+  repeated EnumDescriptorProto enum_type = 5;
+  repeated ServiceDescriptorProto service = 6;
+  repeated FieldDescriptorProto extension = 7;
+  // This field contains optional information about the original source code.
+  // You may safely remove this entire field without harming runtime
+  // functionality of the descriptors -- the information is needed only by
+  // tools that generate code and similar tools.
+  SourceCodeInfo source_code_info = 9;
+  // The syntax of the proto file.
+  // The supported values are "proto2" and "proto3".
+  string syntax = 12;
+}
+
+// Describes a message type.
+message DescriptorProto {
+  string name = 1;
+  repeated FieldDescriptorProto field = 2;
+  repeated FieldDescriptorProto extension = 6;
+  repeated DescriptorProto nested_type = 3;
+  repeated EnumDescriptorProto enum_type = 4;
+  message ExtensionRange {
+    int32 start = 1;
+    int32 end = 2;
+    Options options = 3;
+  }
+  repeated ExtensionRange extension_range = 5;
+  repeated OneofDescriptorProto oneof_decl = 8;
+  Options options = 7;
+  message ReservedRange {
+    int32 start = 1;  // Inclusive.
+    int32 end = 2;    // Exclusive.
+  }
+  repeated ReservedRange reserved_range = 9;
+  // Reserved field names, which may not be used by fields in the same message.
+  // A given name may only be reserved once.
+  repeated string reserved_name = 10;
+}
+
+// Describes a field within a message.
+message FieldDescriptorProto {
+  enum Type {
+    // 0 is reserved for errors.
+    // Order is weird for historical reasons.
+    TYPE_DOUBLE = 1;
+    TYPE_FLOAT = 2;
+    TYPE_INT64 = 3;   // Not ZigZag encoded.  Negative numbers take 10 bytes.
+    TYPE_UINT64 = 4;
+    TYPE_INT32 = 5;   // Not ZigZag encoded.  Negative numbers take 10 bytes.
+    TYPE_FIXED64 = 6;
+    TYPE_FIXED32 = 7;
+    TYPE_BOOL = 8;
+    TYPE_STRING = 9;
+    TYPE_GROUP = 10;  // Tag-delimited aggregate.
+    TYPE_MESSAGE = 11;  // Length-delimited aggregate.
+    TYPE_BYTES = 12;
+    TYPE_UINT32 = 13;
+    TYPE_ENUM = 14;
+    TYPE_SFIXED32 = 15;
+    TYPE_SFIXED64 = 16;
+    TYPE_SINT32 = 17;  // Uses ZigZag encoding.
+    TYPE_SINT64 = 18;  // Uses ZigZag encoding.
+  }
+  enum Label {
+    // 0 is reserved for errors
+    LABEL_OPTIONAL = 1;
+    LABEL_REQUIRED = 2;
+    LABEL_REPEATED = 3;
+  }
+  string name = 1;
+  int32 number = 3;
+  Label label = 5;
+  Type type = 4;
+  string type_name = 6;  // Used when type is TYPE_MESSAGE or TYPE_ENUM.
+  string extendee = 2;  // Used when type is an extension.
+  string default_value = 7;
+  int32 oneof_index = 9;  // Index in .oneof_decl. Only set if field is in a oneof.
+  string json_name = 10;
+  FieldOptions options = 8;
+}
+
+// Describes a oneof.
+message OneofDescriptorProto {
+  string name = 1;
+  OneofOptions options = 2;
+}
+
+// Describes an enum type.
+message EnumDescriptorProto {
+  string name = 1;
+  repeated EnumValueDescriptorProto value = 2;
+  EnumOptions options = 3;
+  message EnumReservedRange {
+    int32 start = 1;  // Inclusive.
+    int32 end = 2;    // Exclusive.
+  }
+  repeated EnumReservedRange reserved_range = 4;
+  repeated string reserved_name = 5;
+}
+
+// Describes a value within an enum.
+message EnumValueDescriptorProto {
+  string name = 1;
+  int32 number = 2;
+  EnumValueOptions options = 3;
+}
+
+// Describes a service.
+message ServiceDescriptorProto {
+  string name = 1;
+  repeated MethodDescriptorProto method = 2;
+  ServiceOptions options = 3;
+}
+
+// Describes a method of a service.
+message MethodDescriptorProto {
+  string name = 1;
+  string input_type = 2;
+  string output_type = 3;
+  MethodOptions options = 4;
+  // Identifies if client streams multiple client messages
+  bool client_streaming = 5;
+  // Identifies if server streams multiple server messages
+  bool server_streaming = 6;
+}
+
+message FileOptions {
+  string java_package = 1;
+  string java_outer_classname = 8;
+  bool java_multiple_files = 10;
+  bool java_generate_equals_and_hash = 20 [deprecated=true];
+  bool java_string_check_utf8 = 27;
+  enum OptimizeMode {
+    SPEED = 1;        // Generate complete code for parsing, serialization, etc.
+    CODE_SIZE = 2;    // Generate code optimized for size.
+    LITE_RUNTIME = 3; // Generate code optimized for lite runtime.
+  }
+  OptimizeMode optimize_for = 9;
+  string go_package = 11;
+  bool cc_generic_services = 16;
+  bool java_generic_services = 17;
+  bool py_generic_services = 18;
+  bool php_generic_services = 42;
+  bool deprecated = 23;
+  bool cc_enable_arenas = 31;
+  string objc_class_prefix = 36;
+  string csharp_namespace = 37;
+  string swift_prefix = 39;
+  string php_class_prefix = 40;
+  string php_namespace = 41;
+  string php_metadata_namespace = 44;
+  string ruby_package = 45;
+  // Any proto2 extension fields for FileOptions should go here.
+  // Allows other language bindings to add their own options.
+  repeated UninterpretedOption uninterpreted_option = 999;
+}
+
+// Describes the options for a message.
+message MessageOptions {
+  bool message_set_wire_format = 1;
+  bool no_standard_descriptor_accessor = 2;
+  bool deprecated = 3;
+  bool map_entry = 7;
+  bool deprecated_legacy_json_field_conflicts = 11 [deprecated=true];
+  // Any proto2 extension fields for MessageOptions should go here.
+  repeated UninterpretedOption uninterpreted_option = 999;
+}
+
+// Describes the options for a field.
+message FieldOptions {
+  enum CType {
+    STRING = 0;
+    CORD = 1;
+    STRING_PIECE = 2;
+  }
+  CType ctype = 1;
+  bool packed = 2;
+  enum JSType {
+    JS_NORMAL = 0;
+    JS_STRING = 1;
+    JS_NUMBER = 2;
+  }
+  JSType jstype = 6;
+  bool lazy = 5;
+  bool unverified_lazy = 15;
+  bool deprecated = 3;
+  bool weak = 10;
+  repeated UninterpretedOption uninterpreted_option = 999;
+}
+
+// Describes the options for a oneof.
+message OneofOptions {
+  repeated UninterpretedOption uninterpreted_option = 999;
+}
+
+// Describes the options for an enum.
+message EnumOptions {
+  bool allow_alias = 2;
+  bool deprecated = 3;
+  bool deprecated_legacy_json_field_conflicts = 6 [deprecated=true];
+  repeated UninterpretedOption uninterpreted_option = 999;
+}
+
+// Describes the options for an enum value.
+message EnumValueOptions {
+  bool deprecated = 1;
+  repeated UninterpretedOption uninterpreted_option = 999;
+}
+
+// Describes the options for a service.
+message ServiceOptions {
+  bool deprecated = 33;
+  repeated UninterpretedOption uninterpreted_option = 999;
+}
+
+// Describes the options for a method.
+message MethodOptions {
+  bool deprecated = 33;
+  enum IdempotencyLevel {
+    IDEMPOTENCY_UNKNOWN = 0;
+    NO_SIDE_EFFECTS = 1;
+    IDEMPOTENT = 2;
+  }
+  IdempotencyLevel idempotency_level = 34;
+  repeated UninterpretedOption uninterpreted_option = 999;
+}
+
+// A message representing a option the parser does not recognize. This only
+// appears in options protos created by the compiler::Parser class.
+// DescriptorPool never constructs these directly, so they do not need
+// reflection-based accessors.
+message UninterpretedOption {
+  message NamePart {
+    string name_part = 1;
+    bool is_extension = 2;
+  }
+  repeated NamePart name = 2;
+  string identifier_value = 3;
+  uint64 positive_int_value = 4;
+  int64 negative_int_value = 5;
+  double double_value = 6;
+  bytes string_value = 7;
+  string aggregate_value = 8;
+}
+
+// The location of a piece of source code, used in SourceCodeInfo.
+message SourceCodeInfo {
+  message Location {
+    // Identifies which part of the source code this comment applies to.
+    // The path is a sequence of numbers indicating the index of the element
+    // in the proto structure.
+    repeated int32 path = 1 [packed = true];
+    // The span is the range of text in the source file, given as
+    // [start_line, start_column, end_line, end_column].
+    repeated int32 span = 2 [packed = true];
+    // Leading detached comments are comments that appear before the element
+    // but are not associated with it. For example, multiple comments before
+    // a message that are not attached to any field.
+    repeated string leading_detached_comments = 3;
+    string leading_comments = 4;
+    string trailing_comments = 5;
+  }
+  // A list of locations describing the source code.
+  repeated Location location = 1;
+}
