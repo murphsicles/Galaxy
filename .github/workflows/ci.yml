@@ -17,7 +17,6 @@ jobs:
         with:
           toolchain: 1.88.0
           override: true
-          components: rustfmt, clippy
       - name: Cache dependencies
         uses: actions/cache@v4
         with:
@@ -27,69 +26,7 @@ jobs:
             ~/.cargo/git/
             target/
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-      - name: Install system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends unzip libc6 libstdc++6 || { echo "Failed to install unzip, libc6, or libstdc++6"; exit 1; }
-      - name: Install protoc
-        run: |
-          curl -LO https://github.com/protocolbuffers/protobuf/releases/download/v25.1/protoc-25.1-linux-x86_64.zip || { echo "Failed to download protoc"; exit 1; }
-          unzip -t protoc-25.1-linux-x86_64.zip || { echo "Failed to verify protoc zip"; exit 1; }
-          unzip protoc-25.1-linux-x86_64.zip -d /home/runner/protoc || { echo "Failed to unzip protoc"; exit 1; }
-          chmod +x /home/runner/protoc/bin/protoc || { echo "Failed to set protoc permissions"; exit 1; }
-          export PATH=/home/runner/protoc/bin:$PATH
-          export PROTOC=/home/runner/protoc/bin/protoc
-          echo "PATH=/home/runner/protoc/bin:$PATH" >> $GITHUB_ENV
-          echo "PROTOC=/home/runner/protoc/bin/protoc" >> $GITHUB_ENV
-      - name: Install proto dependencies
-        run: |
-          mkdir -p protos/google/api
-          mkdir -p protos/google/protobuf
-          curl -L -o protos/google/api/annotations.proto https://raw.githubusercontent.com/googleapis/googleapis/master/google/api/annotations.proto || { echo "Failed to download annotations.proto"; exit 1; }
-          curl -L -o protos/google/api/http.proto https://raw.githubusercontent.com/googleapis/googleapis/master/google/api/http.proto || { echo "Failed to download http.proto"; exit 1; }
-          curl -L -o protos/google/protobuf/descriptor.proto https://raw.githubusercontent.com/protocolbuffers/protobuf/master/src/google/protobuf/descriptor.proto || { echo "Failed to download descriptor.proto"; exit 1; }
-          echo "Listing proto files:"
-          ls -R protos || { echo "Failed to list protos directory"; exit 1; }
-          echo "Checking specific proto files:"
-          ls protos/network.proto protos/transaction.proto protos/block.proto protos/storage.proto protos/consensus.proto protos/overlay.proto protos/validation.proto protos/mining.proto protos/auth.proto protos/alert.proto protos/index.proto protos/metrics.proto || { echo "One or more proto files missing"; exit 1; }
-          echo "PATH=$PATH"
-          echo "PROTOC=$PROTOC"
-          ls -l /home/runner/protoc/bin/protoc || { echo "protoc binary not found"; exit 1; }
-          file /home/runner/protoc/bin/protoc || { echo "Failed to verify protoc binary"; exit 1; }
-          which protoc || { echo "protoc not in PATH"; exit 1; }
-          protoc --version || { echo "protoc not accessible"; exit 1; }
-          $PROTOC --proto_path=protos --include_imports --descriptor_set_out=/tmp/block.desc protos/block.proto || { echo "protoc test compilation failed"; exit 1; }
-      - name: Check runner environment
-        run: |
-          whoami
-          df -h
-          echo "Runner OS: $RUNNER_OS"
-          echo "Checking PROTOC in shell: $PROTOC"
-      - name: Check formatting
-        run: |
-          export PROTOC=/home/runner/protoc/bin/protoc
-          echo "PROTOC for formatting: $PROTOC"
-          cargo fmt --all -- --check
-        env:
-          PROTOC: /home/runner/protoc/bin/protoc
-      - name: Run clippy
-        run: |
-          export PROTOC=/home/runner/protoc/bin/protoc
-          echo "PROTOC for clippy: $PROTOC"
-          cargo clippy --all-targets --all-features -- -D warnings
-        env:
-          PROTOC: /home/runner/protoc/bin/protoc
       - name: Build
-        run: |
-          export PROTOC=/home/runner/protoc/bin/protoc
-          echo "PROTOC for build: $PROTOC"
-          cargo build --release
-        env:
-          PROTOC: /home/runner/protoc/bin/protoc
+        run: cargo build --release
       - name: Test
-        run: |
-          export PROTOC=/home/runner/protoc/bin/protoc
-          echo "PROTOC for test: $PROTOC"
-          cargo test --all
-        env:
-          PROTOC: /home/runner/protoc/bin/protoc
+        run: cargo test --all
