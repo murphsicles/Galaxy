@@ -12,7 +12,7 @@ path = "src/main.rs"
 
 [dependencies]
 tonic = { workspace = true }
-prost = { workspace = true }
+protobuf = { workspace = true }
 prost-types = { workspace = true }
 prometheus = { workspace = true }
 tracing = { workspace = true }
