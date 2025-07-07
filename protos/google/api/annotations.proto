@@ -6,7 +6,7 @@ package google.api;
 import "google/api/http.proto";
 import "google/protobuf/descriptor.proto";
 
-// Remove conflicting extension
+// Removed conflicting extension to avoid duplicate definition
 // extend google.protobuf.MethodOptions {
 //   HttpRule http = 72295728;
 // }
