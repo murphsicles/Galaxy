@@ -1,4 +1,3 @@
-// shared/build.rs
 use std::path::Path;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -28,12 +27,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("cargo:warning=Pre-compiled proto files found, skipping compilation");
         return Ok(());
     }
-    protobuf_codegen::Codegen::new()
-        .out_dir(out_dir)
-        .inputs(&proto_files)
-        .include("../protos")
-        .run()
-        .expect("Protobuf code generation failed");
+    tonic_build::configure()
+        .build_server(true)
+        .out_dir("src")
+        .compile_protos(
+            &proto_files,
+            &["../protos", "../protos/google/api", "../protos/google/protobuf"],
+        )?;
     println!("cargo:warning=Proto files generated in src");
     Ok(())
 }
