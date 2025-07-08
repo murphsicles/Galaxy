@@ -116,6 +116,9 @@ struct QueryUtxoRequest {
 #[derive(Serialize, Deserialize, Debug)]
 struct QueryUtxoResponse {
     exists: bool,
+    script_pubkey: String,
+    amount: u64,
+    error: String,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -162,6 +165,7 @@ struct TransactionService {
     errors_total: Counter,
     rate_limiter: Arc<RateLimiter<String, governor::state::direct::NotKeyed, governor::clock::DefaultClock>>,
     shard_manager: Arc<ShardManager>,
+    consensus_client: ConsensusClient<Channel>,
 }
 
 impl TransactionService {
@@ -183,6 +187,9 @@ impl TransactionService {
         registry.register(Box::new(index_throughput.clone())).unwrap();
         registry.register(Box::new(errors_total.clone())).unwrap();
         let rate_limiter = Arc::new(RateLimiter::direct(Quota::per_second(NonZeroU32::new(1000).unwrap())));
+        let consensus_client = ConsensusClient::connect("http://[::1]:50055")
+            .await
+            .expect("Failed to connect to consensus_service");
 
         TransactionService {
             storage_service_addr: "127.0.0.1:50053".to_string(),
@@ -198,6 +205,7 @@ impl TransactionService {
             errors_total,
             rate_limiter,
             shard_manager: Arc::new(ShardManager::new()),
+            consensus_client,
         }
     }
 
@@ -206,13 +214,13 @@ impl TransactionService {
             .map_err(|e| format!("Failed to connect to auth_service: {}", e))?;
         let request = AuthRequest { token: token.to_string() };
         let encoded = serialize(&request).map_err(|e| format!("Serialization error: {}", e))?;
-        stream.write_all(&encoded).await.map_err(|e| format!("Write error: {}", e))?;
-        stream.flush().await.map_err(|e| format!("Flush error: {}", e))?;
+        stream.write_all(&encoded).await.map_err(|e| format("Write error: {}", e))?;
+        stream.flush().await.map_err(|e| format("Flush error: {}", e))?;
 
         let mut buffer = vec![0u8; 1024 * 1024];
-        let n = stream.read(&mut buffer).await.map_err(|e| format!("Read error: {}", e))?;
+        let n = stream.read(&mut buffer).await.map_err(|e| format("Read error: {}", e))?;
         let response: AuthResponse = deserialize(&buffer[..n])
-            .map_err(|e| format!("Deserialization error: {}", e))?;
+            .map_err(|e| format("Deserialization error: {}", e))?;
         
         if response.success {
             Ok(response.user_id)
@@ -223,13 +231,13 @@ impl TransactionService {
 
     async fn authorize(&self, user_id: &str, method: &str) -> Result<(), String> {
         let mut stream = TcpStream::connect(&self.auth_service_addr).await
-            .map_err(|e| format!("Failed to connect to auth_service: {}", e))?;
+            .map_err(|e| format("Failed to connect to auth_service: {}", e))?;
         let request = AuthorizeRequest {
             user_id: user_id.to_string(),
             service: "transaction_service".to_string(),
             method: method.to_string(),
         };
-        let encoded = serialize(&request).map_err(|e| format!("Serialization error: {}", e))?;
+        let encoded = serialize(&request).map_err(|e| format("Serialization error: {}", e))?;
         stream.write_all(&encoded).await.map_err(|e| format("Write error: {}", e))?;
         stream.flush().await.map_err(|e| format("Flush error: {}", e))?;
 
@@ -294,17 +302,17 @@ impl TransactionService {
                     format("Invalid transaction: {}", e)
                 })?;
 
-                let mut stream = TcpStream::connect(&self.consensus_service_addr).await
-                    .map_err(|e| format("Failed to connect to consensus_service: {}", e))?;
                 let consensus_request = ValidateTransactionConsensusRequest { tx_hex: tx_hex.clone() };
-                let encoded = serialize(&consensus_request).map_err(|e| format("Serialization error: {}", e))?;
-                stream.write_all(&encoded).await.map_err(|e| format("Write error: {}", e))?;
-                stream.flush().await.map_err(|e| format("Flush error: {}", e))?;
-
-                let mut buffer = vec![0u8; 1024 * 1024];
-                let n = stream.read(&mut buffer).await.map_err(|e| format("Read error: {}", e))?;
-                let consensus_response: ValidateTransactionConsensusResponse = deserialize(&buffer[..n])
-                    .map_err(|e| format("Deserialization error: {}", e))?;
+                let consensus_response = self
+                    .consensus_client
+                    .validate_transaction_consensus(consensus_request)
+                    .await
+                    .map_err(|e| {
+                        warn!("Consensus validation failed: {}", e);
+                        let _ = self.send_alert("validate_consensus_failed", &format("Consensus validation failed: {}", e), 2);
+                        format("Consensus validation failed: {}", e)
+                    })?;
+                let consensus_response = consensus_response.into_inner();
 
                 if !consensus_response.success {
                     warn!("Transaction validation failed: {}", consensus_response.error);
@@ -392,17 +400,17 @@ impl TransactionService {
                         format("Invalid transaction: {}", e)
                     })?;
 
-                    let mut stream = TcpStream::connect(&self.consensus_service_addr).await
-                        .map_err(|e| format("Failed to connect to consensus_service: {}", e))?;
                     let consensus_request = ValidateTransactionConsensusRequest { tx_hex: tx_hex.clone() };
-                    let encoded = serialize(&consensus_request).map_err(|e| format("Serialization error: {}", e))?;
-                    stream.write_all(&encoded).await.map_err(|e| format("Write error: {}", e))?;
-                    stream.flush().await.map_err(|e| format("Flush error: {}", e))?;
-
-                    let mut buffer = vec![0u8; 1024 * 1024];
-                    let n = stream.read(&mut buffer).await.map_err(|e| format("Read error: {}", e))?;
-                    let consensus_response: ValidateTransactionConsensusResponse = deserialize(&buffer[..n])
-                        .map_err(|e| format("Deserialization error: {}", e))?;
+                    let consensus_response = self
+                        .consensus_client
+                        .validate_transaction_consensus(consensus_request)
+                        .await
+                        .map_err(|e| {
+                            warn!("Consensus validation failed: {}", e);
+                            let _ = self.send_alert("batch_validate_consensus_failed", &format("Consensus validation failed: {}", e), 2);
+                            format("Consensus validation failed: {}", e)
+                        })?;
+                    let consensus_response = consensus_response.into_inner();
 
                     results.push(ValidateTransactionResponse {
                         success: consensus_response.success,
