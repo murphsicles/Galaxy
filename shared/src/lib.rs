@@ -1,5 +1,13 @@
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use toml;
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct Transaction {
+    pub id: String,
+    pub amount: u64,
+    pub timestamp: u64,
+}
 
 #[derive(Debug)]
 pub struct ShardManager {
