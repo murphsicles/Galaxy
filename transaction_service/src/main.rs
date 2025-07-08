@@ -230,13 +230,13 @@ impl TransactionService {
             method: method.to_string(),
         };
         let encoded = serialize(&request).map_err(|e| format!("Serialization error: {}", e))?;
-        stream.write_all(&encoded).await.map_err(|e| format!("Write error: {}", e))?;
-        stream.flush().await.map_err(|e| format!("Flush error: {}", e))?;
+        stream.write_all(&encoded).await.map_err(|e| format("Write error: {}", e))?;
+        stream.flush().await.map_err(|e| format("Flush error: {}", e))?;
 
         let mut buffer = vec![0u8; 1024 * 1024];
-        let n = stream.read(&mut buffer).await.map_err(|e| format!("Read error: {}", e))?;
+        let n = stream.read(&mut buffer).await.map_err(|e| format("Read error: {}", e))?;
         let response: AuthorizeResponse = deserialize(&buffer[..n])
-            .map_err(|e| format!("Deserialization error: {}", e))?;
+            .map_err(|e| format("Deserialization error: {}", e))?;
         
         if response.allowed {
             Ok(())
@@ -247,20 +247,20 @@ impl TransactionService {
 
     async fn send_alert(&self, event_type: &str, message: &str, severity: u32) -> Result<(), String> {
         let mut stream = TcpStream::connect(&self.alert_service_addr).await
-            .map_err(|e| format!("Failed to connect to alert_service: {}", e))?;
+            .map_err(|e| format("Failed to connect to alert_service: {}", e))?;
         let request = AlertRequest {
             event_type: event_type.to_string(),
             message: message.to_string(),
             severity,
         };
-        let encoded = serialize(&request).map_err(|e| format!("Serialization error: {}", e))?;
-        stream.write_all(&encoded).await.map_err(|e| format!("Write error: {}", e))?;
-        stream.flush().await.map_err(|e| format!("Flush error: {}", e))?;
+        let encoded = serialize(&request).map_err(|e| format("Serialization error: {}", e))?;
+        stream.write_all(&encoded).await.map_err(|e| format("Write error: {}", e))?;
+        stream.flush().await.map_err(|e| format("Flush error: {}", e))?;
 
         let mut buffer = vec![0u8; 1024 * 1024];
-        let n = stream.read(&mut buffer).await.map_err(|e| format!("Read error: {}", e))?;
+        let n = stream.read(&mut buffer).await.map_err(|e| format("Read error: {}", e))?;
         let response: AlertResponse = deserialize(&buffer[..n])
-            .map_err(|e| format!("Deserialization error: {}", e))?;
+            .map_err(|e| format("Deserialization error: {}", e))?;
         
         if response.success {
             self.alert_count.inc();
@@ -278,37 +278,37 @@ impl TransactionService {
         match request {
             TransactionRequestType::ValidateTransaction { request: ValidateTransactionRequest { tx_hex }, token } => {
                 let user_id = self.authenticate(&token).await
-                    .map_err(|e| format!("Authentication failed: {}", e))?;
+                    .map_err(|e| format("Authentication failed: {}", e))?;
                 self.authorize(&user_id, "ValidateTransaction").await
-                    .map_err(|e| format!("Authorization failed: {}", e))?;
+                    .map_err(|e| format("Authorization failed: {}", e))?;
                 self.rate_limiter.until_ready().await;
 
                 let tx_bytes = hex::decode(&tx_hex).map_err(|e| {
                     warn!("Invalid transaction hex: {}", e);
-                    let _ = self.send_alert("validate_invalid_tx", &format!("Invalid transaction hex: {}", e), 2);
-                    format!("Invalid transaction hex: {}", e)
+                    let _ = self.send_alert("validate_invalid_tx", &format("Invalid transaction hex: {}", e), 2);
+                    format("Invalid transaction hex: {}", e)
                 })?;
                 let tx: Transaction = sv_deserialize(&tx_bytes).map_err(|e| {
                     warn!("Invalid transaction: {}", e);
-                    let _ = self.send_alert("validate_invalid_tx_deserialization", &format!("Invalid transaction: {}", e), 2);
-                    format!("Invalid transaction: {}", e)
+                    let _ = self.send_alert("validate_invalid_tx_deserialization", &format("Invalid transaction: {}", e), 2);
+                    format("Invalid transaction: {}", e)
                 })?;
 
                 let mut stream = TcpStream::connect(&self.consensus_service_addr).await
-                    .map_err(|e| format!("Failed to connect to consensus_service: {}", e))?;
+                    .map_err(|e| format("Failed to connect to consensus_service: {}", e))?;
                 let consensus_request = ValidateTransactionConsensusRequest { tx_hex: tx_hex.clone() };
-                let encoded = serialize(&consensus_request).map_err(|e| format!("Serialization error: {}", e))?;
-                stream.write_all(&encoded).await.map_err(|e| format!("Write error: {}", e))?;
-                stream.flush().await.map_err(|e| format!("Flush error: {}", e))?;
+                let encoded = serialize(&consensus_request).map_err(|e| format("Serialization error: {}", e))?;
+                stream.write_all(&encoded).await.map_err(|e| format("Write error: {}", e))?;
+                stream.flush().await.map_err(|e| format("Flush error: {}", e))?;
 
                 let mut buffer = vec![0u8; 1024 * 1024];
-                let n = stream.read(&mut buffer).await.map_err(|e| format!("Read error: {}", e))?;
+                let n = stream.read(&mut buffer).await.map_err(|e| format("Read error: {}", e))?;
                 let consensus_response: ValidateTransactionConsensusResponse = deserialize(&buffer[..n])
-                    .map_err(|e| format!("Deserialization error: {}", e))?;
+                    .map_err(|e| format("Deserialization error: {}", e))?;
 
                 if !consensus_response.success {
                     warn!("Transaction validation failed: {}", consensus_response.error);
-                    let _ = self.send_alert("validate_tx_failed", &format!("Transaction validation failed: {}", consensus_response.error), 2);
+                    let _ = self.send_alert("validate_tx_failed", &format("Transaction validation failed: {}", consensus_response.error), 2);
                     return Ok(TransactionResponseType::ValidateTransaction(ValidateTransactionResponse {
                         success: false,
                         error: consensus_response.error,
@@ -323,37 +323,37 @@ impl TransactionService {
             }
             TransactionRequestType::ProcessTransaction { request: ProcessTransactionRequest { tx_hex }, token } => {
                 let user_id = self.authenticate(&token).await
-                    .map_err(|e| format!("Authentication failed: {}", e))?;
+                    .map_err(|e| format("Authentication failed: {}", e))?;
                 self.authorize(&user_id, "ProcessTransaction").await
-                    .map_err(|e| format!("Authorization failed: {}", e))?;
+                    .map_err(|e| format("Authorization failed: {}", e))?;
                 self.rate_limiter.until_ready().await;
 
                 let tx_bytes = hex::decode(&tx_hex).map_err(|e| {
                     warn!("Invalid transaction hex: {}", e);
-                    let _ = self.send_alert("process_invalid_tx", &format!("Invalid transaction hex: {}", e), 2);
-                    format!("Invalid transaction hex: {}", e)
+                    let _ = self.send_alert("process_invalid_tx", &format("Invalid transaction hex: {}", e), 2);
+                    format("Invalid transaction hex: {}", e)
                 })?;
                 let tx: Transaction = sv_deserialize(&tx_bytes).map_err(|e| {
                     warn!("Invalid transaction: {}", e);
-                    let _ = self.send_alert("process_invalid_tx_deserialization", &format!("Invalid transaction: {}", e), 2);
-                    format!("Invalid transaction: {}", e)
+                    let _ = self.send_alert("process_invalid_tx_deserialization", &format("Invalid transaction: {}", e), 2);
+                    format("Invalid transaction: {}", e)
                 })?;
 
                 let mut stream = TcpStream::connect(&self.storage_service_addr).await
-                    .map_err(|e| format!("Failed to connect to storage_service: {}", e))?;
+                    .map_err(|e| format("Failed to connect to storage_service: {}", e))?;
                 let storage_request = QueryUtxoRequest { txid: tx.txid().to_string(), vout: 0 };
-                let encoded = serialize(&storage_request).map_err(|e| format!("Serialization error: {}", e))?;
-                stream.write_all(&encoded).await.map_err(|e| format!("Write error: {}", e))?;
-                stream.flush().await.map_err(|e| format!("Flush error: {}", e))?;
+                let encoded = serialize(&storage_request).map_err(|e| format("Serialization error: {}", e))?;
+                stream.write_all(&encoded).await.map_err(|e| format("Write error: {}", e))?;
+                stream.flush().await.map_err(|e| format("Flush error: {}", e))?;
 
                 let mut buffer = vec![0u8; 1024 * 1024];
-                let n = stream.read(&mut buffer).await.map_err(|e| format!("Read error: {}", e))?;
+                let n = stream.read(&mut buffer).await.map_err(|e| format("Read error: {}", e))?;
                 let storage_response: QueryUtxoResponse = deserialize(&buffer[..n])
-                    .map_err(|e| format!("Deserialization error: {}", e))?;
+                    .map_err(|e| format("Deserialization error: {}", e))?;
 
                 if !storage_response.exists {
                     warn!("UTXO not found for txid: {}", tx.txid());
-                    let _ = self.send_alert("process_utxo_not_found", &format!("UTXO not found for txid: {}", tx.txid()), 3);
+                    let _ = self.send_alert("process_utxo_not_found", &format("UTXO not found for txid: {}", tx.txid()), 3);
                     return Ok(TransactionResponseType::ProcessTransaction(ProcessTransactionResponse {
                         success: false,
                         error: "UTXO not found".to_string(),
@@ -362,7 +362,7 @@ impl TransactionService {
 
                 self.tx_queue.send(tx_hex.clone()).await.map_err(|e| {
                     warn!("Failed to queue transaction: {}", e);
-                    let _ = self.send_alert("process_queue_failed", &format!("Failed to queue transaction: {}", e), 2);
+                    let _ = self.send_alert("process_queue_failed", &format("Failed to queue transaction: {}", e), 2);
                     format("Failed to queue transaction: {}", e)
                 })?;
 
@@ -374,16 +374,16 @@ impl TransactionService {
             }
             TransactionRequestType::BatchValidateTransaction { request: BatchValidateTransactionRequest { tx_hexes }, token } => {
                 let user_id = self.authenticate(&token).await
-                    .map_err(|e| format!("Authentication failed: {}", e))?;
+                    .map_err(|e| format("Authentication failed: {}", e))?;
                 self.authorize(&user_id, "BatchValidateTransaction").await
-                    .map_err(|e| format!("Authorization failed: {}", e))?;
+                    .map_err(|e| format("Authorization failed: {}", e))?;
                 self.rate_limiter.until_ready().await;
 
                 let mut results = vec![];
                 for tx_hex in tx_hexes {
                     let tx_bytes = hex::decode(&tx_hex).map_err(|e| {
                         warn!("Invalid transaction hex: {}", e);
-                        let _ = self.send_alert("batch_validate_invalid_tx", &format!("Invalid transaction hex: {}", e), 2);
+                        let _ = self.send_alert("batch_validate_invalid_tx", &format("Invalid transaction hex: {}", e), 2);
                         format("Invalid transaction hex: {}", e)
                     })?;
                     let _tx: Transaction = sv_deserialize(&tx_bytes).map_err(|e| {
