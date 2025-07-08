@@ -8,14 +8,19 @@ name = "alert_service"
 path = "src/main.rs"
 
 [dependencies]
+shared = { path = "../shared" }
 tonic = { workspace = true }
-protobuf = { workspace = true }
-prost-types = { workspace = true }
+prost = { workspace = true }
 prometheus = { workspace = true }
+sv = { workspace = true }
+toml = { workspace = true }
 tracing = { workspace = true }
-governor = { workspace = true }
-tokio = { version = "1.40.0", features = ["full"] }
+tracing-subscriber = { workspace = true }
 async-stream = { workspace = true }
-
-[build-dependencies]
-tonic-build = { workspace = true }
+tigerbeetle-unofficial = { workspace = true }
+sled = { workspace = true }
+jsonwebtoken = { workspace = true }
+governor = { workspace = true }
+async-channel = { workspace = true }
+hex = { workspace = true }
+tokio = { version = "1.40.0", features = ["full"] }
