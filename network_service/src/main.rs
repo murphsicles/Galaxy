@@ -15,11 +15,6 @@ use tokio::sync::Mutex;
 use toml;
 use shared::{ShardManager, Transaction};
 
-// Temporary: Keep BlockClient until block_service is updated
-use block::block_client::BlockClient;
-use block::ValidateBlockRequest;
-use tonic::transport::Channel;
-
 #[derive(Serialize, Deserialize, Debug)]
 struct AuthRequest {
     token: String,
