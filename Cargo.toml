@@ -17,6 +17,7 @@ members = [
     "auth_service",
     "alert_service",
     "index_service",
+    "api_service",
 ]
 resolver = "2"
 
