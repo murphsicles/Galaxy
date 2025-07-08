@@ -13,10 +13,12 @@ use tokio::sync::Mutex;
 use toml;
 use governor::{Quota, RateLimiter};
 use shared::ShardManager;
+use sv::messages::{Tx, TxOut};
 use sv::block::Block;
-use sv::transaction::Transaction;
-use sv::util::{deserialize as sv_deserialize, serialize};
+use sv::util::Serializable;
 use sled::Db;
+use std::io::Cursor;
+use async_channel::Receiver;
 
 #[derive(Serialize, Deserialize, Debug)]
 struct AuthRequest {
@@ -215,7 +217,7 @@ impl OverlayService {
         let mut stream = TcpStream::connect(&self.auth_service_addr).await
             .map_err(|e| format!("Failed to connect to auth_service: {}", e))?;
         let request = AuthRequest { token: token.to_string() };
-        let encoded = serialize(&request).map_err(|e| format!("Serialization error: {}", e))?;
+        let encoded = serialize(&request).map_err(|e| format("Serialization error: {}", e))?;
         stream.write_all(&encoded).await.map_err(|e| format("Write error: {}", e))?;
         stream.flush().await.map_err(|e| format("Flush error: {}", e))?;
 
@@ -282,13 +284,13 @@ impl OverlayService {
     }
 
     async fn validate_overlay_consensus(&self, block: &Block) -> Result<(), String> {
-        if block.serialized_size() > 34_359_738_368 {
-            return Err(format("Block size exceeds 32GB: {}", block.serialized_size()));
+        if block.size() > 34_359_738_368 {
+            return Err(format!("Block size exceeds 32GB: {}", block.size()));
         }
         for tx in &block.transactions {
-            for output in &tx.output {
-                if output.script.is_op_return() && output.script.serialized_size() > 4_294_967_296 {
-                    return Err(format("OP_RETURN size exceeds 4.3GB: {}", output.script.serialized_size()));
+            for output in &tx.outputs {
+                if output.lock_script.is_op_return() && output.lock_script.size() > 4_294_967_296 {
+                    return Err(format!("OP_RETURN size exceeds 4.3GB: {}", output.lock_script.size()));
                 }
             }
         }
@@ -308,7 +310,7 @@ impl OverlayService {
                 self.rate_limiter.until_ready().await;
 
                 let db = self.db.lock().await;
-                let key = format("overlay:{}", request.overlay_id);
+                let key = format!("overlay:{}", request.overlay_id);
                 db.insert(key.as_bytes(), request.consensus_rules.as_bytes()).map_err(|e| {
                     warn!("Failed to create overlay: {}", e);
                     let _ = self.send_alert("create_overlay_failed", &format("Failed to create overlay: {}", e), 2);
@@ -329,7 +331,7 @@ impl OverlayService {
                 self.rate_limiter.until_ready().await;
 
                 let db = self.db.lock().await;
-                let key = format("overlay:{}", request.overlay_id);
+                let key = format!("overlay:{}", request.overlay_id);
                 if db.get(key.as_bytes()).map_err(|e| {
                     warn!("Failed to access overlay: {}", e);
                     let _ = self.send_alert("join_overlay_failed", &format("Failed to access overlay: {}", e), 2);
@@ -357,7 +359,7 @@ impl OverlayService {
                 self.rate_limiter.until_ready().await;
 
                 let db = self.db.lock().await;
-                let key = format("overlay:{}", request.overlay_id);
+                let key = format!("overlay:{}", request.overlay_id);
                 if db.get(key.as_bytes()).map_err(|e| {
                     warn!("Failed to access overlay: {}", e);
                     let _ = self.send_alert("leave_overlay_failed", &format("Failed to access overlay: {}", e), 2);
@@ -385,7 +387,7 @@ impl OverlayService {
                 self.rate_limiter.until_ready().await;
 
                 let db = self.db.lock().await;
-                let key = format("overlay:{}", request.overlay_id);
+                let key = format!("overlay:{}", request.overlay_id);
                 match db.get(key.as_bytes()) {
                     Ok(Some(value)) => {
                         self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
@@ -427,7 +429,7 @@ impl OverlayService {
                     let _ = self.send_alert("validate_overlay_invalid_hex", &format("Invalid block hex: {}", e), 2);
                     format("Invalid block hex: {}", e)
                 })?;
-                let block: Block = sv_deserialize(&block_bytes).map_err(|e| {
+                let block: Block = Serializable::read(&mut Cursor::new(&block_bytes)).map_err(|e| {
                     warn!("Invalid block: {}", e);
                     let _ = self.send_alert("validate_overlay_invalid_deserialization", &format("Invalid block: {}", e), 2);
                     format("Invalid block: {}", e)
@@ -461,12 +463,12 @@ impl OverlayService {
                         let _ = self.send_alert("assemble_overlay_invalid_tx", &format("Invalid transaction hex: {}", e), 2);
                         format("Invalid transaction hex: {}", e)
                     })?;
-                    let tx: Transaction = sv_deserialize(&tx_bytes).map_err(|e| {
+                    let tx: Tx = Serializable::read(&mut Cursor::new(&tx_bytes)).map_err(|e| {
                         warn!("Invalid transaction: {}", e);
                         let _ = self.send_alert("assemble_overlay_invalid_tx_deserialization", &format("Invalid transaction: {}", e), 2);
                         format("Invalid transaction: {}", e)
                     })?;
-                    total_size += tx.serialized_size();
+                    total_size += tx.size();
                     if total_size > 34_359_738_368 {
                         warn!("Block size exceeds 32GB: {}", total_size);
                         let _ = self.send_alert("assemble_overlay_block_size_exceeded", &format("Block size exceeds 32GB: {}", total_size), 3);
@@ -479,7 +481,9 @@ impl OverlayService {
                     block.add_transaction(tx);
                 }
 
-                let block_hex = hex::encode(serialize(&block));
+                let mut block_bytes = Vec::new();
+                block.write(&mut block_bytes).unwrap();
+                let block_hex = hex::encode(&block_bytes);
                 self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
                 Ok(OverlayResponseType::AssembleOverlayBlock(AssembleOverlayBlockResponse {
                     success: true,
@@ -520,7 +524,7 @@ impl OverlayService {
                 service.requests_total.inc();
                 let start = std::time::Instant::now();
                 let db = service.db.lock().await;
-                let key = format("overlay:{}", req.overlay_id);
+                let key = format!("overlay:{}", req.overlay_id);
                 match db.get(key.as_bytes()) {
                     Ok(Some(value)) => {
                         service.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
