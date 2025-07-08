@@ -13,8 +13,9 @@ use tokio::sync::Mutex;
 use toml;
 use governor::{Quota, RateLimiter};
 use shared::ShardManager;
-use sv::block::Block;
-use sv::util::{deserialize as sv_deserialize, serialize};
+use sv::messages::Tx;
+use sv::util::Serializable;
+use std::io::Cursor;
 
 #[derive(Serialize, Deserialize, Debug)]
 struct AuthRequest {
@@ -347,15 +348,15 @@ impl MiningService {
                     let _ = self.send_alert("submit_mined_block_invalid_hex", &format("Invalid block hex: {}", e), 2);
                     format("Invalid block hex: {}", e)
                 })?;
-                let block: Block = sv_deserialize(&block_bytes).map_err(|e| {
+                let block: Block = Serializable::read(&mut Cursor::new(&block_bytes)).map_err(|e| {
                     warn!("Invalid block: {}", e);
                     let _ = self.send_alert("submit_mined_block_invalid_deserialization", &format("Invalid block: {}", e), 2);
                     format("Invalid block: {}", e)
                 })?;
 
-                if block.serialized_size() > 34_359_738_368 {
-                    warn!("Block size exceeds 32GB: {}", block.serialized_size());
-                    let _ = self.send_alert("submit_mined_block_size_exceeded", &format("Block size exceeds 32GB: {}", block.serialized_size()), 3);
+                if block.size() > 34_359_738_368 {
+                    warn!("Block size exceeds 32GB: {}", block.size());
+                    let _ = self.send_alert("submit_mined_block_size_exceeded", &format("Block size exceeds 32GB: {}", block.size()), 3);
                     return Ok(MiningResponseType::SubmitMinedBlock(SubmitMinedBlockResponse {
                         success: false,
                         error: "Block size exceeds 32GB".to_string(),
@@ -612,4 +613,16 @@ impl MiningService {
             }
         }
     }
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::INFO)
+        .init();
+
+    let addr = "127.0.0.1:50058";
+    let mining_service = MiningService::new().await;
+    mining_service.run(addr).await?;
+    Ok(())
 }
