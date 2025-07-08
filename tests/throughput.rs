@@ -1,9 +1,12 @@
 use tokio::net::TcpStream;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use bincode::{serialize, deserialize};
-use sv::transaction::Transaction;
-use sv::util::serialize as sv_serialize;
+use sv::messages::Tx;
+use sv::util::Serializable;
 use std::time::{Instant, Duration};
 use serde::{Serialize, Deserialize};
+use hex;
+use std::io::Cursor;
 
 #[derive(Serialize, Deserialize, Debug)]
 enum TransactionRequestType {
@@ -30,8 +33,10 @@ struct ProcessTransactionResponse {
 async fn test_throughput() {
     let addr = "127.0.0.1:50052"; // transaction_service address
     let token = "test_token".to_string(); // Replace with valid JWT token
-    let tx = Transaction::new(); // Create a dummy transaction
-    let tx_hex = hex::encode(sv_serialize(&tx).unwrap());
+    let tx = Tx::default(); // Create a dummy transaction
+    let mut tx_bytes = Vec::new();
+    tx.write(&mut tx_bytes).unwrap();
+    let tx_hex = hex::encode(&tx_bytes);
     let request = TransactionRequestType::ProcessTransaction {
         request: ProcessTransactionRequest { tx_hex },
         token,
@@ -85,6 +90,5 @@ async fn test_throughput() {
 
     let tps = total_requests as f64 / duration.as_secs_f64();
     println!("Throughput: {:.2} TPS", tps);
-    // Relaxed assertion for CI; adjust based on actual performance
     assert!(tps >= 100.0, "Throughput below 100 TPS: {:.2}", tps);
 }
