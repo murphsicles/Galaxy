@@ -16,32 +16,6 @@ use toml;
 use shared::{ShardManager, Transaction};
 
 #[derive(Serialize, Deserialize, Debug)]
-enum NetworkRequest {
-    Ping { message: String },
-    DiscoverPeers,
-    BroadcastTransaction { tx_hex: String },
-    BroadcastBlock { block_hex: String },
-    GetMetrics,
-}
-
-#[derive(Serialize, Deserialize, Debug)]
-enum NetworkResponse {
-    Ping { response: String, error: String },
-    DiscoverPeers { peers: Vec<String>, error: String },
-    BroadcastTransaction { success: bool, error: String },
-    BroadcastBlock { success: bool, error: String },
-    GetMetrics {
-        service_name: String,
-        requests_total: u64,
-        avg_latency_ms: f64,
-        errors_total: u64,
-        cache_hits: u64,
-        alert_count: u64,
-        index_throughput: f64,
-    },
-}
-
-#[derive(Serialize, Deserialize, Debug)]
 struct AuthRequest {
     token: String,
 }
@@ -75,6 +49,109 @@ struct AlertRequest {
 
 #[derive(Serialize, Deserialize, Debug)]
 struct AlertResponse {
+    success: bool,
+    error: String,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct NetworkRequest {
+    ping: Option<PingRequest>,
+    discover_peers: Option<DiscoverPeersRequest>,
+    broadcast_transaction: Option<BroadcastTransactionRequest>,
+    broadcast_block: Option<BroadcastBlockRequest>,
+    get_metrics: Option<GetMetricsRequest>,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct NetworkResponse {
+    ping: Option<PingResponse>,
+    discover_peers: Option<DiscoverPeersResponse>,
+    broadcast_transaction: Option<BroadcastTransactionResponse>,
+    broadcast_block: Option<BroadcastBlockResponse>,
+    get_metrics: Option<GetMetricsResponse>,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct PingRequest {
+    message: String,
+    token: String,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct PingResponse {
+    response: String,
+    error: String,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct DiscoverPeersRequest {
+    token: String,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct DiscoverPeersResponse {
+    peers: Vec<String>,
+    error: String,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct BroadcastTransactionRequest {
+    tx_hex: String,
+    token: String,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct BroadcastTransactionResponse {
+    success: bool,
+    error: String,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct BroadcastBlockRequest {
+    block_hex: String,
+    token: String,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct BroadcastBlockResponse {
+    success: bool,
+    error: String,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct GetMetricsRequest {
+    token: String,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct GetMetricsResponse {
+    service_name: String,
+    requests_total: u64,
+    avg_latency_ms: f64,
+    errors_total: u64,
+    cache_hits: u64,
+    alert_count: u64,
+    index_throughput: f64,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct TransactionRequest {
+    tx_hex: String,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct TransactionResponse {
+    success: bool,
+    error: String,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct BlockRequest {
+    block_hex: String,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct BlockResponse {
     success: bool,
     error: String,
 }
@@ -138,16 +215,16 @@ impl NetworkService {
 
     async fn authenticate(&self, token: &str) -> Result<String, String> {
         let mut stream = TcpStream::connect(&self.auth_service_addr).await
-            .map_err(|e| format!("Failed to connect to auth_service: {}", e))?;
+            .map_err(|e| format("Failed to connect to auth_service: {}", e))?;
         let request = AuthRequest { token: token.to_string() };
-        let encoded = serialize(&request).map_err(|e| format!("Serialization error: {}", e))?;
-        stream.write_all(&encoded).await.map_err(|e| format!("Write error: {}", e))?;
-        stream.flush().await.map_err(|e| format!("Flush error: {}", e))?;
+        let encoded = serialize(&request).map_err(|e| format("Serialization error: {}", e))?;
+        stream.write_all(&encoded).await.map_err(|e| format("Write error: {}", e))?;
+        stream.flush().await.map_err(|e| format("Flush error: {}", e))?;
 
         let mut buffer = vec![0u8; 1024 * 1024];
-        let n = stream.read(&mut buffer).await.map_err(|e| format!("Read error: {}", e))?;
+        let n = stream.read(&mut buffer).await.map_err(|e| format("Read error: {}", e))?;
         let response: AuthResponse = deserialize(&buffer[..n])
-            .map_err(|e| format!("Deserialization error: {}", e))?;
+            .map_err(|e| format("Deserialization error: {}", e))?;
         
         if response.success {
             Ok(response.user_id)
@@ -158,20 +235,20 @@ impl NetworkService {
 
     async fn authorize(&self, user_id: &str, method: &str) -> Result<(), String> {
         let mut stream = TcpStream::connect(&self.auth_service_addr).await
-            .map_err(|e| format!("Failed to connect to auth_service: {}", e))?;
+            .map_err(|e| format("Failed to connect to auth_service: {}", e))?;
         let request = AuthorizeRequest {
             user_id: user_id.to_string(),
             service: "network_service".to_string(),
             method: method.to_string(),
         };
-        let encoded = serialize(&request).map_err(|e| format!("Serialization error: {}", e))?;
-        stream.write_all(&encoded).await.map_err(|e| format!("Write error: {}", e))?;
-        stream.flush().await.map_err(|e| format!("Flush error: {}", e))?;
+        let encoded = serialize(&request).map_err(|e| format("Serialization error: {}", e))?;
+        stream.write_all(&encoded).await.map_err(|e| format("Write error: {}", e))?;
+        stream.flush().await.map_err(|e| format("Flush error: {}", e))?;
 
         let mut buffer = vec![0u8; 1024 * 1024];
-        let n = stream.read(&mut buffer).await.map_err(|e| format!("Read error: {}", e))?;
+        let n = stream.read(&mut buffer).await.map_err(|e| format("Read error: {}", e))?;
         let response: AuthorizeResponse = deserialize(&buffer[..n])
-            .map_err(|e| format!("Deserialization error: {}", e))?;
+            .map_err(|e| format("Deserialization error: {}", e))?;
         
         if response.allowed {
             Ok(())
@@ -182,20 +259,20 @@ impl NetworkService {
 
     async fn send_alert(&self, event_type: &str, message: &str, severity: u32) -> Result<(), String> {
         let mut stream = TcpStream::connect(&self.alert_service_addr).await
-            .map_err(|e| format!("Failed to connect to alert_service: {}", e))?;
+            .map_err(|e| format("Failed to connect to alert_service: {}", e))?;
         let request = AlertRequest {
             event_type: event_type.to_string(),
             message: message.to_string(),
             severity,
         };
-        let encoded = serialize(&request).map_err(|e| format!("Serialization error: {}", e))?;
-        stream.write_all(&encoded).await.map_err(|e| format!("Write error: {}", e))?;
-        stream.flush().await.map_err(|e| format!("Flush error: {}", e))?;
+        let encoded = serialize(&request).map_err(|e| format("Serialization error: {}", e))?;
+        stream.write_all(&encoded).await.map_err(|e| format("Write error: {}", e))?;
+        stream.flush().await.map_err(|e| format("Flush error: {}", e))?;
 
         let mut buffer = vec![0u8; 1024 * 1024];
-        let n = stream.read(&mut buffer).await.map_err(|e| format!("Read error: {}", e))?;
+        let n = stream.read(&mut buffer).await.map_err(|e| format("Read error: {}", e))?;
         let response: AlertResponse = deserialize(&buffer[..n])
-            .map_err(|e| format!("Deserialization error: {}", e))?;
+            .map_err(|e| format("Deserialization error: {}", e))?;
         
         if response.success {
             self.alert_count.inc();
@@ -206,105 +283,126 @@ impl NetworkService {
         }
     }
 
-    async fn handle_request(&self, request: NetworkRequest, token: Option<String>) -> Result<NetworkResponse, String> {
+    async fn handle_request(&self, request: NetworkRequest) -> Result<NetworkResponse, String> {
         self.requests_total.inc();
         let start = std::time::Instant::now();
 
-        // Authenticate if token provided
-        let user_id = if let Some(token) = token {
-            self.authenticate(&token).await?
-        } else {
-            return Err("Missing token".to_string());
-        };
+        if let Some(ping_request) = request.ping {
+            let user_id = self.authenticate(&ping_request.token).await?;
+            self.authorize(&user_id, "Ping").await?;
+            self.rate_limiter.until_ready().await;
+            let response = format("Pong: {}", ping_request.message);
+            self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
+            Ok(NetworkResponse {
+                ping: Some(PingResponse { response, error: "".to_string() }),
+                discover_peers: None,
+                broadcast_transaction: None,
+                broadcast_block: None,
+                get_metrics: None,
+            })
+        } else if let Some(_discover_peers) = request.discover_peers {
+            let user_id = self.authenticate(&_discover_peers.token).await?;
+            self.authorize(&user_id, "DiscoverPeers").await?;
+            self.rate_limiter.until_ready().await;
+            let peers = self.peers.lock().await;
+            let peer_list = peers.clone();
+            self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
+            Ok(NetworkResponse {
+                ping: None,
+                discover_peers: Some(DiscoverPeersResponse { peers: peer_list, error: "".to_string() }),
+                broadcast_transaction: None,
+                broadcast_block: None,
+                get_metrics: None,
+            })
+        } else if let Some(broadcast_transaction) = request.broadcast_transaction {
+            let user_id = self.authenticate(&broadcast_transaction.token).await?;
+            self.authorize(&user_id, "BroadcastTransaction").await?;
+            self.rate_limiter.until_ready().await;
+            
+            let tx_bytes = hex::decode(&broadcast_transaction.tx_hex).map_err(|e| {
+                warn!("Invalid transaction hex: {}", e);
+                let _ = self.send_alert("broadcast_invalid_tx", &format("Invalid transaction hex: {}", e), 2);
+                format("Invalid transaction hex: {}", e)
+            })?;
+            let tx: Transaction = sv_deserialize(&tx_bytes).map_err(|e| {
+                warn!("Invalid transaction: {}", e);
+                let _ = self.send_alert("broadcast_invalid_tx_deserialization", &format("Invalid transaction: {}", e), 2);
+                format("Invalid transaction: {}", e)
+            })?;
 
-        // Handle request
-        match request {
-            NetworkRequest::Ping { message } => {
-                self.authorize(&user_id, "Ping").await?;
-                self.rate_limiter.until_ready().await;
-                let response = format!("Pong: {}", message);
-                self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
-                Ok(NetworkResponse::Ping { response, error: "".to_string() })
+            let mut stream = TcpStream::connect(&self.transaction_service_addr).await
+                .map_err(|e| format("Failed to connect to transaction_service: {}", e))?;
+            let tx_request = TransactionRequest { tx_hex: broadcast_transaction.tx_hex.clone() };
+            let encoded = serialize(&tx_request).map_err(|e| format("Serialization error: {}", e))?;
+            stream.write_all(&encoded).await.map_err(|e| format("Write error: {}", e))?;
+            stream.flush().await.map_err(|e| format("Flush error: {}", e))?;
+
+            let mut buffer = vec![0u8; 1024 * 1024];
+            let n = stream.read(&mut buffer).await.map_err(|e| format("Read error: {}", e))?;
+            let tx_response: TransactionResponse = deserialize(&buffer[..n])
+                .map_err(|e| format("Deserialization error: {}", e))?;
+
+            if !tx_response.success {
+                warn!("Transaction processing failed: {}", tx_response.error);
+                let _ = self.send_alert("broadcast_tx_failed", &format("Transaction processing failed: {}", tx_response.error), 2);
+                return Err(tx_response.error);
             }
-            NetworkRequest::DiscoverPeers => {
-                self.authorize(&user_id, "DiscoverPeers").await?;
-                self.rate_limiter.until_ready().await;
-                let peers = self.peers.lock().await;
-                let peer_list = peers.clone();
-                self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
-                Ok(NetworkResponse::DiscoverPeers { peers: peer_list, error: "".to_string() })
+
+            self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
+            Ok(NetworkResponse {
+                ping: None,
+                discover_peers: None,
+                broadcast_transaction: Some(BroadcastTransactionResponse { success: true, error: "".to_string() }),
+                broadcast_block: None,
+                get_metrics: None,
+            })
+        } else if let Some(broadcast_block) = request.broadcast_block {
+            let user_id = self.authenticate(&broadcast_block.token).await?;
+            self.authorize(&user_id, "BroadcastBlock").await?;
+            self.rate_limiter.until_ready().await;
+            
+            let block_bytes = hex::decode(&broadcast_block.block_hex).map_err(|e| {
+                warn!("Invalid block hex: {}", e);
+                let _ = self.send_alert("broadcast_invalid_block", &format("Invalid block hex: {}", e), 2);
+                format("Invalid block hex: {}", e)
+            })?;
+
+            let mut stream = TcpStream::connect(&self.block_service_addr).await
+                .map_err(|e| format("Failed to connect to block_service: {}", e))?;
+            let block_request = BlockRequest { block_hex: broadcast_block.block_hex.clone() };
+            let encoded = serialize(&block_request).map_err(|e| format("Serialization error: {}", e))?;
+            stream.write_all(&encoded).await.map_err(|e| format("Write error: {}", e))?;
+            stream.flush().await.map_err(|e| format("Flush error: {}", e))?;
+
+            let mut buffer = vec![0u8; 1024 * 1024];
+            let n = stream.read(&mut buffer).await.map_err(|e| format("Read error: {}", e))?;
+            let block_response: BlockResponse = deserialize(&buffer[..n])
+                .map_err(|e| format("Deserialization error: {}", e))?;
+
+            if !block_response.success {
+                warn!("Block validation failed: {}", block_response.error);
+                let _ = self.send_alert("broadcast_block_failed", &format("Block validation failed: {}", block_response.error), 2);
+                return Err(block_response.error);
             }
-            NetworkRequest::BroadcastTransaction { tx_hex } => {
-                self.authorize(&user_id, "BroadcastTransaction").await?;
-                self.rate_limiter.until_ready().await;
-                
-                let tx_bytes = hex::decode(&tx_hex).map_err(|e| {
-                    warn!("Invalid transaction hex: {}", e);
-                    let _ = self.send_alert("broadcast_invalid_tx", &format!("Invalid transaction hex: {}", e), 2);
-                    format!("Invalid transaction hex: {}", e)
-                })?;
-                let tx: Transaction = deserialize(&tx_bytes).map_err(|e| {
-                    warn!("Invalid transaction: {}", e);
-                    let _ = self.send_alert("broadcast_invalid_tx_deserialization", &format!("Invalid transaction: {}", e), 2);
-                    format!("Invalid transaction: {}", e)
-                })?;
 
-                let mut stream = TcpStream::connect(&self.transaction_service_addr).await
-                    .map_err(|e| format!("Failed to connect to transaction_service: {}", e))?;
-                let tx_request = TransactionRequest { tx_hex: tx_hex.clone() };
-                let encoded = serialize(&tx_request).map_err(|e| format!("Serialization error: {}", e))?;
-                stream.write_all(&encoded).await.map_err(|e| format!("Write error: {}", e))?;
-                stream.flush().await.map_err(|e| format!("Flush error: {}", e))?;
-
-                let mut buffer = vec![0u8; 1024 * 1024];
-                let n = stream.read(&mut buffer).await.map_err(|e| format!("Read error: {}", e))?;
-                let tx_response: TransactionResponse = deserialize(&buffer[..n])
-                    .map_err(|e| format!("Deserialization error: {}", e))?;
-
-                if !tx_response.success {
-                    warn!("Transaction processing failed: {}", tx_response.error);
-                    let _ = self.send_alert("broadcast_tx_failed", &format!("Transaction processing failed: {}", tx_response.error), 2);
-                    return Err(tx_response.error);
-                }
-
-                self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
-                Ok(NetworkResponse::BroadcastTransaction { success: true, error: "".to_string() })
-            }
-            NetworkRequest::BroadcastBlock { block_hex } => {
-                self.authorize(&user_id, "BroadcastBlock").await?;
-                self.rate_limiter.until_ready().await;
-                
-                let block_bytes = hex::decode(&block_hex).map_err(|e| {
-                    warn!("Invalid block hex: {}", e);
-                    let _ = self.send_alert("broadcast_invalid_block", &format!("Invalid block hex: {}", e), 2);
-                    format!("Invalid block hex: {}", e)
-                })?;
-
-                let mut stream = TcpStream::connect(&self.block_service_addr).await
-                    .map_err(|e| format!("Failed to connect to block_service: {}", e))?;
-                let block_request = BlockRequest { block_hex: block_hex.clone() };
-                let encoded = serialize(&block_request).map_err(|e| format!("Serialization error: {}", e))?;
-                stream.write_all(&encoded).await.map_err(|e| format!("Write error: {}", e))?;
-                stream.flush().await.map_err(|e| format!("Flush error: {}", e))?;
-
-                let mut buffer = vec![0u8; 1024 * 1024];
-                let n = stream.read(&mut buffer).await.map_err(|e| format!("Read error: {}", e))?;
-                let block_response: BlockResponse = deserialize(&buffer[..n])
-                    .map_err(|e| format!("Deserialization error: {}", e))?;
-
-                if !block_response.success {
-                    warn!("Block validation failed: {}", block_response.error);
-                    let _ = self.send_alert("broadcast_block_failed", &format!("Block validation failed: {}", block_response.error), 2);
-                    return Err(block_response.error);
-                }
-
-                self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
-                Ok(NetworkResponse::BroadcastBlock { success: true, error: "".to_string() })
-            }
-            NetworkRequest::GetMetrics => {
-                self.authorize(&user_id, "GetMetrics").await?;
-                self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
-                Ok(NetworkResponse::GetMetrics {
+            self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
+            Ok(NetworkResponse {
+                ping: None,
+                discover_peers: None,
+                broadcast_transaction: None,
+                broadcast_block: Some(BroadcastBlockResponse { success: true, error: "".to_string() }),
+                get_metrics: None,
+            })
+        } else if let Some(_get_metrics) = request.get_metrics {
+            let user_id = self.authenticate(&_get_metrics.token).await?;
+            self.authorize(&user_id, "GetMetrics").await?;
+            self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
+            Ok(NetworkResponse {
+                ping: None,
+                discover_peers: None,
+                broadcast_transaction: None,
+                broadcast_block: None,
+                get_metrics: Some(GetMetricsResponse {
                     service_name: "network_service".to_string(),
                     requests_total: self.requests_total.get() as u64,
                     avg_latency_ms: self.latency_ms.get(),
@@ -312,8 +410,10 @@ impl NetworkService {
                     cache_hits: 0,
                     alert_count: self.alert_count.get() as u64,
                     index_throughput: 0.0,
-                })
-            }
+                }),
+            })
+        } else {
+            Err("Invalid request".to_string())
         }
     }
 
@@ -337,8 +437,7 @@ impl NetworkService {
                                         return;
                                     }
                                 };
-                                let token = None; // Token extraction needs client implementation
-                                match service.handle_request(request, token).await {
+                                match service.handle_request(request).await {
                                     Ok(response) => {
                                         let encoded = serialize(&response).unwrap();
                                         if let Err(e) = stream.write_all(&encoded).await {
@@ -353,9 +452,12 @@ impl NetworkService {
                                     Err(e) => {
                                         error!("Request error: {}", e);
                                         service.errors_total.inc();
-                                        let response = NetworkResponse::Ping {
-                                            response: "".to_string(),
-                                            error: e,
+                                        let response = NetworkResponse {
+                                            ping: Some(PingResponse { response: "".to_string(), error: e }),
+                                            discover_peers: None,
+                                            broadcast_transaction: None,
+                                            broadcast_block: None,
+                                            get_metrics: None,
                                         };
                                         let encoded = serialize(&response).unwrap();
                                         if let Err(e) = stream.write_all(&encoded).await {
