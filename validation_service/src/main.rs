@@ -14,8 +14,9 @@ use tokio::sync::Mutex;
 use toml;
 use governor::{Quota, RateLimiter};
 use shared::ShardManager;
-use sv::transaction::Transaction;
-use sv::util::{deserialize as sv_deserialize, hash::Sha256d, serialize};
+use sv::messages::Tx;
+use sv::util::{Serializable, Hash256};
+use std::io::Cursor;
 
 #[derive(Serialize, Deserialize, Debug)]
 struct AuthRequest {
@@ -322,7 +323,7 @@ impl ValidationService {
             let _ = self.send_alert("spv_invalid_txid", &format("Invalid txid: {}", e), 2);
             format("Invalid txid: {}", e)
         })?;
-        let tx: Transaction = sv_deserialize(&tx_bytes).map_err(|e| {
+        let tx: Tx = Serializable::read(&mut Cursor::new(&tx_bytes)).map_err(|e| {
             warn!("Invalid transaction: {}", e);
             let _ = self.send_alert("spv_invalid_transaction", &format("Invalid transaction: {}", e), 2);
             format("Invalid transaction: {}", e)
@@ -330,7 +331,7 @@ impl ValidationService {
 
         let mut stream = TcpStream::connect(&self.block_service_addr).await
             .map_err(|e| format("Failed to connect to block_service: {}", e))?;
-        let block_request = BlockRequestType::GetBlockHeaders { request: GetBlockHeadersRequest { block_hash: tx.txid().to_string() } };
+        let block_request = BlockRequestType::GetBlockHeaders { request: GetBlockHeadersRequest { block_hash: hex::encode(tx.hash().0) } };
         let encoded = serialize(&block_request).map_err(|e| format("Serialization error: {}", e))?;
         stream.write_all(&encoded).await.map_err(|e| format("Write error: {}", e))?;
         stream.flush().await.map_err(|e| format("Flush error: {}", e))?;
@@ -361,15 +362,17 @@ impl ValidationService {
             format("Failed to calculate merkle path: {}", e)
         })?;
 
-        let merkle_path_hex = hex::encode(serialize(&merkle_path));
+        let mut merkle_path_bytes = Vec::new();
+        merkle_path.write(&mut merkle_path_bytes).unwrap();
+        let merkle_path_hex = hex::encode(&merkle_path_bytes);
         proof_cache.put(txid.to_string(), (merkle_path_hex.clone(), headers.clone()));
         self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
 
         Ok((merkle_path_hex, headers))
     }
 
-    async fn calculate_merkle_path(&self, tx: &Transaction) -> Result<Vec<Sha256d>, String> {
-        info!("Calculating merkle path for txid: {}", tx.txid());
+    async fn calculate_merkle_path(&self, tx: &Tx) -> Result<Vec<Hash256>, String> {
+        info!("Calculating merkle path for txid: {}", hex::encode(tx.hash().0));
         Ok(vec![]) // Placeholder
     }
 
@@ -382,7 +385,7 @@ impl ValidationService {
             let _ = self.send_alert("spv_verify_invalid_txid", &format("Invalid txid: {}", e), 2);
             format("Invalid txid: {}", e)
         })?;
-        let _tx: Transaction = sv_deserialize(&tx_bytes).map_err(|e| {
+        let _tx: Tx = Serializable::read(&mut Cursor::new(&tx_bytes)).map_err(|e| {
             warn!("Invalid transaction: {}", e);
             let _ = self.send_alert("spv_verify_invalid_transaction", &format("Invalid transaction: {}", e), 2);
             format("Invalid transaction: {}", e)
@@ -393,7 +396,7 @@ impl ValidationService {
             let _ = self.send_alert("spv_verify_invalid_merkle_path", &format("Invalid merkle path: {}", e), 2);
             format("Invalid merkle path: {}", e)
         })?;
-        let _merkle_path: Vec<Sha256d> = deserialize(&merkle_path_bytes).map_err(|e| {
+        let _merkle_path: Vec<Hash256> = Serializable::read(&mut Cursor::new(&merkle_path_bytes)).map_err(|e| {
             warn!("Invalid merkle path deserialization: {}", e);
             let _ = self.send_alert("spv_verify_merkle_path_deserialization", &format("Invalid merkle path: {}", e), 2);
             format("Invalid merkle path deserialization: {}", e)
@@ -633,4 +636,16 @@ impl ValidationService {
             }
         }
     }
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::INFO)
+        .init();
+
+    let addr = "127.0.0.1:50057";
+    let validation_service = ValidationService::new().await;
+    validation_service.run(addr).await?;
+    Ok(())
 }
