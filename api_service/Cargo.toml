@@ -3,8 +3,24 @@ name = "api_service"
 version = "0.1.0"
 edition = "2021"
 
+[[bin]]
+name = "api_service"
+path = "src/main.rs"
+
 [dependencies]
-tokio = { version = "1", features = ["full"] } # Async runtime
-tonic = "0.8"                                  # gRPC support
-prost = "0.11"                                 # Protocol Buffers
-shared = { path = "../shared" }                # Link to shared crate
+shared = { path = "../shared" }
+prometheus = { workspace = true }
+sv = { workspace = true }
+toml = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+async-stream = { workspace = true }
+tigerbeetle-unofficial = { workspace = true }
+sled = { workspace = true }
+jsonwebtoken = { workspace = true }
+governor = { workspace = true }
+async-channel = { workspace = true }
+hex = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+bincode = { workspace = true }
