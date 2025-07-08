@@ -1,9 +1,11 @@
 use tokio::net::TcpStream;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use bincode::{serialize, deserialize};
-use sv::transaction::Transaction;
-use sv::util::{serialize as sv_serialize, deserialize as sv_deserialize};
+use sv::messages::Tx;
+use sv::util::Serializable;
 use serde::{Serialize, Deserialize};
 use hex;
+use std::io::Cursor;
 
 #[derive(Serialize, Deserialize, Debug)]
 enum ValidationRequestType {
@@ -48,8 +50,8 @@ async fn test_spv_proof_generation_and_verification() {
     let addr = "127.0.0.1:50057"; // validation_service address
     let token = "test_token".to_string(); // Replace with valid JWT token
     let tx_hex = "01000000010000000000000000000000000000000000000000000000000000000000000000ffffffff04deadbeef0100000001000000000000000000000000";
-    let tx: Transaction = sv_deserialize(&hex::decode(tx_hex).unwrap()).unwrap();
-    let txid = hex::encode(sv_serialize(&tx).unwrap());
+    let tx: Tx = Serializable::read(&mut Cursor::new(hex::decode(tx_hex).unwrap())).unwrap();
+    let txid = hex::encode(tx.write(&mut Vec::new()).unwrap());
 
     // Test GenerateSPVProof
     let generate_request = ValidationRequestType::GenerateSPVProof {
