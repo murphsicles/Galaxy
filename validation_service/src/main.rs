@@ -154,7 +154,7 @@ enum BlockResponseType {
 
 #[derive(Serialize, Deserialize, Debug)]
 enum StorageRequestType {
-    QueryUtxo { request: QueryUtxoRequest },
+    QueryUtxo { request: QueryUtxoRequest, token: String },
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -330,9 +330,8 @@ impl ValidationService {
 
         let mut stream = TcpStream::connect(&self.block_service_addr).await
             .map_err(|e| format("Failed to connect to block_service: {}", e))?;
-        let block_request = GetBlockHeadersRequest { block_hash: tx.txid().to_string() };
-        let encoded = serialize(&BlockRequestType::GetBlockHeaders { request: block_request })
-            .map_err(|e| format("Serialization error: {}", e))?;
+        let block_request = BlockRequestType::GetBlockHeaders { request: GetBlockHeadersRequest { block_hash: tx.txid().to_string() } };
+        let encoded = serialize(&block_request).map_err(|e| format("Serialization error: {}", e))?;
         stream.write_all(&encoded).await.map_err(|e| format("Write error: {}", e))?;
         stream.flush().await.map_err(|e| format("Flush error: {}", e))?;
 
