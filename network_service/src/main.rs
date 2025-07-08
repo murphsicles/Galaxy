@@ -15,6 +15,11 @@ use tokio::sync::Mutex;
 use toml;
 use shared::{ShardManager, Transaction};
 
+// Temporary: Keep BlockClient until block_service is updated
+use block::block_client::BlockClient;
+use block::ValidateBlockRequest;
+use tonic::transport::Channel;
+
 #[derive(Serialize, Deserialize, Debug)]
 struct AuthRequest {
     token: String,
@@ -169,6 +174,7 @@ struct NetworkService {
     errors_total: IntCounter,
     rate_limiter: Arc<RateLimiter>,
     shard_manager: Arc<ShardManager>,
+    block_client: BlockClient<Channel>,
 }
 
 impl NetworkService {
@@ -196,6 +202,9 @@ impl NetworkService {
         let rate_limiter = Arc::new(RateLimiter::direct(Quota::per_second(
             std::num::NonZeroU32::new(1000).unwrap(),
         )));
+        let block_client = BlockClient::connect("http://[::1]:50054")
+            .await
+            .expect("Failed to connect to block_service");
 
         NetworkService {
             transaction_service_addr: "127.0.0.1:50052".to_string(),
@@ -210,6 +219,7 @@ impl NetworkService {
             errors_total,
             rate_limiter,
             shard_manager: Arc::new(ShardManager::new()),
+            block_client,
         }
     }
 
@@ -367,17 +377,17 @@ impl NetworkService {
                 format("Invalid block hex: {}", e)
             })?;
 
-            let mut stream = TcpStream::connect(&self.block_service_addr).await
-                .map_err(|e| format("Failed to connect to block_service: {}", e))?;
-            let block_request = BlockRequest { block_hex: broadcast_block.block_hex.clone() };
-            let encoded = serialize(&block_request).map_err(|e| format("Serialization error: {}", e))?;
-            stream.write_all(&encoded).await.map_err(|e| format("Write error: {}", e))?;
-            stream.flush().await.map_err(|e| format("Flush error: {}", e))?;
-
-            let mut buffer = vec![0u8; 1024 * 1024];
-            let n = stream.read(&mut buffer).await.map_err(|e| format("Read error: {}", e))?;
-            let block_response: BlockResponse = deserialize(&buffer[..n])
-                .map_err(|e| format("Deserialization error: {}", e))?;
+            let block_request = ValidateBlockRequest { block_hex: broadcast_block.block_hex.clone() };
+            let block_response = self
+                .block_client
+                .validate_block(block_request)
+                .await
+                .map_err(|e| {
+                    warn!("Failed to validate block: {}", e);
+                    let _ = self.send_alert("broadcast_block_validation_failed", &format("Failed to validate block: {}", e), 2);
+                    format("Failed to validate block: {}", e)
+                })?;
+            let block_response = block_response.into_inner();
 
             if !block_response.success {
                 warn!("Block validation failed: {}", block_response.error);
