@@ -1,14 +1,15 @@
-use alert::alert_server::{Alert, AlertServer};
-use alert::{
+use shared::alert::alert_server::{Alert, AlertServer};
+use shared::alert::{
     SendAlertRequest, SendAlertResponse, SubscribeToAlertsRequest, SubscribeToAlertsResponse,
 };
 use async_stream::try_stream;
-use auth::auth_client::AuthClient;
-use auth::{AuthenticateRequest, AuthorizeRequest};
+use shared::auth::auth_client::AuthClient;
+use shared::auth::{AuthenticateRequest, AuthorizeRequest};
 use governor::{Quota, RateLimiter};
 use prometheus::{Counter, Gauge, Registry};
 use shared::ShardManager;
 use std::num::NonZeroU32;
+use std::pin::Pin;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio_stream::Stream;
@@ -16,19 +17,14 @@ use toml;
 use tonic::{transport::Server, Request, Response, Status, Streaming};
 use tracing::{info, warn};
 
-tonic::include_proto!("alert");
-tonic::include_proto!("auth");
-tonic::include_proto!("metrics");
-
 #[derive(Debug)]
 struct AlertServiceImpl {
-    auth_client: AuthClient<Channel>,
+    auth_client: AuthClient<tonic::transport::Channel>,
     registry: Arc<Registry>,
     requests_total: Counter,
     latency_ms: Gauge,
     alert_count: Counter,
-    rate_limiter:
-        Arc<RateLimiter<String, governor::state::direct::NotKeyed, governor::clock::DefaultClock>>,
+    rate_limiter: Arc<RateLimiter<String, governor::state::direct::NotKeyed, governor::clock::DefaultClock>>,
     shard_manager: Arc<ShardManager>,
 }
 
@@ -136,8 +132,7 @@ impl Alert for AlertServiceImpl {
         }))
     }
 
-    type SubscribeToAlertsStream =
-        Pin<Box<dyn Stream<Item = Result<SubscribeToAlertsResponse, Status>> + Send>>;
+    type SubscribeToAlertsStream = Pin<Box<dyn Stream<Item = Result<SubscribeToAlertsResponse, Status>> + Send>>;
 
     async fn subscribe_to_alerts(
         &self,
@@ -186,8 +181,8 @@ impl Alert for AlertServiceImpl {
 
     async fn get_metrics(
         &self,
-        request: Request<GetMetricsRequest>,
-    ) -> Result<Response<GetMetricsResponse>, Status> {
+        request: Request<shared::metrics::GetMetricsRequest>,
+    ) -> Result<Response<shared::metrics::GetMetricsResponse>, Status> {
         let token = request
             .metadata()
             .get("authorization")
@@ -205,14 +200,14 @@ impl Alert for AlertServiceImpl {
         let start = std::time::Instant::now();
 
         self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
-        Ok(Response::new(GetMetricsResponse {
+        Ok(Response::new(shared::metrics::GetMetricsResponse {
             service_name: "alert_service".to_string(),
             requests_total: self.requests_total.get() as u64,
             avg_latency_ms: self.latency_ms.get(),
-            errors_total: 0, // Placeholder
-            cache_hits: 0,   // Not applicable
+            errors_total: 0,
+            cache_hits: 0,
             alert_count: self.alert_count.get() as u64,
-            index_throughput: 0.0, // Not applicable
+            index_throughput: 0.0,
         }))
     }
 }
