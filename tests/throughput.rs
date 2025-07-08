@@ -6,7 +6,6 @@ use sv::util::Serializable;
 use std::time::{Instant, Duration};
 use serde::{Serialize, Deserialize};
 use hex;
-use std::io::Cursor;
 
 #[derive(Serialize, Deserialize, Debug)]
 enum TransactionRequestType {
