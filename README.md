@@ -3,14 +3,14 @@
 
 ![Rust](https://img.shields.io/badge/Rust-1.88+-orange?logo=rust)
 ![Build Status](https://github.com/murphsicles/Galaxy/actions/workflows/ci.yml/badge.svg)
-![Dependencies](https://img.shields.io/badge/dependencies-up%20to%20date-green)
+![Dependencies](https://deps.rs/repo/github/murphsicles/Galaxy/status.svg)
 ![License](https://img.shields.io/badge/license-Open%20BSV-blue)
 
-**Galaxy** is an ultra high-performance Bitcoin SV (BSV) node built in Rust, designed to unboundedly scale to asynchronously parallel process over **100,000,000 transactions per second (TPS)** per shard. It leverages a microservices architecture with gRPC for ultra-fast, asynchronous communication, Tiger Beetle DB for scalable UTXO storage, and Rust SV for BSV-specific libraries to power OP_RETURN data, private blockchain overlays, and Simplified Payment Verification (SPV) proofs.
+**Galaxy** is an ultra high-performance Bitcoin SV (BSV) node built in Rust, designed to unboundedly scale to asynchronously parallel process over **100,000,000 transactions per second (TPS)** per shard. It leverages a microservices architecture with a novel asyncTCP implementation written from the ground-up for ultra-fast, asynchronous communication. Featuring a bespoke Tiger Beetle DB for scalable UTXO storage, and Rust SV for BSV-specific libraries to power OP_RETURN data, private blockchain overlays, and Simplified Payment Verification (SPV) proofs.
 
 ## 🌟 Features
 
-- **High Throughput**: Targets over 100,000,000 TPS with async gRPC, batching, and sharding.
+- **High Throughput**: Targets over 100,000,000 TPS with async TCP, batching, and sharding.
 - **BSV-Specific**:
   - Supports unbounded block creation.
   - Handles OP_RETURN data for enterprise applications.
@@ -33,10 +33,11 @@
   - `auth_service`: Handles authentication and authorization.
   - `alert_service`: Monitors network health and sends notifications.
   - `index_service`: Indexes transactions and blocks for efficient querying.
+  - `api_service`: Public-facing API gateway for transaction submission and block queries.
 - **Performance Optimizations**:
-  - Asynchronous gRPC calls with connection keep-alive.
+  - Asynchronous TCP communication with `bincode` serialization.
   - Batching for transactions, blocks, and UTXOs.
-  - Lean Protocol Buffer messages with 4GB buffer hints for large blocks.
+  - Lean message structures with 4GB buffer hints for large blocks.
   - Transaction queuing and SPV proof caching.
   - Scalable UTXO storage with Tiger Beetle DB.
   - Prometheus metrics for performance monitoring.
@@ -53,7 +54,6 @@
 - Rust 1.88+ (stable)
 - Cargo
 - Tiger Beetle server (for `storage_service`, see [Tiger Beetle](https://github.com/tigerbeetle/tigerbeetle))
-- `grpcurl` for testing
 - `sled` for overlay and index storage
 - `prometheus`, `governor`, `jsonwebtoken`, and `tracing` for metrics, rate limiting, auth, and logging
 
@@ -110,6 +110,10 @@ cargo run
 cd index_service
 cargo run
 ```
+```bash
+cd api_service
+cargo run
+```
 
 ### Tiger Beetle Setup
 For `storage_service`, start a Tiger Beetle server:
@@ -122,7 +126,8 @@ Configure a secure JWT secret key in `tests/config.toml` under `[auth]`. Generat
 
 ## 🧪 Testing
 
-Test services using `grpcurl` with JWT tokens in the `authorization` header. Ensure all services are running on their respective ports:
+Test services using a TCP client or custom scripts with `bincode` serialization, including JWT tokens for authentication. Ensure all services are running on their respective ports:
+- `api_service`: `localhost:50050`
 - `network_service`: `localhost:50051`
 - `transaction_service`: `localhost:50052`
 - `storage_service`: `localhost:50053`
@@ -131,9 +136,9 @@ Test services using `grpcurl` with JWT tokens in the `authorization` header. Ens
 - `overlay_service`: `localhost:50056`
 - `validation_service`: `localhost:50057`
 - `mining_service`: `localhost:50058`
+- `index_service`: `localhost:50059`
 - `auth_service`: `localhost:50060`
 - `alert_service`: `localhost:50061`
-- `index_service`: `localhost:50062`
 
 ### Testnet Integration
 Galaxy is configured to connect to BSV testnet nodes. See `tests/config.toml` for settings:
@@ -155,7 +160,8 @@ chmod +x run_tests.sh
 ### Metrics
 Monitor performance using the `GetMetrics` endpoint on each service (e.g., `localhost:50057` for `validation_service`):
 ```bash
-grpcurl -plaintext -H "authorization: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1c2VyMSIsInJvbGUiOiJjbGllbnQiLCJleHAiOjE5MjA2NzY1MDl9.8X8z7z3Y8Qz5z5z7z3Y8Qz5z5z7z3Y8Qz5z5z7z3Y8Q" -d '{}' localhost:50057 validation.Validation/GetMetrics
+# Example TCP client or custom script needed for bincode+tokio communication
+# Use a tool like netcat or a custom Rust client to send GetMetrics requests
 ```
 Metrics include:
 - `*_requests_total`: Total requests per service (e.g., `block_requests_total`).
@@ -166,9 +172,9 @@ Metrics include:
 - `errors_total`: Total errors (placeholder, currently 0).
 
 ### Alerts
-Subscribe to alerts using the `alert_service`:
+Subscribe to alerts using the `alert_service` with a TCP client:
 ```bash
-grpcurl -plaintext -H "authorization: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1c2VyMSIsInJvbGUiOiJjbGllbnQiLCJleHAiOjE5MjA2NzY1MDl9.8X8z7z3Y8Qz5z5z7z3Y8Qz5z5z7z3Y8Qz5z5z7z3Y8Q" -d '{"event_type": "consensus_violation"}' localhost:50061 alert.Alert/SubscribeToAlerts
+# Use a custom Rust client or TCP tool to send AlertRequest with bincode serialization
 ```
 
 ### Logging
@@ -183,13 +189,14 @@ Galaxy uses GitHub Actions for continuous integration and deployment:
 - **Formatting**: Ensures code adheres to `rustfmt` standards.
 - **Linting**: Runs `clippy` for code quality.
 - **Dependency Checks**: Validates dependencies with `cargo outdated`.
+- **Tests**: Runs unit and integration tests, starting dependent services.
 
 Check the [CI workflow](.github/workflows/ci.yml) for details.
 
 ## 📈 Performance Highlights
 
 Galaxy is optimized for ultra-high performance:
-- **Asynchronous gRPC**: Non-blocking calls with connection keep-alive.
+- **Asynchronous TCP**: Non-blocking calls with `bincode` serialization.
 - **Batching**: Reduces network overhead for transactions, blocks, and UTXOs.
 - **Tiger Beetle DB**: Scalable UTXO storage for BSV’s future dataset.
 - **Transaction Queuing**: Handles high transaction volumes efficiently.
@@ -218,15 +225,14 @@ Galaxy is optimized for ultra-high performance:
 | `auth_service/`      | Authentication and authorization      |
 | `alert_service/`     | Network health monitoring and notifications |
 | `index_service/`     | Transaction and block indexing       |
+| `api_service/`       | Public-facing API gateway for transaction submission and block queries |
 | `shared/`            | Shared utilities (ShardManager)      |
-| `protos/`            | gRPC proto files for services        |
 | `tests/`             | Test configuration and scripts       |
 | `Cargo.toml`         | Workspace configuration              |
 
 ## 🤝 Contributing
 
 Contributions are welcome! Please open an issue or pull request on GitHub.
-
 
 ## 📝 License
 
