@@ -10,8 +10,9 @@ use tokio::sync::Mutex;
 use toml;
 use governor::{Quota, RateLimiter};
 use shared::ShardManager;
-use sv::transaction::Transaction;
-use sv::util::{deserialize as sv_deserialize, serialize as sv_serialize};
+use sv::messages::Tx;
+use sv::util::Serializable;
+use std::io::Cursor;
 
 #[derive(Serialize, Deserialize, Debug)]
 struct AuthRequest {
@@ -269,7 +270,7 @@ impl ApiService {
                     let _ = self.send_alert("submit_tx_invalid_hex", &format("Invalid transaction hex: {}", e), 2);
                     format("Invalid transaction hex: {}", e)
                 })?;
-                let _tx: Transaction = sv_deserialize(&tx_bytes).map_err(|e| {
+                let _tx: Tx = Serializable::read(&mut Cursor::new(&tx_bytes)).map_err(|e| {
                     warn!("Invalid transaction: {}", e);
                     let _ = self.send_alert("submit_tx_invalid_deserialization", &format("Invalid transaction: {}", e), 2);
                     format("Invalid transaction: {}", e)
@@ -454,4 +455,4 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let api_service = ApiService::new().await;
     api_service.run(addr).await?;
     Ok(())
-                            }
+}
