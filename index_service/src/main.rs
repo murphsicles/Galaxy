@@ -10,10 +10,11 @@ use tokio::sync::Mutex;
 use toml;
 use governor::{Quota, RateLimiter};
 use shared::ShardManager;
+use sv::messages::Tx;
 use sv::block::Block;
-use sv::transaction::Transaction;
-use sv::util::{deserialize as sv_deserialize, serialize};
+use sv::util::Serializable;
 use sled::Db;
+use std::io::Cursor;
 
 #[derive(Serialize, Deserialize, Debug)]
 struct AuthRequest {
@@ -220,7 +221,6 @@ impl IndexService {
         let mut stream = TcpStream::connect(&self.alert_service_addr).await
             .map_err(|e| format("Failed to connect to alert_service: {}", e))?;
         let request = AlertRequest {
-
             event_type: event_type.to_string(),
             message: message.to_string(),
             severity,
@@ -256,15 +256,17 @@ impl IndexService {
                 self.rate_limiter.until_ready().await;
 
                 let db = self.db.lock().await;
-                let key = format("tx:{}", request.txid);
+                let key = format!("tx:{}", request.txid);
                 match db.get(key.as_bytes()) {
                     Ok(Some(value)) => {
-                        let tx: Transaction = sv_deserialize(&value).map_err(|e| {
+                        let tx: Tx = Serializable::read(&mut Cursor::new(&value)).map_err(|e| {
                             warn!("Invalid transaction: {}", e);
                             let _ = self.send_alert("query_tx_invalid_deserialization", &format("Invalid transaction: {}", e), 2);
                             format("Invalid transaction: {}", e)
                         })?;
-                        let tx_hex = hex::encode(serialize(&tx));
+                        let mut tx_bytes = Vec::new();
+                        tx.write(&mut tx_bytes).unwrap();
+                        let tx_hex = hex::encode(&tx_bytes);
                         self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
                         Ok(IndexResponseType::QueryTransaction(QueryTransactionResponse {
                             success: true,
@@ -304,15 +306,17 @@ impl IndexService {
                     let _ = self.send_alert("index_tx_invalid_hex", &format("Invalid transaction hex: {}", e), 2);
                     format("Invalid transaction hex: {}", e)
                 })?;
-                let tx: Transaction = sv_deserialize(&tx_bytes).map_err(|e| {
+                let tx: Tx = Serializable::read(&mut Cursor::new(&tx_bytes)).map_err(|e| {
                     warn!("Invalid transaction: {}", e);
                     let _ = self.send_alert("index_tx_invalid_deserialization", &format("Invalid transaction: {}", e), 2);
                     format("Invalid transaction: {}", e)
                 })?;
 
                 let db = self.db.lock().await;
-                let key = format("tx:{}", tx.txid());
-                db.insert(key.as_bytes(), serialize(&tx)).map_err(|e| {
+                let key = format!("tx:{}", hex::encode(tx.hash().0));
+                let mut tx_bytes = Vec::new();
+                tx.write(&mut tx_bytes).unwrap();
+                db.insert(key.as_bytes(), &tx_bytes).map_err(|e| {
                     warn!("Failed to index transaction: {}", e);
                     let _ = self.send_alert("index_tx_failed", &format("Failed to index transaction: {}", e), 2);
                     format("Failed to index transaction: {}", e)
@@ -333,15 +337,17 @@ impl IndexService {
                 self.rate_limiter.until_ready().await;
 
                 let db = self.db.lock().await;
-                let key = format("block:{}", request.block_hash);
+                let key = format!("block:{}", request.block_hash);
                 match db.get(key.as_bytes()) {
                     Ok(Some(value)) => {
-                        let block: Block = sv_deserialize(&value).map_err(|e| {
+                        let block: Block = Serializable::read(&mut Cursor::new(&value)).map_err(|e| {
                             warn!("Invalid block: {}", e);
                             let _ = self.send_alert("query_block_invalid_deserialization", &format("Invalid block: {}", e), 2);
                             format("Invalid block: {}", e)
                         })?;
-                        let block_hex = hex::encode(serialize(&block));
+                        let mut block_bytes = Vec::new();
+                        block.write(&mut block_bytes).unwrap();
+                        let block_hex = hex::encode(&block_bytes);
                         self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
                         Ok(IndexResponseType::QueryBlock(QueryBlockResponse {
                             success: true,
