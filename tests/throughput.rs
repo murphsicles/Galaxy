@@ -89,5 +89,5 @@ async fn test_throughput() {
 
     let tps = total_requests as f64 / duration.as_secs_f64();
     println!("Throughput: {:.2} TPS", tps);
-    assert!(tps >= 100.0, "Throughput below 100 TPS: {:.2}", tps);
+    assert!(tps >= 100_000.0, "Throughput below 100,000 TPS: {:.2}", tps);
 }
