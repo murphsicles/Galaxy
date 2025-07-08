@@ -5,18 +5,13 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing::{info, warn, error};
 use std::collections::HashMap;
 use std::num::NonZeroU32;
-use std::sync::Arc;
+use std::.sync::Arc;
 use tokio::sync::Mutex;
 use toml;
 use prometheus::{Counter, Gauge, Registry};
 use governor::{Quota, RateLimiter};
 use shared::ShardManager;
 use tigerbeetle_unofficial as tigerbeetle;
-
-// Temporary: Keep alert_client until alert_service is updated
-use alert::alert_client::AlertClient;
-use alert::SendAlertRequest;
-use tonic::transport::Channel;
 
 #[derive(Serialize, Deserialize, Debug)]
 struct AuthRequest {
@@ -142,7 +137,7 @@ enum StorageResponseType {
 struct StorageService {
     utxos: Arc<Mutex<HashMap<String, (String, u64)>>>,
     auth_service_addr: String,
-    alert_client: AlertClient<Channel>,
+    alert_service_addr: String,
     registry: Arc<Registry>,
     requests_total: Counter,
     latency_ms: Gauge,
@@ -158,9 +153,6 @@ impl StorageService {
         let config: toml::Value = toml::from_str(config_str).expect("Failed to parse config");
         let shard_id = config["sharding"]["shard_id"].as_integer().unwrap_or(0) as u32;
 
-        let alert_client = AlertClient::connect("http://[::1]:50061")
-            .await
-            .expect("Failed to connect to alert_service");
         let utxos = Arc::new(Mutex::new(HashMap::new()));
         let registry = Arc::new(Registry::new());
         let requests_total = Counter::new("storage_requests_total", "Total storage requests").unwrap();
@@ -178,7 +170,7 @@ impl StorageService {
         StorageService {
             utxos,
             auth_service_addr: "127.0.0.1:50060".to_string(),
-            alert_client,
+            alert_service_addr: "127.0.0.1:50061".to_string(),
             registry,
             requests_total,
             latency_ms,
@@ -191,9 +183,9 @@ impl StorageService {
 
     async fn authenticate(&self, token: &str) -> Result<String, String> {
         let mut stream = TcpStream::connect(&self.auth_service_addr).await
-            .map_err(|e| format!("Failed to connect to auth_service: {}", e))?;
+            .map_err(|e| format("Failed to connect to auth_service: {}", e))?;
         let request = AuthRequest { token: token.to_string() };
-        let encoded = serialize(&request).map_err(|e| format!("Serialization error: {}", e))?;
+        let encoded = serialize(&request).map_err(|e| format("Serialization error: {}", e))?;
         stream.write_all(&encoded).await.map_err(|e| format("Write error: {}", e))?;
         stream.flush().await.map_err(|e| format("Flush error: {}", e))?;
 
@@ -234,26 +226,29 @@ impl StorageService {
     }
 
     async fn send_alert(&self, event_type: &str, message: &str, severity: u32) -> Result<(), String> {
-        let alert_request = SendAlertRequest {
+        let mut stream = TcpStream::connect(&self.alert_service_addr).await
+            .map_err(|e| format("Failed to connect to alert_service: {}", e))?;
+        let request = AlertRequest {
             event_type: event_type.to_string(),
             message: message.to_string(),
             severity,
         };
-        let alert_response = self
-            .alert_client
-            .send_alert(alert_request)
-            .await
-            .map_err(|e| {
-                warn!("Failed to send alert: {}", e);
-                format("Failed to send alert: {}", e)
-            })?;
-        let alert_response = alert_response.into_inner();
-        if !alert_response.success {
-            warn!("Alert sending failed: {}", alert_response.error);
-            return Err(alert_response.error);
+        let encoded = serialize(&request).map_err(|e| format("Serialization error: {}", e))?;
+        stream.write_all(&encoded).await.map_err(|e| format("Write error: {}", e))?;
+        stream.flush().await.map_err(|e| format("Flush error: {}", e))?;
+
+        let mut buffer = vec![0u8; 1024 * 1024];
+        let n = stream.read(&mut buffer).await.map_err(|e| format("Read error: {}", e))?;
+        let response: AlertResponse = deserialize(&buffer[..n])
+            .map_err(|e| format("Deserialization error: {}", e))?;
+        
+        if response.success {
+            self.alert_count.inc();
+            Ok(())
+        } else {
+            warn!("Alert sending failed: {}", response.error);
+            Err(response.error)
         }
-        self.alert_count.inc();
-        Ok(())
     }
 
     async fn handle_request(&self, request: StorageRequestType) -> Result<StorageResponseType, String> {
@@ -287,7 +282,7 @@ impl StorageService {
                     .map_err(|e| format("Authorization failed: {}", e))?;
                 self.rate_limiter.until_ready().await;
 
-                let key = format!("{}:{}", request.txid, request.vout);
+                let key = format("{}:{}", request.txid, request.vout);
                 let mut utxos = self.utxos.lock().await;
                 utxos.insert(key, (request.script_pubkey.clone(), request.amount));
 
@@ -304,7 +299,7 @@ impl StorageService {
                     .map_err(|e| format("Authorization failed: {}", e))?;
                 self.rate_limiter.until_ready().await;
 
-                let key = format!("{}:{}", request.txid, request.vout);
+                let key = format("{}:{}", request.txid, request.vout);
                 let mut utxos = self.utxos.lock().await;
                 let removed = utxos.remove(&key).is_some();
 
@@ -330,7 +325,7 @@ impl StorageService {
                 let mut results = vec![];
 
                 for utxo in request.utxos {
-                    let key = format!("{}:{}", utxo.txid, utxo.vout);
+                    let key = format("{}:{}", utxo.txid, utxo.vout);
                     utxos.insert(key, (utxo.script_pubkey.clone(), utxo.amount));
                     results.push(AddUtxoResponse {
                         success: true,
