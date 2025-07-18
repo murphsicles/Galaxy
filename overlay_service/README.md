@@ -1,6 +1,6 @@
 # Overlay Service
 
-The Overlay Service manages overlay networks for Bitcoin SV (BSV), enabling custom consensus rules and transaction processing for specific use cases. It supports the creation, management, and querying of overlay blocks and transactions, optimized for high-throughput processing in line with Teranode's scalability goals ([https://bsv-blockchain.github.io/teranode/](https://bsv-blockchain.github.io/teranode/)).
+The Overlay Service manages overlay networks for Bitcoin SV (BSV), enabling custom consensus rules and transaction processing for specific use cases. It supports the creation, management, and querying of overlay blocks and transactions, optimized for high-throughput processing.
 
 ## Features
 
