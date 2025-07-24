@@ -1,0 +1,109 @@
+.github/
+    └── workflows/
+        └── ci.yml
+alert_service/
+    ├── src/
+        ├── lib.rs
+        ├── main.rs
+        └── service.rs
+    ├── build.rs
+    ├── Cargo.toml
+    └── README.md
+api_service/
+    ├── src/
+        └── main.rs
+    └── Cargo.toml
+auth_service/
+    ├── src/
+        ├── lib.rs
+        ├── main.rs
+        └── service.rs
+    ├── Cargo.toml
+    └── README.md
+block_service/
+    ├── src/
+        ├── lib.rs
+        ├── main.rs
+        └── service.rs
+    ├── build.rs
+    ├── Cargo.toml
+    └── README.md
+consensus_service/
+    ├── src/
+        ├── lib.rs
+        ├── main.rs
+        └── service.rs
+    ├── build.rs
+    ├── Cargo.toml
+    └── README.md
+index_service/
+    ├── src/
+        ├── lib.rs
+        ├── main.rs
+        └── service.rs
+    ├── build.rs
+    ├── Cargo.toml
+    └── README.md
+mining_service/
+    ├── src/
+        ├── lib.rs
+        ├── main.rs
+        └── service.rs
+    ├── build.rs
+    ├── Cargo.toml
+    └── README.md
+network_service/
+    ├── src/
+        ├── lib.rs
+        ├── main.rs
+        └── service.rs
+    ├── build.rs
+    ├── Cargo.toml
+    └── README.md
+overlay_service/
+    ├── src/
+        ├── lib.rs
+        ├── main.rs
+        └── service.rs
+    ├── build.rs
+    ├── Cargo.toml
+    └── README.md
+shared/
+    ├── src/
+        ├── lib.rs
+        └── main.rs
+    └── Cargo.toml
+storage_service/
+    ├── src/
+        ├── lib.rs
+        ├── main.rs
+        └── service.rs
+    ├── build.rs
+    ├── Cargo.toml
+    └── README.md
+tests/
+    ├── Cargo.toml
+    ├── config.toml
+    ├── run_tests.sh
+    ├── spv_validation.rs
+    └── throughput.rs
+transaction_service/
+    ├── src/
+        ├── lib.rs
+        ├── main.rs
+        └── service.rs
+    ├── build.rs
+    ├── Cargo.toml
+    └── README.md
+validation_service/
+    ├── src/
+        ├── lib.rs
+        ├── main.rs
+        └── service.rs
+    ├── build.rs
+    ├── Cargo.toml
+    └── README.md
+.gitignore
+Cargo.toml
+LICENSE
+README.md
