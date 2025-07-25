@@ -6,16 +6,19 @@ use crate::utils::{Config, ServiceError};
 use crate::tracker::TrackerManager;
 use sv::merkle::MerklePath;
 use sv::transaction::Transaction as SvTx;
-use sv::block::Header;
+use sv::block::{Block, Header};
 use tokio::sync::mpsc::Sender;
 use tracing::{info, error};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use cratetorrent::prelude::*;
+use std::path::Path;
 
 pub struct ProofServer {
     config: Config,
     tracker: Arc<TrackerManager>,
     event_tx: Sender<super::service::BlockRequestEvent>,
+    torrent_client: TorrentClient,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -38,11 +41,19 @@ struct ProofResponse {
 }
 
 impl ProofServer {
-    pub fn new(config: &Config, event_tx: Sender<super::service::BlockRequestEvent>) -> Self {
+    pub async fn new(config: &Config, event_tx: Sender<super::service::BlockRequestEvent>) -> Self {
+        let torrent_config = Config {
+            download_path: Path::new("./torrent_data").to_path_buf(),
+            ..Config::default()
+        };
+        let torrent_client = TorrentClient::new(&torrent_config)
+            .await
+            .expect("Failed to initialize torrent client");
         Self {
             config: config.clone(),
             tracker: Arc::new(TrackerManager::new(config).await),
             event_tx,
+            torrent_client,
         }
     }
 
@@ -66,7 +77,8 @@ impl ProofServer {
     }
 
     async fn request_proof_from_peer(&self, peer: &str, txid: &str, block_hash: &str) -> Result<ProofBundle, ServiceError> {
-        let mut stream = TcpStream::connect(peer).await.map_err(|e| ServiceError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
+        let mut stream = TcpStream::connect(peer).await
+            .map_err(|e| ServiceError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
         let request = ProofRequest {
             txid: txid.to_string(),
             block_hash: block_hash.to_string(),
@@ -87,63 +99,100 @@ impl ProofServer {
     }
 
     pub async fn run(&self) {
-        let listener = TcpListener::bind("0.0.0.0:50063").await.unwrap();  // Updated port
+        let listener = TcpListener::bind(format!("0.0.0.0:{}", self.config.proof_rpc_port.unwrap_or(50063)))
+            .await
+            .expect("Failed to bind proof server");
+        info!("Proof server running on port {}", self.config.proof_rpc_port.unwrap_or(50063));
+
         loop {
-            if let Ok((mut stream, addr)) = listener.accept().await {
-                let this = self;
-                tokio::spawn(async move {
-                    let mut buffer = vec![0u8; 1024 * 1024];
-                    match stream.read(&mut buffer).await {
-                        Ok(n) => {
-                            let request: ProofRequest = match deserialize(&buffer[..n]) {
-                                Ok(req) => req,
-                                Err(e) => {
-                                    error!("Deserialization error for proof request from {}: {}", addr, e);
-                                    let response = ProofResponse {
+            match listener.accept().await {
+                Ok((mut stream, addr)) => {
+                    let this = self;
+                    tokio::spawn(async move {
+                        let mut buffer = vec![0u8; 1024 * 1024];
+                        match stream.read(&mut buffer).await {
+                            Ok(n) => {
+                                let request: ProofRequest = match deserialize(&buffer[..n]) {
+                                    Ok(req) => req,
+                                    Err(e) => {
+                                        error!("Deserialization error for proof request from {}: {}", addr, e);
+                                        let response = ProofResponse {
+                                            proof: None,
+                                            error: format!("Deserialization error: {}", e),
+                                        };
+                                        let encoded = serialize(&response).unwrap();
+                                        let _ = stream.write_all(&encoded).await;
+                                        let _ = stream.flush().await;
+                                        return;
+                                    }
+                                };
+
+                                let proof = match this.compute_proof(&request.txid, &request.block_hash).await {
+                                    Ok(proof) => ProofResponse {
+                                        proof: Some(proof),
+                                        error: String::new(),
+                                    },
+                                    Err(e) => ProofResponse {
                                         proof: None,
-                                        error: format!("Deserialization error: {}", e),
-                                    };
-                                    let encoded = serialize(&response).unwrap();
-                                    let _ = stream.write_all(&encoded).await;
-                                    let _ = stream.flush().await;
-                                    return;
+                                        error: e.to_string(),
+                                    },
+                                };
+
+                                let encoded = serialize(&proof).unwrap();
+                                if let Err(e) = stream.write_all(&encoded).await {
+                                    error!("Write error to {}: {}", addr, e);
                                 }
-                            };
-
-                            let proof = match this.compute_proof(&request.txid, &request.block_hash).await {
-                                Ok(proof) => ProofResponse {
-                                    proof: Some(proof),
-                                    error: String::new(),
-                                },
-                                Err(e) => ProofResponse {
-                                    proof: None,
-                                    error: e.to_string(),
-                                },
-                            };
-
-                            let encoded = serialize(&proof).unwrap();
-                            if let Err(e) = stream.write_all(&encoded).await {
-                                error!("Write error to {}: {}", addr, e);
+                                if let Err(e) = stream.flush().await {
+                                    error!("Flush error to {}: {}", addr, e);
+                                }
                             }
-                            if let Err(e) = stream.flush().await {
-                                error!("Flush error to {}: {}", addr, e);
+                            Err(e) => {
+                                error!("Read error from {}: {}", addr, e);
                             }
                         }
-                        Err(e) => {
-                            error!("Read error from {}: {}", addr, e);
-                        }
-                    }
-                });
+                    });
+                }
+                Err(e) => error!("Accept error: {}", e),
             }
         }
     }
 
     async fn compute_proof(&self, txid: &str, block_hash: &str) -> Result<ProofBundle, ServiceError> {
-        let block = Block::default(); // Replace with actual block fetch from local torrent storage
-        let tx = block.transactions.iter().find(|t| t.txid().to_string() == txid)
+        // Fetch torrent metadata from overlay_service to get info_hash
+        let mut stream = TcpStream::connect("127.0.0.1:50056").await
+            .map_err(|e| ServiceError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
+        let request = super::service::StoreTorrentRefRequest {
+            info_hash: block_hash.to_string(), // Using block_hash as key for simplicity
+            block_hashes: vec![block_hash.to_string()],
+        };
+        let encoded = serialize(&request).map_err(ServiceError::from)?;
+        stream.write_all(&encoded).await.map_err(ServiceError::from)?;
+        stream.flush().await.map_err(ServiceError::from)?;
+
+        let mut buffer = vec![0u8; 1024 * 1024];
+        let n = stream.read(&mut buffer).await.map_err(ServiceError::from)?;
+        let response: super::service::StoreTorrentRefResponse = deserialize(&buffer[..n])
+            .map_err(ServiceError::from)?;
+        if !response.success {
+            return Err(ServiceError::Torrent(response.error));
+        }
+
+        // Load block from local torrent storage
+        let torrent = self.torrent_client
+            .get_torrent(&block_hash.to_string())
+            .await
+            .map_err(|e| ServiceError::Torrent(format!("Failed to load torrent: {}", e)))?;
+        let block_data = torrent.read_block(0).await // Assuming block is in first piece
+            .map_err(|e| ServiceError::Torrent(format!("Failed to read block data: {}", e)))?;
+        let block: Block = deserialize(&block_data)
+            .map_err(|e| ServiceError::Torrent(format!("Deserialization error: {}", e)))?;
+
+        let tx = block.transactions.iter()
+            .find(|t| t.txid().to_string() == txid)
             .ok_or_else(|| ServiceError::Torrent(format!("Transaction {} not found in block {}", txid, block_hash)))?;
         let path = MerklePath::from_block(&block, txid)
             .map_err(|e| ServiceError::Torrent(format!("Failed to compute merkle path: {}", e)))?;
+
         Ok(ProofBundle {
             tx: tx.clone(),
             path,
