@@ -1,4 +1,6 @@
+// torrent_service/src/incentives.rs
 use crate::utils::{Config, ServiceError};
+use crate::tracker::TrackerManager;
 use sv::transaction::Transaction as SvTx;
 use sv::script::{Script, Opcode};
 use sv::keys::{PrivateKey, PublicKey};
@@ -8,10 +10,12 @@ use bincode::{deserialize, serialize};
 use tracing::{info, error};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use std::time::Instant;
 
 pub struct IncentivesManager {
     config: Config,
     transaction_service_addr: String,
+    tracker: Arc<TrackerManager>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -31,17 +35,19 @@ impl IncentivesManager {
         Self {
             config: config.clone(),
             transaction_service_addr: "127.0.0.1:50052".to_string(),
+            tracker: Arc::new(TrackerManager::new(config).await),
         }
     }
 
-    pub async fn reward_proof(&self, user_id: &str) -> Result<(), ServiceError> {
+    pub async fn reward_proof(&self, user_id: &str, block_hash: &str) -> Result<(), ServiceError> {
+        let start = Instant::now();
         let reward = self.config.proof_reward_base; // 100 sat base
-        let bonus = self.calculate_bonus().await; // Placeholder for speed/rarity
+        let bonus = self.calculate_bonus(block_hash, start).await; // Calculate speed and rarity bonus
         let total_reward = reward + bonus;
 
         let tx = self.build_op_return_tx(user_id, total_reward, "proof_reward").await?;
         self.broadcast_tx(&tx).await?;
-        info!("Proof reward of {} sat sent to user_id: {}", total_reward, user_id);
+        info!("Proof reward of {} sat (base: {}, bonus: {}) sent to user_id: {}", total_reward, reward, bonus, user_id);
         Ok(())
     }
 
@@ -89,7 +95,9 @@ impl IncentivesManager {
     }
 
     async fn broadcast_tx(&self, tx: &SvTx) -> Result<(), ServiceError> {
-        let mut stream = TcpStream::connect(&self.transaction_service_addr).await.map_err(ServiceError::from)?;
+        let mut stream = TcpStream::connect(&self.transaction_service_addr)
+            .await
+            .map_err(|e| ServiceError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
         let request = BroadcastTxRequest {
             tx: tx.clone(),
             token: "dummy_token".to_string(),
@@ -109,8 +117,23 @@ impl IncentivesManager {
         }
     }
 
-    async fn calculate_bonus(&self) -> u64 {
-        // Placeholder: Implement speed (<500ms) and rarity (seeder count) logic
-        10 // 10 sat bonus
+    async fn calculate_bonus(&self, block_hash: &str, start: Instant) -> u64 {
+        let mut bonus = 0;
+
+        // Speed bonus: 10 sat if response <500ms
+        let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
+        if elapsed_ms < 500.0 {
+            bonus += self.config.proof_bonus_speed; // 10 sat
+            info!("Speed bonus of {} sat applied (response time: {}ms)", self.config.proof_bonus_speed, elapsed_ms);
+        }
+
+        // Rarity bonus: 50 sat if <3 seeders
+        let seeders = self.tracker.get_seeders(block_hash).await.unwrap_or_default();
+        if seeders.len() < 3 {
+            bonus += self.config.proof_bonus_rare; // 50 sat
+            info!("Rarity bonus of {} sat applied ({} seeders)", self.config.proof_bonus_rare, seeders.len());
+        }
+
+        bonus
     }
 }
