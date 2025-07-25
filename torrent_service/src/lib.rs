@@ -1,3 +1,4 @@
+// torrent_service/src/lib.rs
 pub mod service;
 pub use service::TorrentService;
 
