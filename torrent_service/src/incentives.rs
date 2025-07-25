@@ -11,11 +11,13 @@ use tracing::{info, error};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::Instant;
+use toml;
 
 pub struct IncentivesManager {
     config: Config,
     transaction_service_addr: String,
     tracker: Arc<TrackerManager>,
+    auth_token: String,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -32,10 +34,15 @@ struct BroadcastTxResponse {
 
 impl IncentivesManager {
     pub fn new(config: &Config) -> Self {
+        let config_str = include_str!("../../tests/config.toml");
+        let toml_config: toml::Value = toml::from_str(config_str).expect("Failed to parse config");
+        let auth_token = toml_config.get("torrent_service").and_then(|s| s.get("auth_token").and_then(|v| v.as_str())).unwrap_or("default_token").to_string();
+
         Self {
             config: config.clone(),
             transaction_service_addr: "127.0.0.1:50052".to_string(),
             tracker: Arc::new(TrackerManager::new(config).await),
+            auth_token,
         }
     }
 
@@ -100,7 +107,7 @@ impl IncentivesManager {
             .map_err(|e| ServiceError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
         let request = BroadcastTxRequest {
             tx: tx.clone(),
-            token: "dummy_token".to_string(),
+            token: self.auth_token.clone(),
         };
         let encoded = serialize(&request).map_err(ServiceError::from)?;
         stream.write_all(&encoded).await.map_err(ServiceError::from)?;
