@@ -12,7 +12,7 @@ use prometheus::{Counter, Gauge, Registry};
 use std::sync::Arc;
 use toml;
 use governor::{Quota, RateLimiter};
-use std::num::std::error::Error as StdError;
+use std::num::NonZeroU32;
 use bincode::{deserialize, serialize};
 use tokio::net::TcpStream;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -43,6 +43,30 @@ pub struct TorrentService {
 #[derive(Debug)]
 enum BlockRequestEvent {
     AgedBlocks(Vec<Block>),
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct GetAgedBlocksRequest {
+    threshold: AgedThreshold,
+    token: String,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct GetAgedBlocksResponse {
+    blocks: Vec<Block>,
+    error: String,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct StoreTorrentRefRequest {
+    info_hash: String,
+    block_hashes: Vec<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct StoreTorrentRefResponse {
+    success: bool,
+    error: String,
 }
 
 impl TorrentService {
@@ -86,8 +110,8 @@ impl TorrentService {
             auth_service_addr: "127.0.0.1:50060".to_string(),
             alert_service_addr: "127.0.0.1:50061".to_string(),
             block_service_addr: "127.0.0.1:50054".to_string(),
-            validation_service_addr: "127.0.0.1:50056".to_string(),
-            overlay_service_addr: "127.0.0.1:50057".to_string(),
+            validation_service_addr: "127.0.0.1:50057".to_string(),
+            overlay_service_addr: "127.0.0.1:50056".to_string(),
             registry,
             requests_total,
             latency_ms,
@@ -193,7 +217,7 @@ impl TorrentService {
                 self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
                 Ok(super::main::TorrentResponseType::ProofBundle { proof: hex::encode(serialized_proof), error: String::new() })
             }
-            super::main::TorrentRequestType::GetMetrics { token } => {
+            super::main::TorrentResponseType::GetMetrics { token } => {
                 let user_id = self.authenticate(&token).await?;
                 self.authorize(&user_id, "GetMetrics").await?;
 
@@ -214,7 +238,7 @@ impl TorrentService {
             .map_err(ServiceError::from)?;
         let request = GetAgedBlocksRequest {
             threshold: self.config.aged_threshold.clone(),
-            token: self.authenticate("dummy_token").await?,  // Replace with proper token logic
+            token: self.authenticate("dummy_token").await?, // Replace with proper token management
         };
         let encoded = serialize(&request).map_err(ServiceError::from)?;
         stream.write_all(&encoded).await.map_err(ServiceError::from)?;
@@ -235,7 +259,7 @@ impl TorrentService {
     async fn store_torrent_ref(&self, info_hash: &str) -> Result<(), ServiceError> {
         let mut stream = TcpStream::connect(&self.overlay_service_addr).await
             .map_err(ServiceError::from)?;
-        let block_hashes = vec!["placeholder_hash".to_string()];  // Replace with actual extraction from torrent or blocks
+        let block_hashes = vec!["placeholder".to_string()]; // Extract from torrent metadata
         let request = StoreTorrentRefRequest {
             info_hash: info_hash.to_string(),
             block_hashes,
