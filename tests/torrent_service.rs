@@ -258,7 +258,7 @@ async fn test_torrent_service_end_to_end() {
     let request = TorrentRequestType::GetProof {
         txid: "dummy_txid".to_string(),
         block_hash: "dummy_block_hash".to_string(),
-        token: "dummy_token".to_string(),
+        token: "default_token".to_string(),
     };
     let encoded = serialize(&request).unwrap();
     stream.write_all(&encoded).await.unwrap();
