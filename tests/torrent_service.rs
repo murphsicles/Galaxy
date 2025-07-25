@@ -8,7 +8,7 @@ use sv::block::{Block, Header};
 use sv::transaction::Transaction as SvTx;
 use sv::merkle::MerklePath;
 use shared::AgedThreshold;
-use torrent_service::service::{TorrentService, GetAgedBlocksRequest, GetAgedBlocksResponse};
+use torrent_service::service::{TorrentService, GetAgedBlocksRequest, GetAgedBlocksResponse, TorrentRequestType, TorrentResponseType};
 use torrent_service::utils::ServiceError;
 use torrent_service::proof_server::ProofBundle;
 use serde::{Deserialize, Serialize};
@@ -96,7 +96,6 @@ struct AlertResponse {
 
 #[tokio::test]
 async fn test_torrent_service_end_to_end() {
-    // Initialize tracing
     tracing_subscriber::fmt()
         .with_max_level(tracing::Level::INFO)
         .init();
@@ -113,7 +112,7 @@ async fn test_torrent_service_end_to_end() {
                 MockRequestType::GetAgedBlocks(req) => {
                     let block = Block {
                         header: Header {
-                            timestamp: 1234567890, // Old timestamp
+                            timestamp: 1234567890,
                             ..Default::default()
                         },
                         transactions: vec![SvTx::default()],
