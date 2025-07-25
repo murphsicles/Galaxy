@@ -1,3 +1,4 @@
+// torrent_service/src/service.rs
 use crate::aging::AgingManager;
 use crate::chunker::Chunker;
 use crate::incentives::IncentivesManager;
@@ -17,6 +18,7 @@ use bincode::{deserialize, serialize};
 use tokio::net::TcpStream;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use serde::{Deserialize, Serialize};
+use crate::proof_server::ProofBundle;
 
 pub struct TorrentService {
     pub config: Config,
@@ -65,6 +67,17 @@ struct StoreTorrentRefRequest {
 
 #[derive(Serialize, Deserialize, Debug)]
 struct StoreTorrentRefResponse {
+    success: bool,
+    error: String,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct ValidateProofRequest {
+    proof: ProofBundle,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct ValidateProofResponse {
     success: bool,
     error: String,
 }
@@ -171,7 +184,7 @@ impl TorrentService {
         };
         let encoded = serialize(&request).map_err(ServiceError::from)?;
         stream.write_all(&encoded).await.map_err(ServiceError::from)?;
-        stream.flush().await.map_err(ServiceError::from)?;
+        stream.flush().await map_err(ServiceError::from)?;
 
         let mut buffer = vec![0u8; 1024 * 1024];
         let n = stream.read(&mut buffer).await.map_err(ServiceError::from)?;
@@ -212,12 +225,13 @@ impl TorrentService {
                 let proof = self.proof_server.get_proof(&txid, &block_hash).await?;
                 let serialized_proof = serialize(&proof).map_err(ServiceError::from)?;
 
-                self.incentives.reward_proof(&user_id).await?;
+                self.validate_proof(&proof).await?;
+                self.incentives.reward_proof(&user_id, &block_hash).await?;
 
                 self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
                 Ok(super::main::TorrentResponseType::ProofBundle { proof: hex::encode(serialized_proof), error: String::new() })
             }
-            super::main::TorrentResponseType::GetMetrics { token } => {
+            super::main::TorrentRequestType::GetMetrics { token } => {
                 let user_id = self.authenticate(&token).await?;
                 self.authorize(&user_id, "GetMetrics").await?;
 
@@ -238,7 +252,7 @@ impl TorrentService {
             .map_err(ServiceError::from)?;
         let request = GetAgedBlocksRequest {
             threshold: self.config.aged_threshold.clone(),
-            token: self.authenticate("dummy_token").await?, // Replace with proper token management
+            token: self.authenticate("dummy_token").await?,
         };
         let encoded = serialize(&request).map_err(ServiceError::from)?;
         stream.write_all(&encoded).await.map_err(ServiceError::from)?;
@@ -259,7 +273,7 @@ impl TorrentService {
     async fn store_torrent_ref(&self, info_hash: &str) -> Result<(), ServiceError> {
         let mut stream = TcpStream::connect(&self.overlay_service_addr).await
             .map_err(ServiceError::from)?;
-        let block_hashes = vec!["placeholder".to_string()]; // Extract from torrent metadata
+        let block_hashes = vec!["placeholder".to_string()];
         let request = StoreTorrentRefRequest {
             info_hash: info_hash.to_string(),
             block_hashes,
@@ -271,6 +285,26 @@ impl TorrentService {
         let mut buffer = vec![0u8; 1024 * 1024];
         let n = stream.read(&mut buffer).await.map_err(ServiceError::from)?;
         let response: StoreTorrentRefResponse = deserialize(&buffer[..n])
+            .map_err(ServiceError::from)?;
+        
+        if response.success {
+            Ok(())
+        } else {
+            Err(ServiceError::Torrent(response.error))
+        }
+    }
+
+    async fn validate_proof(&self, proof: &ProofBundle) -> Result<(), ServiceError> {
+        let mut stream = TcpStream::connect(&self.validation_service_addr).await
+            .map_err(ServiceError::from)?;
+        let request = ValidateProofRequest { proof: proof.clone() };
+        let encoded = serialize(&request).map_err(ServiceError::from)?;
+        stream.write_all(&encoded).await.map_err(ServiceError::from)?;
+        stream.flush().await.map_err(ServiceError::from)?;
+
+        let mut buffer = vec![0u8; 1024 * 1024];
+        let n = stream.read(&mut buffer).await.map_err(ServiceError::from)?;
+        let response: ValidateProofResponse = deserialize(&buffer[..n])
             .map_err(ServiceError::from)?;
         
         if response.success {
