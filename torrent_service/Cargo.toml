@@ -11,14 +11,13 @@ serde = { version = "1.0", features = ["derive"] }
 bincode = "1.3.3"
 tracing = "0.1.40"
 toml = "0.8.19"
-chrono = "0.4.38"  # For time-based aging
-bip_metainfo = "0.5.0"  # Torrent file generation
-torrust-tracker = "3.0.0"  # Tracker (adjust version if needed; latest as of 2025)
-cratetorrent = "0.6.0"  # Async torrent engine
-bsv = "0.3.0"  # For micropayments; if not exact, use compatible
-thiserror = "1.0.63"  # Error handling
-governor = "0.10.0"  # Rate limiting, matching Galaxy
-prometheus = "0.14.0"  # Metrics, matching Galaxy
+chrono = "0.4.38"
+bip_metainfo = "0.5.0"
+torrust-tracker = "3.0.0"
+cratetorrent = "0.6.0"
+thiserror = "1.0.63"
+governor = "0.10.0"
+prometheus = "0.14.0"
 hex = "0.4.3"
 async-channel = "2.3.1"
 
