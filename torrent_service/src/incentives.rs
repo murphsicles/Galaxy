@@ -1,6 +1,7 @@
-// torrent_service/src/incentives.rs
 use crate::utils::{Config, ServiceError};
-use bsv::{Transaction as BsvTx, PrivateKey, PublicKey, Script, Opcode};
+use sv::transaction::Transaction as SvTx;
+use sv::script::{Script, Opcode};
+use sv::keys::{PrivateKey, PublicKey};
 use tokio::net::TcpStream;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use bincode::{deserialize, serialize};
@@ -15,7 +16,7 @@ pub struct IncentivesManager {
 
 #[derive(Serialize, Deserialize, Debug)]
 struct BroadcastTxRequest {
-    tx: BsvTx,
+    tx: SvTx,
     token: String,
 }
 
@@ -29,7 +30,7 @@ impl IncentivesManager {
     pub fn new(config: &Config) -> Self {
         Self {
             config: config.clone(),
-            transaction_service_addr: "127.0.0.1:50053".to_string(), // Assume port for transaction_service
+            transaction_service_addr: "127.0.0.1:50053".to_string(),
         }
     }
 
@@ -69,35 +70,31 @@ impl IncentivesManager {
         Ok(())
     }
 
-    async fn build_op_return_tx(&self, user_id: &str, amount: u64, action: &str) -> Result<BsvTx, ServiceError> {
-        // Placeholder: Generate a private key for signing (in production, use proper wallet key)
+    async fn build_op_return_tx(&self, user_id: &str, amount: u64, action: &str) -> Result<SvTx, ServiceError> {
         let priv_key = PrivateKey::from_random();
         let pub_key = PublicKey::from_private_key(&priv_key);
 
-        // Create OP_RETURN script with action and user_id
         let mut script = Script::new();
         script.append(Opcode::OP_RETURN);
         script.append_data(action.as_bytes());
         script.append_data(user_id.as_bytes());
 
-        // Build transaction
-        let mut tx = BsvTx::new();
+        let mut tx = SvTx::new();
         tx.add_output(amount, &script);
         // Placeholder: Add input from wallet (requires actual utxos)
         // tx.add_input(...);
 
-        // Sign transaction (simplified; real impl needs utxo details)
-        tx.sign(&priv_key, 1 /* SIGHASH_ALL */).map_err(|e| ServiceError::IncentiveError(format!("Failed to sign tx: {}", e)))?;
+        tx.sign(&priv_key, 1).map_err(|e| ServiceError::IncentiveError(format!("Failed to sign tx: {}", e)))?;
         Ok(tx)
     }
 
-    async fn broadcast_tx(&self, tx: &BsvTx) -> Result<(), ServiceError> {
+    async fn broadcast_tx(&self, tx: &SvTx) -> Result<(), ServiceError> {
         let mut stream = TcpStream::connect(&self.transaction_service_addr)
             .await
             .map_err(|e| ServiceError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
         let request = BroadcastTxRequest {
             tx: tx.clone(),
-            token: "dummy_token".to_string(), // Replace with proper auth
+            token: "dummy_token".to_string(),
         };
         let encoded = serialize(&request).map_err(ServiceError::from)?;
         stream.write_all(&encoded).await.map_err(ServiceError::from)?;
@@ -116,7 +113,6 @@ impl IncentivesManager {
 
     async fn calculate_bonus(&self) -> u64 {
         // Placeholder: Implement speed (<500ms) and rarity (seeder count) logic
-        // For now, return fixed bonus for testing
         10 // 10 sat bonus
     }
 }
