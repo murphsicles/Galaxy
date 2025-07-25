@@ -1,7 +1,7 @@
 // torrent_service/src/incentives.rs
 use crate::utils::{Config, ServiceError};
 use crate::tracker::TrackerManager;
-use sv::transaction::Transaction as SvTx;
+use sv::transaction::{Transaction as SvTx, OutPoint};
 use sv::script::{Script, Opcode};
 use sv::keys::{PrivateKey, PublicKey};
 use tokio::net::TcpStream;
@@ -16,8 +16,10 @@ use toml;
 pub struct IncentivesManager {
     config: Config,
     transaction_service_addr: String,
+    storage_service_addr: String,
     tracker: Arc<TrackerManager>,
     auth_token: String,
+    wallet_address: String, // Added for UTXO querying
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -32,17 +34,38 @@ struct BroadcastTxResponse {
     error: String,
 }
 
+#[derive(Serialize, Deserialize, Debug)]
+struct GetUtxosRequest {
+    address: String,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct GetUtxosResponse {
+    utxos: Vec<Utxo>,
+    error: String,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct Utxo {
+    outpoint: OutPoint,
+    amount: u64,
+    script_pubkey: String,
+}
+
 impl IncentivesManager {
     pub fn new(config: &Config) -> Self {
         let config_str = include_str!("../../tests/config.toml");
         let toml_config: toml::Value = toml::from_str(config_str).expect("Failed to parse config");
         let auth_token = toml_config.get("torrent_service").and_then(|s| s.get("auth_token").and_then(|v| v.as_str())).unwrap_or("default_token").to_string();
+        let wallet_address = toml_config.get("torrent_service").and_then(|s| s.get("wallet_address").and_then(|v| v.as_str())).unwrap_or("default_address").to_string();
 
         Self {
             config: config.clone(),
             transaction_service_addr: "127.0.0.1:50052".to_string(),
+            storage_service_addr: "127.0.0.1:50053".to_string(),
             tracker: Arc::new(TrackerManager::new(config).await),
             auth_token,
+            wallet_address,
         }
     }
 
@@ -87,6 +110,13 @@ impl IncentivesManager {
         let priv_key = PrivateKey::from_random();
         let pub_key = PublicKey::from_private_key(&priv_key);
 
+        // Fetch UTXOs from storage_service
+        let utxos = self.get_utxos().await?;
+        if utxos.is_empty() {
+            return Err(ServiceError::IncentiveError("No available UTXOs for transaction".to_string()));
+        }
+        let utxo = &utxos[0]; // Use first UTXO for simplicity
+
         let mut script = Script::new();
         script.append(Opcode::OP_RETURN);
         script.append_data(action.as_bytes());
@@ -94,11 +124,33 @@ impl IncentivesManager {
 
         let mut tx = SvTx::new();
         tx.add_output(amount, &script);
-        // Placeholder: Add input from wallet (requires actual utxos)
-        // tx.add_input(...);
+        // Add input from UTXO
+        tx.add_input(&utxo.outpoint, &Script::from_hex(&utxo.script_pubkey).map_err(|e| ServiceError::IncentiveError(format!("Invalid script: {}", e)))?, utxo.amount);
 
         tx.sign(&priv_key, 1).map_err(|e| ServiceError::IncentiveError(format!("Failed to sign tx: {}", e)))?;
         Ok(tx)
+    }
+
+    async fn get_utxos(&self) -> Result<Vec<Utxo>, ServiceError> {
+        let mut stream = TcpStream::connect(&self.storage_service_addr)
+            .await
+            .map_err(|e| ServiceError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
+        let request = GetUtxosRequest {
+            address: self.wallet_address.clone(),
+        };
+        let encoded = serialize(&request).map_err(ServiceError::from)?;
+        stream.write_all(&encoded).await.map_err(ServiceError::from)?;
+        stream.flush().await.map_err(ServiceError::from)?;
+
+        let mut buffer = vec![0u8; 1024 * 1024];
+        let n = stream.read(&mut buffer).await.map_err(ServiceError::from)?;
+        let response: GetUtxosResponse = deserialize(&buffer[..n]).map_err(ServiceError::from)?;
+
+        if response.error.is_empty() {
+            Ok(response.utxos)
+        } else {
+            Err(ServiceError::IncentiveError(response.error))
+        }
     }
 
     async fn broadcast_tx(&self, tx: &SvTx) -> Result<(), ServiceError> {
