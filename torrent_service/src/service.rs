@@ -2,7 +2,7 @@
 use crate::aging::AgingManager;
 use crate::chunker::Chunker;
 use crate::incentives::IncentivesManager;
-use crate::proof_server::ProofServer;
+use crate::proof_server::{ProofServer, ProofBundle};
 use crate::tracker::TrackerManager;
 use crate::utils::{Config, ServiceError, AgedThreshold};
 use shared::ShardManager;
@@ -18,7 +18,6 @@ use bincode::{deserialize, serialize};
 use tokio::net::TcpStream;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use serde::{Deserialize, Serialize};
-use crate::proof_server::ProofBundle;
 
 pub struct TorrentService {
     pub config: Config,
@@ -40,6 +39,7 @@ pub struct TorrentService {
     pub errors_total: Counter,
     pub rate_limiter: Arc<RateLimiter<String, governor::state::direct::NotKeyed, governor::clock::DefaultClock>>,
     event_rx: mpsc::Receiver<BlockRequestEvent>,
+    auth_token: String,
 }
 
 #[derive(Debug)]
@@ -92,6 +92,10 @@ impl TorrentService {
             stake_amount: 100000,
             proof_reward_base: 100,
             bulk_reward_per_mb: 100,
+            proof_bonus_speed: 10,
+            proof_bonus_rare: 50,
+            tracker_port: Some(6969),
+            proof_rpc_port: Some(50063),
         };
 
         let registry = Arc::new(Registry::new());
@@ -111,6 +115,8 @@ impl TorrentService {
         let proof_server = Arc::new(ProofServer::new(&config, event_tx.clone()));
         let incentives = Arc::new(IncentivesManager::new(&config));
         let aging = Arc::new(AgingManager::new(&config, event_tx));
+
+        let auth_token = toml_config.get("torrent_service").and_then(|s| s.get("auth_token").and_then(|v| v.as_str())).unwrap_or("default_token").to_string();
 
         Self {
             config,
@@ -132,6 +138,7 @@ impl TorrentService {
             errors_total,
             rate_limiter,
             event_rx,
+            auth_token,
         }
     }
 
@@ -184,7 +191,7 @@ impl TorrentService {
         };
         let encoded = serialize(&request).map_err(ServiceError::from)?;
         stream.write_all(&encoded).await.map_err(ServiceError::from)?;
-        stream.flush().await map_err(ServiceError::from)?;
+        stream.flush().await.map_err(ServiceError::from)?;
 
         let mut buffer = vec![0u8; 1024 * 1024];
         let n = stream.read(&mut buffer).await.map_err(ServiceError::from)?;
@@ -223,9 +230,9 @@ impl TorrentService {
                 self.rate_limiter.until_ready().await;
 
                 let proof = self.proof_server.get_proof(&txid, &block_hash).await?;
+                self.validate_proof(&proof).await?;
                 let serialized_proof = serialize(&proof).map_err(ServiceError::from)?;
 
-                self.validate_proof(&proof).await?;
                 self.incentives.reward_proof(&user_id, &block_hash).await?;
 
                 self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
@@ -252,7 +259,7 @@ impl TorrentService {
             .map_err(ServiceError::from)?;
         let request = GetAgedBlocksRequest {
             threshold: self.config.aged_threshold.clone(),
-            token: self.authenticate("dummy_token").await?,
+            token: self.auth_token.clone(),
         };
         let encoded = serialize(&request).map_err(ServiceError::from)?;
         stream.write_all(&encoded).await.map_err(ServiceError::from)?;
