@@ -41,7 +41,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_max_level(tracing::Level::INFO)
         .init();
 
-    let addr = "127.0.0.1:50055";
+    let addr = "127.0.0.1:50062";
     let torrent_service = Arc::new(TorrentService::new().await);
 
     // Spawn background tasks
