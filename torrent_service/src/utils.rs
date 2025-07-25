@@ -1,3 +1,4 @@
+// torrent_service/src/utils.rs
 use thiserror::Error;
 use serde::{Deserialize, Serialize};
 
@@ -13,7 +14,8 @@ pub enum ServiceError {
     AlertError(String),
     #[error("Torrent error: {0}")]
     Torrent(String),
-    // Add more
+    #[error("Incentive error: {0}")]
+    IncentiveError(String),
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -22,8 +24,11 @@ pub struct Config {
     pub aged_threshold: AgedThreshold,
     pub stake_amount: u64,
     pub proof_reward_base: u64,
+    pub proof_bonus_speed: u64,
+    pub proof_bonus_rare: u64,
     pub bulk_reward_per_mb: u64,
-    // Add ports, etc.
+    pub tracker_port: Option<u16>,
+    pub proof_rpc_port: Option<u16>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
