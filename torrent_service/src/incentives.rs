@@ -30,7 +30,7 @@ impl IncentivesManager {
     pub fn new(config: &Config) -> Self {
         Self {
             config: config.clone(),
-            transaction_service_addr: "127.0.0.1:50053".to_string(),
+            transaction_service_addr: "127.0.0.1:50052".to_string(),
         }
     }
 
@@ -89,9 +89,7 @@ impl IncentivesManager {
     }
 
     async fn broadcast_tx(&self, tx: &SvTx) -> Result<(), ServiceError> {
-        let mut stream = TcpStream::connect(&self.transaction_service_addr)
-            .await
-            .map_err(|e| ServiceError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
+        let mut stream = TcpStream::connect(&self.transaction_service_addr).await.map_err(ServiceError::from)?;
         let request = BroadcastTxRequest {
             tx: tx.clone(),
             token: "dummy_token".to_string(),
