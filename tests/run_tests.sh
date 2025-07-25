@@ -12,6 +12,7 @@ cd ../consensus_service && cargo run &
 cd ../overlay_service && cargo run &
 cd ../validation_service && cargo run &
 cd ../mining_service && cargo run &
+cd ../torrent_service && cargo run &
 
 # Wait for services to start
 sleep 5
@@ -47,6 +48,10 @@ echo "Testing validation_service: StreamSPVProofs"
 
 echo "Testing mining_service: GetMiningWork"
 grpcurl -plaintext -d '{"miner_id": "miner1"}' localhost:50058 mining.Mining/GetMiningWork
+
+# Run torrent_service test
+echo "Running torrent_service unit tests..."
+cargo test --test torrent_service -- --nocapture
 
 # Clean up
 pkill -f tigerbeetle
