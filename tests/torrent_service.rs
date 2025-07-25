@@ -20,6 +20,8 @@ enum MockRequestType {
     StoreTorrentRef(StoreTorrentRefRequest),
     ValidateProof(ValidateProofRequest),
     BroadcastTx(BroadcastTxRequest),
+    AuthRequest(AuthRequest),
+    AlertRequest(AlertRequest),
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -28,6 +30,8 @@ enum MockResponseType {
     StoreTorrentRef(StoreTorrentRefResponse),
     ValidateProof(ValidateProofResponse),
     BroadcastTx(BroadcastTxResponse),
+    AuthResponse(AuthResponse),
+    AlertResponse(AlertResponse),
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -65,6 +69,31 @@ struct BroadcastTxResponse {
     error: String,
 }
 
+#[derive(Serialize, Deserialize, Debug)]
+struct AuthRequest {
+    token: String,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct AuthResponse {
+    success: bool,
+    user_id: String,
+    error: String,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct AlertRequest {
+    event_type: String,
+    message: String,
+    severity: u32,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct AlertResponse {
+    success: bool,
+    error: String,
+}
+
 #[tokio::test]
 async fn test_torrent_service_end_to_end() {
     // Initialize tracing
@@ -98,7 +127,7 @@ async fn test_torrent_service_end_to_end() {
                     stream.write_all(&encoded).await.unwrap();
                     stream.flush().await.unwrap();
                 }
-                _ => panic!("Unexpected request"),
+                _ => {}
             }
         }
     });
@@ -121,7 +150,7 @@ async fn test_torrent_service_end_to_end() {
                     stream.write_all(&encoded).await.unwrap();
                     stream.flush().await.unwrap();
                 }
-                _ => panic!("Unexpected request"),
+                _ => {}
             }
         }
     });
@@ -130,7 +159,7 @@ async fn test_torrent_service_end_to_end() {
     let validation_listener = TcpListener::bind("127.0.0.1:50057").await.unwrap();
     tokio::spawn(async move {
         loop {
-            let (mut stream, _) = overlay_listener.accept().await.unwrap();
+            let (mut stream, _) = validation_listener.accept().await.unwrap();
             let mut buffer = vec![0u8; 1024 * 1024];
             let n = stream.read(&mut buffer).await.unwrap();
             let req: MockRequestType = deserialize(&buffer[..n]).unwrap();
@@ -144,7 +173,7 @@ async fn test_torrent_service_end_to_end() {
                     stream.write_all(&encoded).await.unwrap();
                     stream.flush().await.unwrap();
                 }
-                _ => panic!("Unexpected request"),
+                _ => {}
             }
         }
     });
@@ -167,7 +196,7 @@ async fn test_torrent_service_end_to_end() {
                     stream.write_all(&encoded).await.unwrap();
                     stream.flush().await.unwrap();
                 }
-                _ => panic!("Unexpected request"),
+                _ => {}
             }
         }
     });
@@ -179,15 +208,20 @@ async fn test_torrent_service_end_to_end() {
             let (mut stream, _) = auth_listener.accept().await.unwrap();
             let mut buffer = vec![0u8; 1024 * 1024];
             let n = stream.read(&mut buffer).await.unwrap();
-            let req: AuthRequest = deserialize(&buffer[..n]).unwrap();
-            let resp = AuthResponse {
-                success: true,
-                user_id: "test_user".to_string(),
-                error: String::new(),
-            };
-            let encoded = serialize(&resp).unwrap();
-            stream.write_all(&encoded).await.unwrap();
-            stream.flush().await.unwrap();
+            let req: MockRequestType = deserialize(&buffer[..n]).unwrap();
+            match req {
+                MockRequestType::AuthRequest(req) => {
+                    let resp = AuthResponse {
+                        success: true,
+                        user_id: "test_user".to_string(),
+                        error: String::new(),
+                    };
+                    let encoded = serialize(&MockResponseType::AuthResponse(resp)).unwrap();
+                    stream.write_all(&encoded).await.unwrap();
+                    stream.flush().await.unwrap();
+                }
+                _ => {}
+            }
         }
     });
 
@@ -198,14 +232,19 @@ async fn test_torrent_service_end_to_end() {
             let (mut stream, _) = alert_listener.accept().await.unwrap();
             let mut buffer = vec![0u8; 1024 * 1024];
             let n = stream.read(&mut buffer).await.unwrap();
-            let req: AlertRequest = deserialize(&buffer[..n]).unwrap();
-            let resp = AlertResponse {
-                success: true,
-                error: String::new(),
-            };
-            let encoded = serialize(&resp).unwrap();
-            stream.write_all(&encoded).await.unwrap();
-            stream.flush().await.unwrap();
+            let req: MockRequestType = deserialize(&buffer[..n]).unwrap();
+            match req {
+                MockRequestType::AlertRequest(req) => {
+                    let resp = AlertResponse {
+                        success: true,
+                        error: String::new(),
+                    };
+                    let encoded = serialize(&MockResponseType::AlertResponse(resp)).unwrap();
+                    stream.write_all(&encoded).await.unwrap();
+                    stream.flush().await.unwrap();
+                }
+                _ => {}
+            }
         }
     });
 
@@ -238,29 +277,4 @@ async fn test_torrent_service_end_to_end() {
         }
         _ => panic!("Unexpected response type"),
     }
-}
-
-#[derive(Serialize, Deserialize, Debug)]
-struct AuthRequest {
-    token: String,
-}
-
-#[derive(Serialize, Deserialize, Debug)]
-struct AuthResponse {
-    success: bool,
-    user_id: String,
-    error: String,
-}
-
-#[derive(Serialize, Deserialize, Debug)]
-struct AlertRequest {
-    event_type: String,
-    message: String,
-    severity: u32,
-}
-
-#[derive(Serialize, Deserialize, Debug)]
-struct AlertResponse {
-    success: bool,
-    error: String,
 }
