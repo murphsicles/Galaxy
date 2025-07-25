@@ -1,3 +1,4 @@
+// block_service/src/main.rs
 use bincode::{deserialize, serialize};
 use serde::{Deserialize, Serialize};
 use tokio::net::{TcpListener, TcpStream};
@@ -10,7 +11,9 @@ use std::num::NonZeroU32;
 use std::sync::Arc;
 use toml;
 use governor::{Quota, RateLimiter};
-use shared::ShardManager;
+use shared::{ShardManager, AgedThreshold};
+use chrono::{Duration, Utc};
+use hex;
 
 #[derive(Serialize, Deserialize, Debug)]
 struct AuthRequest {
@@ -76,21 +79,36 @@ struct GetMetricsResponse {
 }
 
 #[derive(Serialize, Deserialize, Debug)]
+struct GetAgedBlocksRequest {
+    threshold: AgedThreshold,
+    token: String,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct GetAgedBlocksResponse {
+    blocks: Vec<Block>,
+    error: String,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
 enum BlockRequestType {
     ValidateBlock { request: ValidateBlockRequest, token: String },
     GetMetrics { request: GetMetricsRequest, token: String },
+    GetAgedBlocks(GetAgedBlocksRequest),
 }
 
 #[derive(Serialize, Deserialize, Debug)]
 enum BlockResponseType {
     ValidateBlock(ValidateBlockResponse),
     GetMetrics(GetMetricsResponse),
+    GetAgedBlocks(GetAgedBlocksResponse),
 }
 
 #[derive(Debug)]
 struct BlockService {
     auth_service_addr: String,
     alert_service_addr: String,
+    storage_service_addr: String,
     registry: Arc<Registry>,
     requests_total: Counter,
     latency_ms: Gauge,
@@ -98,6 +116,40 @@ struct BlockService {
     errors_total: Counter,
     rate_limiter: Arc<RateLimiter<String, governor::state::direct::NotKeyed, governor::clock::DefaultClock>>,
     shard_manager: Arc<ShardManager>,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct GetBlocksByTimestampRequest {
+    before_timestamp: i64, // Unix timestamp in seconds
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct GetBlocksByTimestampResponse {
+    blocks: Vec<Block>,
+    error: String,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct GetBlocksByHeightRequest {
+    max_height: u64,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct GetBlocksByHeightResponse {
+    blocks: Vec<Block>,
+    error: String,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+enum StorageRequestType {
+    GetBlocksByTimestamp(GetBlocksByTimestampRequest),
+    GetBlocksByHeight(GetBlocksByHeightRequest),
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+enum StorageResponseType {
+    GetBlocksByTimestamp(GetBlocksByTimestampResponse),
+    GetBlocksByHeight(GetBlocksByHeightResponse),
 }
 
 impl BlockService {
@@ -122,6 +174,7 @@ impl BlockService {
         BlockService {
             auth_service_addr: "127.0.0.1:50060".to_string(),
             alert_service_addr: "127.0.0.1:50061".to_string(),
+            storage_service_addr: "127.0.0.1:50052".to_string(), // Assume port
             registry,
             requests_total,
             latency_ms,
@@ -154,7 +207,7 @@ impl BlockService {
 
     async fn authorize(&self, user_id: &str, method: &str) -> Result<(), String> {
         let mut stream = TcpStream::connect(&self.auth_service_addr).await
-            .map_err(|e| format("Failed to connect to auth_service: {}", e))?;
+            .map_err(|e| format!("Failed to connect to auth_service: {}", e))?;
         let request = AuthorizeRequest {
             user_id: user_id.to_string(),
             service: "block_service".to_string(),
@@ -162,7 +215,7 @@ impl BlockService {
         };
         let encoded = serialize(&request).map_err(|e| format("Serialization error: {}", e))?;
         stream.write_all(&encoded).await.map_err(|e| format("Write error: {}", e))?;
-        stream.flush().await map_err(|e| format("Flush error: {}", e))?;
+        stream.flush().await.map_err(|e| format("Flush error: {}", e))?;
 
         let mut buffer = vec![0u8; 1024 * 1024];
         let n = stream.read(&mut buffer).await.map_err(|e| format("Read error: {}", e))?;
@@ -178,7 +231,7 @@ impl BlockService {
 
     async fn send_alert(&self, event_type: &str, message: &str, severity: u32) -> Result<(), String> {
         let mut stream = TcpStream::connect(&self.alert_service_addr).await
-            .map_err(|e| format("Failed to connect to alert_service: {}", e))?;
+            .map_err(|e| format!("Failed to connect to alert_service: {}", e))?;
         let request = AlertRequest {
             event_type: event_type.to_string(),
             message: message.to_string(),
@@ -202,6 +255,66 @@ impl BlockService {
         }
     }
 
+    async fn fetch_blocks_by_timestamp(&self, before_timestamp: i64) -> Result<Vec<Block>, String> {
+        let mut stream = TcpStream::connect(&self.storage_service_addr).await
+            .map_err(|e| format!("Failed to connect to storage_service: {}", e))?;
+        let request = StorageRequestType::GetBlocksByTimestamp(GetBlocksByTimestampRequest {
+            before_timestamp,
+        });
+        let encoded = serialize(&request).map_err(|e| format!("Serialization error: {}", e))?;
+        stream.write_all(&encoded).await.map_err(|e| format("Write error: {}", e))?;
+        stream.flush().await.map_err(|e| format("Flush error: {}", e))?;
+
+        let mut buffer = vec![0u8; 1024 * 1024];
+        let n = stream.read(&mut buffer).await.map_err(|e| format("Read error: {}", e))?;
+        let response: StorageResponseType = deserialize(&buffer[..n])
+            .map_err(|e| format("Deserialization error: {}", e))?;
+        
+        match response {
+            StorageResponseType::GetBlocksByTimestamp(resp) => {
+                if resp.error.is_empty() {
+                    Ok(resp.blocks)
+                } else {
+                    Err(resp.error)
+                }
+            }
+            _ => Err("Unexpected response type".to_string()),
+        }
+    }
+
+    async fn fetch_blocks_by_height(&self, max_height: u64) -> Result<Vec<Block>, String> {
+        let mut stream = TcpStream::connect(&self.storage_service_addr).await
+            .map_err(|e| format!("Failed to connect to storage_service: {}", e))?;
+        let request = StorageRequestType::GetBlocksByHeight(GetBlocksByHeightRequest {
+            max_height,
+        });
+        let encoded = serialize(&request).map_err(|e| format("Serialization error: {}", e))?;
+        stream.write_all(&encoded).await.map_err(|e| format("Write error: {}", e))?;
+        stream.flush().await.map_err(|e| format("Flush error: {}", e))?;
+
+        let mut buffer = vec![0u8; 1024 * 1024];
+        let n = stream.read(&mut buffer).await.map_err(|e| format("Read error: {}", e))?;
+        let response: StorageResponseType = deserialize(&buffer[..n])
+            .map_err(|e| format("Deserialization error: {}", e))?;
+        
+        match response {
+            StorageResponseType::GetBlocksByHeight(resp) => {
+                if resp.error.is_empty() {
+                    Ok(resp.blocks)
+                } else {
+                    Err(resp.error)
+                }
+            }
+            _ => Err("Unexpected response type".to_string()),
+        }
+    }
+
+    async fn get_current_tip_height(&self) -> Result<u64, String> {
+        // Placeholder: Query storage_service or internal state for current chain tip height
+        // For now, return a dummy value
+        Ok(1000000)
+    }
+
     async fn handle_request(&self, request: BlockRequestType) -> Result<BlockResponseType, String> {
         self.requests_total.inc();
         let start = std::time::Instant::now();
@@ -209,24 +322,24 @@ impl BlockService {
         match request {
             BlockRequestType::ValidateBlock { request, token } => {
                 let user_id = self.authenticate(&token).await
-                    .map_err(|e| format("Authentication failed: {}", e))?;
+                    .map_err(|e| format!("Authentication failed: {}", e))?;
                 self.authorize(&user_id, "ValidateBlock").await
-                    .map_err(|e| format("Authorization failed: {}", e))?;
+                    .map_err(|e| format!("Authorization failed: {}", e))?;
                 self.rate_limiter.until_ready().await;
 
                 let block_bytes = hex::decode(&request.block_hex).map_err(|e| {
                     warn!("Invalid block hex: {}", e);
-                    let _ = self.send_alert("validate_invalid_block", &format("Invalid block hex: {}", e), 2);
-                    format("Invalid block hex: {}", e)
+                    let _ = self.send_alert("validate_invalid_block", &format!("Invalid block hex: {}", e), 2);
+                    format!("Invalid block hex: {}", e)
                 })?;
                 let block: Block = sv_deserialize(&block_bytes).map_err(|e| {
                     warn!("Invalid block: {}", e);
-                    let _ = self.send_alert("validate_invalid_block_deserialization", &format("Invalid block: {}", e), 2);
-                    format("Invalid block: {}", e)
+                    let _ = self.send_alert("validate_invalid_block_deserialization", &format!("Invalid block: {}", e), 2);
+                    format!("Invalid block: {}", e)
                 })?;
 
                 // Placeholder: Validate block against consensus rules
-                let success = true; // Replace with actual block validation logic
+                let success = true;
                 let error = if success { "".to_string() } else { "Block validation failed".to_string() };
 
                 self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
@@ -237,9 +350,9 @@ impl BlockService {
             }
             BlockRequestType::GetMetrics { request, token } => {
                 let user_id = self.authenticate(&token).await
-                    .map_err(|e| format("Authentication failed: {}", e))?;
+                    .map_err(|e| format!("Authentication failed: {}", e))?;
                 self.authorize(&user_id, "GetMetrics").await
-                    .map_err(|e| format("Authorization failed: {}", e))?;
+                    .map_err(|e| format!("Authorization failed: {}", e))?;
 
                 self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
                 Ok(BlockResponseType::GetMetrics(GetMetricsResponse {
@@ -250,6 +363,37 @@ impl BlockService {
                     cache_hits: 0,
                     alert_count: self.alert_count.get() as u64,
                     index_throughput: 0.0,
+                }))
+            }
+            BlockRequestType::GetAgedBlocks(get_aged_request) => {
+                let user_id = self.authenticate(&get_aged_request.token).await
+                    .map_err(|e| format!("Authentication failed: {}", e))?;
+                self.authorize(&user_id, "GetAgedBlocks").await
+                    .map_err(|e| format!("Authorization failed: {}", e))?;
+                self.rate_limiter.until_ready().await;
+
+                let blocks = match get_aged_request.threshold {
+                    AgedThreshold::Months(months) => {
+                        let cutoff = Utc::now() - Duration::days(months as i64 * 30);
+                        self.fetch_blocks_by_timestamp(cutoff.timestamp()).await
+                            .map_err(|e| format!("Failed to fetch aged blocks: {}", e))?
+                    }
+                    AgedThreshold::Blocks(height) => {
+                        let current_tip = self.get_current_tip_height().await
+                            .map_err(|e| format!("Failed to get chain tip: {}", e))?;
+                        if height >= current_tip {
+                            vec![]
+                        } else {
+                            self.fetch_blocks_by_height(current_tip - height).await
+                                .map_err(|e| format!("Failed to fetch aged blocks: {}", e))?
+                        }
+                    }
+                };
+
+                self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
+                Ok(BlockResponseType::GetAgedBlocks(GetAgedBlocksResponse {
+                    blocks,
+                    error: String::new(),
                 }))
             }
         }
