@@ -20,6 +20,7 @@ The service is fully asynchronous, using Tokio and bincode for inter-service com
 - **Seeder Authentication**: BSV wallet signatures required for registration (via tracker). 🔒
 - **Merkle Proof Serving**: Hybrid approach: RPC for lightweight proofs, torrents for bulk data. 📜
 - **Incentive Structure**: Micropayments for seeding/proofs, staking/slashing for behavior. 💰
+- **UTXO Integration**: Transactions use real UTXOs from Storage Service for production-ready rewards/stakes. 🪙
 - **Validation Integration**: Proofs validated via Validation Service; transactions via Transaction Service. ✅
 - **Storage/Overlay Integration**: Block fetching from Storage, references in Overlay. 🗄️
 - **Metrics & Alerts**: Prometheus metrics and alerts for monitoring. 📊
@@ -40,6 +41,7 @@ bulk_reward_per_mb = 100 # sat
 tracker_port = 6969
 proof_rpc_port = 50063
 auth_token = "your_auth_token" # For inter-service authentication
+wallet_address = "your_wallet_address" # For UTXO queries
 ```
 ## Submodules 🛠️
 
@@ -63,7 +65,10 @@ Start with `cargo run --package torrent_service`.
 
 ## Testing 🧪
 
-Run `./tests/run_tests.sh` to start services and test the torrent overlay flow, including proof retrieval, incentives, and bonuses.
+Run `./tests/run_tests.sh` to start services and test:
+- **End-to-End Flow**: Aging detection, block offloading, proof retrieval, and rewarding.
+- **Seeder Authentication**: Validates BSV signature requirements for tracker registration.
+- **Bonus Calculations**: Verifies 10 sat speed bonus (<500ms) and 50 sat rarity bonus (<3 seeders).
 
 ## Future Improvements 🚧
 
