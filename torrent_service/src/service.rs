@@ -7,12 +7,16 @@ use crate::utils::{Config, ServiceError, AgedThreshold};
 use shared::ShardManager;
 use sv::block::Block;
 use tokio::sync::mpsc;
-use tracing::{info, error};
+use tracing::{info, warn, error};
 use prometheus::{Counter, Gauge, Registry};
 use std::sync::Arc;
 use toml;
 use governor::{Quota, RateLimiter};
-use std::num::NonZeroU32;
+use std::num::std::error::Error as StdError;
+use bincode::{deserialize, serialize};
+use tokio::net::TcpStream;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use serde::{Deserialize, Serialize};
 
 pub struct TorrentService {
     pub config: Config,
@@ -24,7 +28,7 @@ pub struct TorrentService {
     shard_manager: Arc<ShardManager>,
     auth_service_addr: String,
     alert_service_addr: String,
-    block_service_addr: String,  // To fetch blocks
+    block_service_addr: String,
     validation_service_addr: String,
     overlay_service_addr: String,
     pub registry: Arc<Registry>,
@@ -33,13 +37,12 @@ pub struct TorrentService {
     pub alert_count: Counter,
     pub errors_total: Counter,
     pub rate_limiter: Arc<RateLimiter<String, governor::state::direct::NotKeyed, governor::clock::DefaultClock>>,
-    event_rx: mpsc::Receiver<BlockRequestEvent>,  // For internal events, e.g., from aging
+    event_rx: mpsc::Receiver<BlockRequestEvent>,
 }
 
 #[derive(Debug)]
 enum BlockRequestEvent {
     AgedBlocks(Vec<Block>),
-    // Add more
 }
 
 impl TorrentService {
@@ -49,10 +52,9 @@ impl TorrentService {
         let config = Config {
             piece_size: toml_config.get("torrent_service").and_then(|s| s.get("piece_size").and_then(|v| v.as_integer())).unwrap_or(32 * 1024 * 1024) as usize,
             aged_threshold: AgedThreshold::Months(toml_config.get("torrent_service").and_then(|s| s.get("aged_threshold_months").and_then(|v| v.as_integer())).unwrap_or(60) as u32),
-            stake_amount: 100000,  // sat
+            stake_amount: 100000,
             proof_reward_base: 100,
             bulk_reward_per_mb: 100,
-            // Add more from [torrent_service]
         };
 
         let registry = Arc::new(Registry::new());
@@ -84,7 +86,7 @@ impl TorrentService {
             auth_service_addr: "127.0.0.1:50060".to_string(),
             alert_service_addr: "127.0.0.1:50061".to_string(),
             block_service_addr: "127.0.0.1:50054".to_string(),
-            validation_service_addr: "127.0.0.1:50056".to_string(),  // Assume ports
+            validation_service_addr: "127.0.0.1:50056".to_string(),
             overlay_service_addr: "127.0.0.1:50057".to_string(),
             registry,
             requests_total,
@@ -97,7 +99,6 @@ impl TorrentService {
     }
 
     async fn authenticate(&self, token: &str) -> Result<String, ServiceError> {
-        // Mirror from block_service
         let mut stream = TcpStream::connect(&self.auth_service_addr).await.map_err(ServiceError::from)?;
         let request = super::main::AuthRequest { token: token.to_string() };
         let encoded = serialize(&request).map_err(ServiceError::from)?;
@@ -116,7 +117,6 @@ impl TorrentService {
     }
 
     async fn authorize(&self, user_id: &str, method: &str) -> Result<(), ServiceError> {
-        // Mirror
         let mut stream = TcpStream::connect(&self.auth_service_addr).await.map_err(ServiceError::from)?;
         let request = super::main::AuthorizeRequest {
             user_id: user_id.to_string(),
@@ -139,7 +139,6 @@ impl TorrentService {
     }
 
     async fn send_alert(&self, event_type: &str, message: &str, severity: u32) -> Result<(), ServiceError> {
-        // Mirror
         let mut stream = TcpStream::connect(&self.alert_service_addr).await.map_err(ServiceError::from)?;
         let request = super::main::AlertRequest {
             event_type: event_type.to_string(),
@@ -173,11 +172,9 @@ impl TorrentService {
                 self.authorize(&user_id, "OffloadAgedBlocks").await?;
                 self.rate_limiter.until_ready().await;
 
-                // Trigger aging to get blocks
-                let blocks = self.fetch_aged_blocks().await?;  // Implement fetch from Block Service
+                let blocks = self.fetch_aged_blocks().await?;
                 let torrent = self.chunker.offload(&blocks).await?;
                 self.tracker.announce(&torrent).await?;
-                // Store ref in Overlay
                 self.store_torrent_ref(&torrent.info_hash()).await?;
 
                 self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
@@ -189,9 +186,8 @@ impl TorrentService {
                 self.rate_limiter.until_ready().await;
 
                 let proof = self.proof_server.get_proof(&txid, &block_hash).await?;
-                let serialized_proof = serialize(&proof).map_err(ServiceError::from)?;  // Assume ProofBundle struct
+                let serialized_proof = serialize(&proof).map_err(ServiceError::from)?;
 
-                // Trigger incentive
                 self.incentives.reward_proof(&user_id).await?;
 
                 self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
@@ -214,17 +210,49 @@ impl TorrentService {
     }
 
     async fn fetch_aged_blocks(&self) -> Result<Vec<Block>, ServiceError> {
-        // Connect to block_service, send a custom request for aged blocks
-        let mut stream = TcpStream::connect(&self.block_service_addr).await.map_err(ServiceError::from)?;
-        // Define a BlockRequestType for aged, serialize, send, receive
-        // Placeholder: Return dummy blocks
-        Ok(vec![])
+        let mut stream = TcpStream::connect(&self.block_service_addr).await
+            .map_err(ServiceError::from)?;
+        let request = GetAgedBlocksRequest {
+            threshold: self.config.aged_threshold.clone(),
+            token: self.authenticate("dummy_token").await?,  // Replace with proper token logic
+        };
+        let encoded = serialize(&request).map_err(ServiceError::from)?;
+        stream.write_all(&encoded).await.map_err(ServiceError::from)?;
+        stream.flush().await.map_err(ServiceError::from)?;
+
+        let mut buffer = vec![0u8; 1024 * 1024];
+        let n = stream.read(&mut buffer).await.map_err(ServiceError::from)?;
+        let response: GetAgedBlocksResponse = deserialize(&buffer[..n])
+            .map_err(ServiceError::from)?;
+        
+        if response.error.is_empty() {
+            Ok(response.blocks)
+        } else {
+            Err(ServiceError::Torrent(response.error))
+        }
     }
 
     async fn store_torrent_ref(&self, info_hash: &str) -> Result<(), ServiceError> {
-        // Connect to overlay_service, send request to store ref
-        // Placeholder
-        Ok(())
+        let mut stream = TcpStream::connect(&self.overlay_service_addr).await
+            .map_err(ServiceError::from)?;
+        let block_hashes = vec!["placeholder_hash".to_string()];  // Replace with actual extraction from torrent or blocks
+        let request = StoreTorrentRefRequest {
+            info_hash: info_hash.to_string(),
+            block_hashes,
+        };
+        let encoded = serialize(&request).map_err(ServiceError::from)?;
+        stream.write_all(&encoded).await.map_err(ServiceError::from)?;
+        stream.flush().await.map_err(ServiceError::from)?;
+
+        let mut buffer = vec![0u8; 1024 * 1024];
+        let n = stream.read(&mut buffer).await.map_err(ServiceError::from)?;
+        let response: StoreTorrentRefResponse = deserialize(&buffer[..n])
+            .map_err(ServiceError::from)?;
+        
+        if response.success {
+            Ok(())
+        } else {
+            Err(ServiceError::Torrent(response.error))
+        }
     }
-    // Add more helpers, e.g., validate_proof via validation_service
 }
