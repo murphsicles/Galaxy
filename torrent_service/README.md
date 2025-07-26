@@ -21,6 +21,7 @@ The service is fully asynchronous, using Tokio and bincode for inter-service com
 - **Merkle Proof Serving**: Hybrid approach: RPC for lightweight proofs, torrents for bulk data. 📜
 - **Incentive Structure**: Micropayments for seeding/proofs, staking/slashing for behavior. 💰
 - **UTXO Integration**: Transactions use real UTXOs from Storage Service for production-ready rewards/stakes. 🪙
+- **Dynamic Chunk Sizing**: Adjusts chunk sizes (8MB for large/high-TPS blocks, 32MB default) for optimized bandwidth. 📏
 - **Validation Integration**: Proofs validated via Validation Service; transactions via Transaction Service. ✅
 - **Storage/Overlay Integration**: Block fetching from Storage, references in Overlay. 🗄️
 - **Metrics & Alerts**: Prometheus metrics and alerts for monitoring. 📊
@@ -38,6 +39,7 @@ proof_reward_base = 100 # sat
 proof_bonus_speed = 10 # sat (<500ms)
 proof_bonus_rare = 50 # sat (<3 seeders)
 bulk_reward_per_mb = 100 # sat
+dynamic_chunk_size = true # Enable dynamic chunk sizing based on block TPS/size
 tracker_port = 6969
 proof_rpc_port = 50063
 auth_token = "your_auth_token" # For inter-service authentication
@@ -69,6 +71,7 @@ Run `./tests/run_tests.sh` to start services and test:
 - **End-to-End Flow**: Aging detection, block offloading, proof retrieval, and rewarding.
 - **Seeder Authentication**: Validates BSV signature requirements for tracker registration.
 - **Bonus Calculations**: Verifies 10 sat speed bonus (<500ms) and 50 sat rarity bonus (<3 seeders).
+- **Dynamic Chunk Sizing**: Verifies 8MB chunks for high-TPS blocks and 32MB for standard blocks.
 
 ## Future Improvements 🚧
 
