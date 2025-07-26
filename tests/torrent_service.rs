@@ -10,7 +10,7 @@ use sv::merkle::MerklePath;
 use shared::AgedThreshold;
 use torrent_service::service::{TorrentService, GetAgedBlocksRequest, GetAgedBlocksResponse, TorrentRequestType, TorrentResponseType};
 use torrent_service::utils::ServiceError;
-use torrent_service::proof_server::ProofBundle;
+use torrent_service::proof_server::{ProofBundle, ProofRequest, ProofResponse};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -23,6 +23,7 @@ enum MockRequestType {
     AuthRequest(AuthRequest),
     AlertRequest(AlertRequest),
     GetUtxos(GetUtxosRequest),
+    ProofRequest(ProofRequest),
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -34,6 +35,7 @@ enum MockResponseType {
     AuthResponse(AuthResponse),
     AlertResponse(AlertResponse),
     GetUtxos(GetUtxosResponse),
+    ProofResponse(ProofResponse),
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -290,6 +292,34 @@ async fn test_torrent_service_end_to_end() {
                         error: String::new(),
                     };
                     let encoded = serialize(&MockResponseType::GetUtxos(resp)).unwrap();
+                    stream.write_all(&encoded).await.unwrap();
+                    stream.flush().await.unwrap();
+                }
+                _ => {}
+            }
+        }
+    });
+
+    // Mock proof_server for fast response
+    let proof_listener = TcpListener::bind("127.0.0.1:50063").await.unwrap();
+    tokio::spawn(async move {
+        loop {
+            let (mut stream, addr) = proof_listener.accept().await.unwrap();
+            let mut buffer = vec![0u8; 1024 * 1024];
+            let n = stream.read(&mut buffer).await.unwrap();
+            let req: MockRequestType = deserialize(&buffer[..n]).unwrap();
+            match req {
+                MockRequestType::ProofRequest(req) => {
+                    let proof = ProofBundle {
+                        tx: SvTx::default(),
+                        path: MerklePath::default(),
+                        header: Header::default(),
+                    };
+                    let resp = ProofResponse {
+                        proof: Some(proof),
+                        error: String::new(),
+                    };
+                    let encoded = serialize(&MockResponseType::ProofResponse(resp)).unwrap();
                     stream.write_all(&encoded).await.unwrap();
                     stream.flush().await.unwrap();
                 }
