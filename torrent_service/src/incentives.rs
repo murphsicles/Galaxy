@@ -19,7 +19,7 @@ pub struct IncentivesManager {
     storage_service_addr: String,
     tracker: Arc<TrackerManager>,
     auth_token: String,
-    wallet_address: String, // Added for UTXO querying
+    wallet_address: String,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -115,7 +115,8 @@ impl IncentivesManager {
         if utxos.is_empty() {
             return Err(ServiceError::IncentiveError("No available UTXOs for transaction".to_string()));
         }
-        let utxo = &utxos[0]; // Use first UTXO for simplicity
+        let utxo = utxos.iter().find(|u| u.amount >= amount)
+            .ok_or_else(|| ServiceError::IncentiveError("No UTXO with sufficient funds".to_string()))?;
 
         let mut script = Script::new();
         script.append(Opcode::OP_RETURN);
@@ -124,8 +125,8 @@ impl IncentivesManager {
 
         let mut tx = SvTx::new();
         tx.add_output(amount, &script);
-        // Add input from UTXO
-        tx.add_input(&utxo.outpoint, &Script::from_hex(&utxo.script_pubkey).map_err(|e| ServiceError::IncentiveError(format!("Invalid script: {}", e)))?, utxo.amount);
+        tx.add_input(&utxo.outpoint, &Script::from_hex(&utxo.script_pubkey)
+            .map_err(|e| ServiceError::IncentiveError(format!("Invalid script: {}", e)))?, utxo.amount);
 
         tx.sign(&priv_key, 1).map_err(|e| ServiceError::IncentiveError(format!("Failed to sign tx: {}", e)))?;
         Ok(tx)
