@@ -8,12 +8,15 @@ use bip_metainfo::Metainfo;
 use std::sync::Arc;
 use sv::keys::PublicKey;
 use sv::signature::{Signature, Message};
-use sv::transaction::Transaction as SvTx;  // For potential future use
+use std::collections::HashMap;
+use tokio::time::{Instant, Duration};
+use tokio::sync::Mutex;
 
 pub struct TrackerManager {
     tracker: Tracker,
     config: Config,
     event_tx: mpsc::Sender<TrackerEvent>,
+    reputation: Arc<Mutex<HashMap<String, Reputation>>>,
 }
 
 #[derive(Debug)]
@@ -22,11 +25,18 @@ pub enum TrackerEvent {
     SeederDropped(String, String),
 }
 
+#[derive(Debug)]
+struct Reputation {
+    uptime: Duration,
+    score: u64, // Reputation score based on uptime and contributions
+    last_seen: Instant,
+}
+
 impl TrackerManager {
     pub async fn new(config: &Config) -> Self {
-        let mut tracker_config = TrackerConfig::default();
+        let tracker_config = TrackerConfig::default();
         tracker_config.port = config.tracker_port.unwrap_or(6969);
-        tracker_config.private = true; // Enforce private mode
+        tracker_config.private = true;
 
         let tracker = Tracker::new(&tracker_config)
             .await
@@ -37,6 +47,7 @@ impl TrackerManager {
             tracker,
             config: config.clone(),
             event_tx,
+            reputation: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -50,20 +61,40 @@ impl TrackerManager {
     }
 
     pub async fn register_seeder(&self, peer_id: &str, info_hash: &str, signature: &Signature, message: &Message, pub_key: &PublicKey) -> Result<(), ServiceError> {
-        // Verify BSV wallet signature for authentication
         if !signature.verify(message, pub_key) {
             return Err(ServiceError::AuthError("Invalid BSV signature for seeder registration".to_string()));
         }
 
-        // Add seeder to tracker
+        // Check reputation to prevent sybil attacks
+        let mut rep = self.reputation.lock().await;
+        let rep_entry = rep.entry(peer_id.to_string()).or_insert(Reputation {
+            uptime: Duration::from_secs(0),
+            score: 0,
+            last_seen: Instant::now(),
+        });
+        if rep_entry.score < 100 { // Arbitrary threshold for new peers
+            return Err(ServiceError::Torrent("Insufficient reputation for seeder registration".to_string()));
+        }
+
         self.tracker
-            .add_peer(peer_id, info_hash, true)  // true for seeder
+            .add_peer(peer_id, info_hash, true)
             .await
             .map_err(|e| ServiceError::Torrent(format!("Failed to register seeder: {}", e)))?;
         info!("Registered seeder {} for info_hash {} with valid BSV signature", peer_id, info_hash);
 
         self.event_tx.send(TrackerEvent::SeederRegistered(peer_id.to_string(), info_hash.to_string())).await
             .map_err(|e| ServiceError::Torrent(format!("Failed to send event: {}", e)))?;
+        Ok(())
+    }
+
+    pub async fn update_reputation(&self, peer_id: &str, delta: u64) -> Result<(), ServiceError> {
+        let mut rep = self.reputation.lock().await;
+        if let Some(entry) = rep.get_mut(peer_id) {
+            entry.uptime += entry.last_seen.elapsed();
+            entry.last_seen = Instant::now();
+            entry.score += delta;
+            info!("Updated reputation for peer {}: score = {}", peer_id, entry.score);
+        }
         Ok(())
     }
 
@@ -81,7 +112,6 @@ impl TrackerManager {
     }
 
     pub async fn run(&self) {
-        // Start tracker loop
         info!("Starting tracker on port {}", self.config.tracker_port.unwrap_or(6969));
         if let Err(e) = self.tracker.run().await {
             error!("Tracker error: {}", e);
