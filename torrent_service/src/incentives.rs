@@ -70,13 +70,13 @@ impl IncentivesManager {
     pub async fn reward_proof(&self, user_id: &str, block_hash: &str) -> Result<(), ServiceError> {
         let start = Instant::now();
         let reward = self.config.proof_reward_base; // 100 sat base
-        let bonus = self.calculate_bonus(block_hash, start).await; // Calculate speed and rarity bonus
+        let bonus = self.calculate_bonus(block_hash).await; // Speed and rarity bonus
         let total_reward = reward + bonus;
 
         let tx = self.build_op_return_tx(user_id, total_reward, "proof_reward").await?;
         self.broadcast_tx(&tx).await?;
 
-        // Update reputation: +10 points for successful proof reward
+        // Update reputation: +10 points for successful proof
         self.tracker.update_reputation(user_id, 10).await
             .map_err(|e| ServiceError::IncentiveError(format!("Failed to update reputation: {}", e)))?;
 
@@ -122,6 +122,21 @@ impl IncentivesManager {
             .map_err(|e| ServiceError::IncentiveError(format!("Failed to update reputation: {}", e)))?;
 
         info!("Slashed {} sat from user_id: {}", amount, user_id);
+        Ok(())
+    }
+
+    pub async fn issue_bounty(&self, block_id: &str) -> Result<(), ServiceError> {
+        let bounty_amount = 1000; // 1000 sat bounty
+        let user_id = "bounty_pool"; // Placeholder for bounty pool
+
+        let tx = self.build_op_return_tx(user_id, bounty_amount, &format!("bounty:{}", block_id)).await?;
+        self.broadcast_tx(&tx).await?;
+
+        // Update reputation: +20 points for bounty contribution
+        self.tracker.update_reputation(user_id, 20).await
+            .map_err(|e| ServiceError::IncentiveError(format!("Failed to update reputation: {}", e)))?;
+
+        info!("Issued bounty of {} sat for block_id: {}", bounty_amount, block_id);
         Ok(())
     }
 
