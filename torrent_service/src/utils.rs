@@ -29,6 +29,8 @@ pub struct Config {
     pub bulk_reward_per_mb: u64,
     pub tracker_port: Option<u16>,
     pub proof_rpc_port: Option<u16>,
+    pub wallet_address: String,
+    pub dynamic_chunk_size: Option<bool>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
