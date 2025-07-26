@@ -18,6 +18,9 @@ use bincode::{deserialize, serialize};
 use tokio::net::TcpStream;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use serde::{Deserialize, Serialize};
+use jsonwebtoken::{encode, Header, EncodingKey};
+use std::time::{SystemTime, UNIX_EPOCH};
+use tokio::time::{interval, Duration};
 
 pub struct TorrentService {
     pub config: Config,
@@ -39,7 +42,7 @@ pub struct TorrentService {
     pub errors_total: Counter,
     pub rate_limiter: Arc<RateLimiter<String, governor::state::direct::NotKeyed, governor::clock::DefaultClock>>,
     event_rx: mpsc::Receiver<BlockRequestEvent>,
-    auth_token: String,
+    auth_token: Arc<tokio::sync::Mutex<String>>,
 }
 
 #[derive(Debug)]
@@ -82,6 +85,50 @@ struct ValidateProofResponse {
     error: String,
 }
 
+#[derive(Serialize, Deserialize, Debug)]
+struct AuthRequest {
+    token: String,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct AuthResponse {
+    success: bool,
+    user_id: String,
+    error: String,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct AuthorizeRequest {
+    user_id: String,
+    service: String,
+    method: String,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct AuthorizeResponse {
+    allowed: bool,
+    error: String,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct AlertRequest {
+    event_type: String,
+    message: String,
+    severity: u32,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct AlertResponse {
+    success: bool,
+    error: String,
+}
+
+#[derive(Serialize, Deserialize)]
+struct Claims {
+    sub: String,
+    exp: usize,
+}
+
 impl TorrentService {
     pub async fn new() -> Self {
         let config_str = include_str!("../../tests/config.toml");
@@ -91,11 +138,13 @@ impl TorrentService {
             aged_threshold: AgedThreshold::Months(toml_config.get("torrent_service").and_then(|s| s.get("aged_threshold_months").and_then(|v| v.as_integer())).unwrap_or(60) as u32),
             stake_amount: 100000,
             proof_reward_base: 100,
-            bulk_reward_per_mb: 100,
             proof_bonus_speed: 10,
             proof_bonus_rare: 50,
+            bulk_reward_per_mb: 100,
             tracker_port: Some(6969),
             proof_rpc_port: Some(50063),
+            wallet_address: toml_config.get("torrent_service").and_then(|s| s.get("wallet_address").and_then(|v| v.as_str())).unwrap_or("default_address").to_string(),
+            dynamic_chunk_size: toml_config.get("torrent_service").and_then(|s| s.get("dynamic_chunk_size").and_then(|v| v.as_bool())).unwrap_or(true),
         };
 
         let registry = Arc::new(Registry::new());
@@ -116,9 +165,9 @@ impl TorrentService {
         let incentives = Arc::new(IncentivesManager::new(&config));
         let aging = Arc::new(AgingManager::new(&config, event_tx));
 
-        let auth_token = toml_config.get("torrent_service").and_then(|s| s.get("auth_token").and_then(|v| v.as_str())).unwrap_or("default_token").to_string();
+        let auth_token = Arc::new(tokio::sync::Mutex::new("initial_token".to_string()));
 
-        Self {
+        let service = Self {
             config,
             chunker,
             tracker,
@@ -139,19 +188,65 @@ impl TorrentService {
             rate_limiter,
             event_rx,
             auth_token,
-        }
+        };
+
+        // Spawn token rotation task
+        let auth_service_addr = service.auth_service_addr.clone();
+        let auth_token = Arc::clone(&service.auth_token);
+        tokio::spawn(async move {
+            let mut interval = interval(Duration::from_secs(3600)); // Rotate every hour
+            loop {
+                interval.tick().await;
+                match Self::refresh_token(&auth_service_addr).await {
+                    Ok(new_token) => {
+                        let mut token = auth_token.lock().await;
+                        *token = new_token;
+                        info!("Refreshed auth token");
+                    }
+                    Err(e) => error!("Failed to refresh token: {}", e),
+                }
+            }
+        });
+
+        service
     }
 
-    async fn authenticate(&self, token: &str) -> Result<String, ServiceError> {
-        let mut stream = TcpStream::connect(&self.auth_service_addr).await.map_err(ServiceError::from)?;
-        let request = super::main::AuthRequest { token: token.to_string() };
+    async fn refresh_token(auth_service_addr: &str) -> Result<String, ServiceError> {
+        let claims = Claims {
+            sub: "torrent_service".to_string(),
+            exp: SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as usize + 3600,
+        };
+        let token = encode(&Header::default(), &claims, &EncodingKey::from_secret("secret_key".as_ref()))
+            .map_err(|e| ServiceError::AuthError(format!("JWT encoding error: {}", e)))?;
+
+        let mut stream = TcpStream::connect(auth_service_addr).await
+            .map_err(ServiceError::from)?;
+        let request = AuthRequest { token: token.clone() };
         let encoded = serialize(&request).map_err(ServiceError::from)?;
         stream.write_all(&encoded).await.map_err(ServiceError::from)?;
         stream.flush().await.map_err(ServiceError::from)?;
 
         let mut buffer = vec![0u8; 1024 * 1024];
         let n = stream.read(&mut buffer).await.map_err(ServiceError::from)?;
-        let response: super::main::AuthResponse = deserialize(&buffer[..n]).map_err(ServiceError::from)?;
+        let response: AuthResponse = deserialize(&buffer[..n]).map_err(ServiceError::from)?;
+
+        if response.success {
+            Ok(token)
+        } else {
+            Err(ServiceError::AuthError(response.error))
+        }
+    }
+
+    async fn authenticate(&self, token: &str) -> Result<String, ServiceError> {
+        let mut stream = TcpStream::connect(&self.auth_service_addr).await.map_err(ServiceError::from)?;
+        let request = AuthRequest { token: token.to_string() };
+        let encoded = serialize(&request).map_err(ServiceError::from)?;
+        stream.write_all(&encoded).await.map_err(ServiceError::from)?;
+        stream.flush().await.map_err(ServiceError::from)?;
+
+        let mut buffer = vec![0u8; 1024 * 1024];
+        let n = stream.read(&mut buffer).await.map_err(ServiceError::from)?;
+        let response: AuthResponse = deserialize(&buffer[..n]).map_err(ServiceError::from)?;
         
         if response.success {
             Ok(response.user_id)
@@ -162,7 +257,7 @@ impl TorrentService {
 
     async fn authorize(&self, user_id: &str, method: &str) -> Result<(), ServiceError> {
         let mut stream = TcpStream::connect(&self.auth_service_addr).await.map_err(ServiceError::from)?;
-        let request = super::main::AuthorizeRequest {
+        let request = AuthorizeRequest {
             user_id: user_id.to_string(),
             service: "torrent_service".to_string(),
             method: method.to_string(),
@@ -173,7 +268,7 @@ impl TorrentService {
 
         let mut buffer = vec![0u8; 1024 * 1024];
         let n = stream.read(&mut buffer).await.map_err(ServiceError::from)?;
-        let response: super::main::AuthorizeResponse = deserialize(&buffer[..n]).map_err(ServiceError::from)?;
+        let response: AuthorizeResponse = deserialize(&buffer[..n]).map_err(ServiceError::from)?;
         
         if response.allowed {
             Ok(())
@@ -184,7 +279,7 @@ impl TorrentService {
 
     async fn send_alert(&self, event_type: &str, message: &str, severity: u32) -> Result<(), ServiceError> {
         let mut stream = TcpStream::connect(&self.alert_service_addr).await.map_err(ServiceError::from)?;
-        let request = super::main::AlertRequest {
+        let request = AlertRequest {
             event_type: event_type.to_string(),
             message: message.to_string(),
             severity,
@@ -195,7 +290,7 @@ impl TorrentService {
 
         let mut buffer = vec![0u8; 1024 * 1024];
         let n = stream.read(&mut buffer).await.map_err(ServiceError::from)?;
-        let response: super::main::AlertResponse = deserialize(&buffer[..n]).map_err(ServiceError::from)?;
+        let response: AlertResponse = deserialize(&buffer[..n]).map_err(ServiceError::from)?;
         
         if response.success {
             self.alert_count.inc();
@@ -210,9 +305,10 @@ impl TorrentService {
         self.requests_total.inc();
         let start = std::time::Instant::now();
 
+        let token = self.auth_token.lock().await.clone();
         match request {
-            super::main::TorrentRequestType::OffloadAgedBlocks { token } => {
-                let user_id = self.authenticate(&token).await?;
+            super::main::TorrentRequestType::OffloadAgedBlocks { token: req_token } => {
+                let user_id = self.authenticate(&req_token).await?;
                 self.authorize(&user_id, "OffloadAgedBlocks").await?;
                 self.rate_limiter.until_ready().await;
 
@@ -224,8 +320,8 @@ impl TorrentService {
                 self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
                 Ok(super::main::TorrentResponseType::OffloadSuccess { success: true, error: String::new() })
             }
-            super::main::TorrentRequestType::GetProof { txid, block_hash, token } => {
-                let user_id = self.authenticate(&token).await?;
+            super::main::TorrentRequestType::GetProof { txid, block_hash, token: req_token } => {
+                let user_id = self.authenticate(&req_token).await?;
                 self.authorize(&user_id, "GetProof").await?;
                 self.rate_limiter.until_ready().await;
 
@@ -238,8 +334,8 @@ impl TorrentService {
                 self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
                 Ok(super::main::TorrentResponseType::ProofBundle { proof: hex::encode(serialized_proof), error: String::new() })
             }
-            super::main::TorrentRequestType::GetMetrics { token } => {
-                let user_id = self.authenticate(&token).await?;
+            super::main::TorrentRequestType::GetMetrics { token: req_token } => {
+                let user_id = self.authenticate(&req_token).await?;
                 self.authorize(&user_id, "GetMetrics").await?;
 
                 self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
@@ -257,9 +353,10 @@ impl TorrentService {
     async fn fetch_aged_blocks(&self) -> Result<Vec<Block>, ServiceError> {
         let mut stream = TcpStream::connect(&self.block_service_addr).await
             .map_err(ServiceError::from)?;
+        let token = self.auth_token.lock().await.clone();
         let request = GetAgedBlocksRequest {
             threshold: self.config.aged_threshold.clone(),
-            token: self.auth_token.clone(),
+            token,
         };
         let encoded = serialize(&request).map_err(ServiceError::from)?;
         stream.write_all(&encoded).await.map_err(ServiceError::from)?;
