@@ -11,14 +11,14 @@ use tracing::{info, error};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::Instant;
-use toml;
+use tokio::sync::Mutex;
 
 pub struct IncentivesManager {
     config: Config,
     transaction_service_addr: String,
     storage_service_addr: String,
     tracker: Arc<TrackerManager>,
-    auth_token: String,
+    auth_token: Arc<Mutex<String>>,
     wallet_address: String,
 }
 
@@ -53,10 +53,8 @@ struct Utxo {
 }
 
 impl IncentivesManager {
-    pub fn new(config: &Config) -> Self {
-        let config_str = include_str!("../../tests/config.toml");
-        let toml_config: toml::Value = toml::from_str(config_str).expect("Failed to parse config");
-        let auth_token = toml_config.get("torrent_service").and_then(|s| s.get("auth_token").and_then(|v| v.as_str())).unwrap_or("default_token").to_string();
+    pub fn new(config: &Config, auth_token: Arc<Mutex<String>>) -> Self {
+        let toml_config: toml::Value = toml::from_str(include_str!("../../tests/config.toml")).expect("Failed to parse config");
         let wallet_address = toml_config.get("torrent_service").and_then(|s| s.get("wallet_address").and_then(|v| v.as_str())).unwrap_or("default_address").to_string();
 
         Self {
@@ -134,10 +132,10 @@ impl IncentivesManager {
         // Fetch UTXOs from storage_service
         let utxos = self.get_utxos().await?;
         if utxos.is_empty() {
-            return Err(ServiceError::IncentiveError("No available UTXOs for transaction".to_string()));
+            return Err(ServiceError::IncentiveError("No available UTXOs for transaction".into()));
         }
         let utxo = utxos.iter().find(|u| u.amount >= amount)
-            .ok_or_else(|| ServiceError::IncentiveError("No UTXO with sufficient funds".to_string()))?;
+            .ok_or_else(|| ServiceError::IncentiveError("No UTXO with sufficient funds".into()))?;
 
         let mut script = Script::new();
         script.append(Opcode::OP_RETURN);
@@ -179,9 +177,10 @@ impl IncentivesManager {
         let mut stream = TcpStream::connect(&self.transaction_service_addr)
             .await
             .map_err(|e| ServiceError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
+        let token = self.auth_token.lock().await.clone();
         let request = BroadcastTxRequest {
             tx: tx.clone(),
-            token: self.auth_token.clone(),
+            token,
         };
         let encoded = serialize(&request).map_err(ServiceError::from)?;
         stream.write_all(&encoded).await.map_err(ServiceError::from)?;
