@@ -23,6 +23,7 @@ The service is fully asynchronous, using Tokio and bincode for inter-service com
 - **UTXO Integration**: Transactions use real UTXOs from Storage Service for production-ready rewards/stakes. 🪙
 - **Dynamic Chunk Sizing**: Adjusts chunk sizes (8MB for large/high-TPS blocks, 32MB default) for optimized bandwidth. 📏
 - **Validation Integration**: Proofs validated via Validation Service; transactions via Transaction Service. ✅
+- **Sybil Resistance**: Reputation system with score-based seeder registration (min 100 points, gained via rewards/stakes). 🛡️
 - **Storage/Overlay Integration**: Block fetching from Storage, references in Overlay. 🗄️
 - **Metrics & Alerts**: Prometheus metrics and alerts for monitoring. 📊
 - **Testing**: Integration tests for end-to-end flow and bonus calculations. 🧪
@@ -72,11 +73,6 @@ Run `./tests/run_tests.sh` to start services and test:
 - **Seeder Authentication**: Validates BSV signature requirements for tracker registration.
 - **Bonus Calculations**: Verifies 10 sat speed bonus (<500ms) and 50 sat rarity bonus (<3 seeders).
 - **Dynamic Chunk Sizing**: Verifies 8MB chunks for high-TPS blocks and 32MB for standard blocks.
-
-## Future Improvements 🚧
-
-- Dynamic chunk sizes based on block TPS.
-- Full UTXO integration for TX inputs.
-- Enhanced sybil resistance in tracker.
+- **Sybil Resistance**: Verifies reputation thresholds for seeder registration and score updates from rewards/stakes/slashes.
 
 Contributions welcome! 🌟
