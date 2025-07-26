@@ -13,12 +13,14 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use cratetorrent::prelude::*;
 use std::path::Path;
+use tokio::time::{sleep, Duration};
 
 pub struct ProofServer {
     config: Config,
     tracker: Arc<TrackerManager>,
     event_tx: Sender<super::service::BlockRequestEvent>,
     torrent_client: TorrentClient,
+    backup_node_addr: String,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -41,7 +43,7 @@ struct ProofResponse {
 }
 
 impl ProofServer {
-    pub async fn new(config: &Config, event_tx: Sender<super::service::BlockRequestEvent>) -> Self {
+    pub fn new(config: &Config, event_tx: Sender<super::service::BlockRequestEvent>) -> Self {
         let torrent_config = Config {
             download_path: Path::new("./torrent_data").to_path_buf(),
             ..Config::default()
@@ -54,26 +56,43 @@ impl ProofServer {
             tracker: Arc::new(TrackerManager::new(config).await),
             event_tx,
             torrent_client,
+            backup_node_addr: "127.0.0.1:50064".to_string(), // Backup node address
         }
     }
 
     pub async fn get_proof(&self, txid: &str, block_hash: &str) -> Result<ProofBundle, ServiceError> {
-        let peers = self.tracker.get_seeders(block_hash).await?;
-        if peers.is_empty() {
-            return Err(ServiceError::Torrent("No seeders available for block".to_string()));
-        }
+        // Retry up to 3 times with backoff
+        for attempt in 1..=3 {
+            let peers = self.tracker.get_seeders(block_hash).await?;
+            if !peers.is_empty() {
+                for peer in peers {
+                    match self.request_proof_from_peer(&peer, txid, block_hash).await {
+                        Ok(proof) => return Ok(proof),
+                        Err(e) => {
+                            error!("Failed to get proof from peer {}: {}", peer, e);
+                            continue;
+                        }
+                    }
+                }
+            }
+            error!("No seeders available for block {} on attempt {}", block_hash, attempt);
+            if attempt < 3 {
+                sleep(Duration::from_secs(2 * attempt as u64)).await; // Exponential backoff
+                continue;
+            }
 
-        for peer in peers {
-            match self.request_proof_from_peer(&peer, txid, block_hash).await {
+            // Fallback to backup node
+            match self.request_proof_from_backup(txid, block_hash).await {
                 Ok(proof) => return Ok(proof),
                 Err(e) => {
-                    error!("Failed to get proof from peer {}: {}", peer, e);
-                    continue;
+                    error!("Backup node failed for block {}: {}", block_hash, e);
+                    // Trigger bounty as last resort
+                    self.trigger_bounty(block_hash).await?;
+                    return Err(ServiceError::Torrent(format!("No seeders or backup available for block {}; bounty issued", block_hash)));
                 }
             }
         }
-
-        Err(ServiceError::Torrent("Failed to retrieve proof from any seeder".to_string()))
+        Err(ServiceError::Torrent(format!("Failed to retrieve proof for block {} after retries", block_hash)))
     }
 
     async fn request_proof_from_peer(&self, peer: &str, txid: &str, block_hash: &str) -> Result<ProofBundle, ServiceError> {
@@ -96,6 +115,34 @@ impl ProofServer {
         } else {
             Err(ServiceError::Torrent(response.error))
         }
+    }
+
+    async fn request_proof_from_backup(&self, txid: &str, block_hash: &str) -> Result<ProofBundle, ServiceError> {
+        let mut stream = TcpStream::connect(&self.backup_node_addr).await
+            .map_err(|e| ServiceError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
+        let request = ProofRequest {
+            txid: txid.to_string(),
+            block_hash: block_hash.to_string(),
+        };
+        let encoded = serialize(&request).map_err(ServiceError::from)?;
+        stream.write_all(&encoded).await.map_err(ServiceError::from)?;
+        stream.flush().await.map_err(ServiceError::from)?;
+
+        let mut buffer = vec![0u8; 1024 * 1024];
+        let n = stream.read(&mut buffer).await.map_err(ServiceError::from)?;
+        let response: ProofResponse = deserialize(&buffer[..n]).map_err(ServiceError::from)?;
+
+        if let Some(proof) = response.proof {
+            Ok(proof)
+        } else {
+            Err(ServiceError::Torrent(response.error))
+        }
+    }
+
+    async fn trigger_bounty(&self, block_hash: &str) -> Result<(), ServiceError> {
+        // Placeholder: Issue a bounty via incentives.rs
+        info!("Issued bounty for block {}", block_hash);
+        Ok(())
     }
 
     pub async fn run(&self) {
@@ -162,7 +209,7 @@ impl ProofServer {
         let mut stream = TcpStream::connect("127.0.0.1:50056").await
             .map_err(|e| ServiceError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
         let request = super::service::StoreTorrentRefRequest {
-            info_hash: block_hash.to_string(), // Using block_hash as key for simplicity
+            info_hash: block_hash.to_string(),
             block_hashes: vec![block_hash.to_string()],
         };
         let encoded = serialize(&request).map_err(ServiceError::from)?;
@@ -182,7 +229,7 @@ impl ProofServer {
             .get_torrent(&block_hash.to_string())
             .await
             .map_err(|e| ServiceError::Torrent(format!("Failed to load torrent: {}", e)))?;
-        let block_data = torrent.read_block(0).await // Assuming block is in first piece
+        let block_data = torrent.read_block(0).await
             .map_err(|e| ServiceError::Torrent(format!("Failed to read block data: {}", e)))?;
         let block: Block = deserialize(&block_data)
             .map_err(|e| ServiceError::Torrent(format!("Deserialization error: {}", e)))?;
