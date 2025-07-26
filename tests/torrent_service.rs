@@ -13,6 +13,7 @@ use torrent_service::utils::ServiceError;
 use torrent_service::proof_server::{ProofBundle, ProofRequest, ProofResponse};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use bip_metainfo::Metainfo;
 
 #[derive(Serialize, Deserialize, Debug)]
 enum MockRequestType {
@@ -354,6 +355,254 @@ async fn test_torrent_service_end_to_end() {
             assert!(error.is_empty(), "Proof request failed: {}", error);
             assert!(!proof.is_empty(), "Proof is empty");
             info!("Successfully retrieved proof: {}", proof);
+        }
+        _ => panic!("Unexpected response type"),
+    }
+}
+
+#[tokio::test]
+async fn test_dynamic_chunk_sizing() {
+    tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::INFO)
+        .init();
+
+    // Mock block_service with a large block
+    let block_listener = TcpListener::bind("127.0.0.1:50054").await.unwrap();
+    tokio::spawn(async move {
+        loop {
+            let (mut stream, _) = block_listener.accept().await.unwrap();
+            let mut buffer = vec![0u8; 1024 * 1024];
+            let n = stream.read(&mut buffer).await.unwrap();
+            let req: MockRequestType = deserialize(&buffer[..n]).unwrap();
+            match req {
+                MockRequestType::GetAgedBlocks(req) => {
+                    let mut transactions = vec![];
+                    for _ in 0..1000000 { // Simulate high-TPS block
+                        transactions.push(SvTx::default());
+                    }
+                    let block = Block {
+                        header: Header {
+                            timestamp: 1234567890,
+                            ..Default::default()
+                        },
+                        transactions,
+                        ..Default::default()
+                    };
+                    let resp = GetAgedBlocksResponse {
+                        blocks: vec![block],
+                        error: String::new(),
+                    };
+                    let encoded = serialize(&MockResponseType::GetAgedBlocks(resp)).unwrap();
+                    stream.write_all(&encoded).await.unwrap();
+                    stream.flush().await.unwrap();
+                }
+                _ => {}
+            }
+        }
+    });
+
+    // Mock overlay_service
+    let overlay_listener = TcpListener::bind("127.0.0.1:50056").await.unwrap();
+    let mut torrent_info: Option<Metainfo> = None;
+    tokio::spawn(async move {
+        loop {
+            let (mut stream, _) = overlay_listener.accept().await.unwrap();
+            let mut buffer = vec![0u8; 1024 * 1024];
+            let n = stream.read(&mut buffer).await.unwrap();
+            let req: MockRequestType = deserialize(&buffer[..n]).unwrap();
+            match req {
+                MockRequestType::StoreTorrentRef(req) => {
+                    let resp = StoreTorrentRefResponse {
+                        success: true,
+                        error: String::new(),
+                    };
+                    let encoded = serialize(&MockResponseType::StoreTorrentRef(resp)).unwrap();
+                    stream.write_all(&encoded).await.unwrap();
+                    stream.flush().await.unwrap();
+                }
+                _ => {}
+            }
+        }
+    });
+
+    // Mock validation_service
+    let validation_listener = TcpListener::bind("127.0.0.1:50057").await.unwrap();
+    tokio::spawn(async move {
+        loop {
+            let (mut stream, _) = validation_listener.accept().await.unwrap();
+            let mut buffer = vec![0u8; 1024 * 1024];
+            let n = stream.read(&mut buffer).await.unwrap();
+            let req: MockRequestType = deserialize(&buffer[..n]).unwrap();
+            match req {
+                MockRequestType::ValidateProof(_) => {
+                    let resp = ValidateProofResponse {
+                        success: true,
+                        error: String::new(),
+                    };
+                    let encoded = serialize(&MockResponseType::ValidateProof(resp)).unwrap();
+                    stream.write_all(&encoded).await.unwrap();
+                    stream.flush().await.unwrap();
+                }
+                _ => {}
+            }
+        }
+    });
+
+    // Mock transaction_service
+    let transaction_listener = TcpListener::bind("127.0.0.1:50052").await.unwrap();
+    tokio::spawn(async move {
+        loop {
+            let (mut stream, _) = transaction_listener.accept().await.unwrap();
+            let mut buffer = vec![0u8; 1024 * 1024];
+            let n = stream.read(&mut buffer).await.unwrap();
+            let req: MockRequestType = deserialize(&buffer[..n]).unwrap();
+            match req {
+                MockRequestType::BroadcastTx(_) => {
+                    let resp = BroadcastTxResponse {
+                        success: true,
+                        error: String::new(),
+                    };
+                    let encoded = serialize(&MockResponseType::BroadcastTx(resp)).unwrap();
+                    stream.write_all(&encoded).await.unwrap();
+                    stream.flush().await.unwrap();
+                }
+                _ => {}
+            }
+        }
+    });
+
+    // Mock auth_service
+    let auth_listener = TcpListener::bind("127.0.0.1:50060").await.unwrap();
+    tokio::spawn(async move {
+        loop {
+            let (mut stream, _) = auth_listener.accept().await.unwrap();
+            let mut buffer = vec![0u8; 1024 * 1024];
+            let n = stream.read(&mut buffer).await.unwrap();
+            let req: MockRequestType = deserialize(&buffer[..n]).unwrap();
+            match req {
+                MockRequestType::AuthRequest(req) => {
+                    let resp = AuthResponse {
+                        success: true,
+                        user_id: "test_user".to_string(),
+                        error: String::new(),
+                    };
+                    let encoded = serialize(&MockResponseType::AuthResponse(resp)).unwrap();
+                    stream.write_all(&encoded).await.unwrap();
+                    stream.flush().await.unwrap();
+                }
+                _ => {}
+            }
+        }
+    });
+
+    // Mock alert_service
+    let alert_listener = TcpListener::bind("127.0.0.1:50061").await.unwrap();
+    tokio::spawn(async move {
+        loop {
+            let (mut stream, _) = alert_listener.accept().await.unwrap();
+            let mut buffer = vec![0u8; 1024 * 1024];
+            let n = stream.read(&mut buffer).await.unwrap();
+            let req: MockRequestType = deserialize(&buffer[..n]).unwrap();
+            match req {
+                MockRequestType::AlertRequest(req) => {
+                    let resp = AlertResponse {
+                        success: true,
+                        error: String::new(),
+                    };
+                    let encoded = serialize(&MockResponseType::AlertResponse(resp)).unwrap();
+                    stream.write_all(&encoded).await.unwrap();
+                    stream.flush().await.unwrap();
+                }
+                _ => {}
+            }
+        }
+    });
+
+    // Mock storage_service for UTXOs
+    let storage_listener = TcpListener::bind("127.0.0.1:50053").await.unwrap();
+    tokio::spawn(async move {
+        loop {
+            let (mut stream, _) = storage_listener.accept().await.unwrap();
+            let mut buffer = vec![0u8; 1024 * 1024];
+            let n = stream.read(&mut buffer).await.unwrap();
+            let req: MockRequestType = deserialize(&buffer[..n]).unwrap();
+            match req {
+                MockRequestType::GetUtxos(_) => {
+                    let utxo = Utxo {
+                        outpoint: OutPoint {
+                            txid: "dummy_txid".to_string(),
+                            vout: 0,
+                        },
+                        amount: 1000000, // 0.01 BSV
+                        script_pubkey: "76a91488a5e4a4e6c4a4e0c7b0b4a4e4a4e4a4e4a4e4a488ac".to_string(),
+                    };
+                    let resp = GetUtxosResponse {
+                        utxos: vec![utxo],
+                        error: String::new(),
+                    };
+                    let encoded = serialize(&MockResponseType::GetUtxos(resp)).unwrap();
+                    stream.write_all(&encoded).await.unwrap();
+                    stream.flush().await.unwrap();
+                }
+                _ => {}
+            }
+        }
+    });
+
+    // Mock proof_server for fast response
+    let proof_listener = TcpListener::bind("127.0.0.1:50063").await.unwrap();
+    tokio::spawn(async move {
+        loop {
+            let (mut stream, addr) = proof_listener.accept().await.unwrap();
+            let mut buffer = vec![0u8; 1024 * 1024];
+            let n = stream.read(&mut buffer).await.unwrap();
+            let req: MockRequestType = deserialize(&buffer[..n]).unwrap();
+            match req {
+                MockRequestType::ProofRequest(req) => {
+                    let proof = ProofBundle {
+                        tx: SvTx::default(),
+                        path: MerklePath::default(),
+                        header: Header::default(),
+                    };
+                    let resp = ProofResponse {
+                        proof: Some(proof),
+                        error: String::new(),
+                    };
+                    let encoded = serialize(&MockResponseType::ProofResponse(resp)).unwrap();
+                    stream.write_all(&encoded).await.unwrap();
+                    stream.flush().await.unwrap();
+                }
+                _ => {}
+            }
+        }
+    });
+
+    // Initialize torrent_service with dynamic chunk size enabled
+    let torrent_service = Arc::new(TorrentService::new().await);
+
+    // Wait for aging to detect blocks
+    sleep(Duration::from_secs(1)).await;
+
+    // Simulate offload request to trigger chunking
+    let mut stream = TcpStream::connect("127.0.0.1:50062").await.unwrap();
+    let request = TorrentRequestType::OffloadAgedBlocks {
+        token: "default_token".to_string(),
+    };
+    let encoded = serialize(&request).unwrap();
+    stream.write_all(&encoded).await.unwrap();
+    stream.flush().await.unwrap();
+
+    let mut buffer = vec![0u8; 1024 * 1024];
+    let n = stream.read(&mut buffer).await.unwrap();
+    let response: TorrentResponseType = deserialize(&buffer[..n]).unwrap();
+
+    match response {
+        TorrentResponseType::OffloadSuccess { success, error } => {
+            assert!(success, "Offload failed: {}", error);
+            info!("Successfully offloaded aged blocks");
+            // Verify chunk size (8MB = 8,388,608 bytes for high-TPS block)
+            let torrent_data = torrent_info.unwrap(); // Assuming overlay_service stored it
+            assert_eq!(torrent_data.info.piece_length, 8 * 1024 * 1024, "Expected 8MB chunk size for high-TPS block");
         }
         _ => panic!("Unexpected response type"),
     }
