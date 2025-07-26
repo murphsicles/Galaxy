@@ -26,6 +26,7 @@ The service is fully asynchronous, using Tokio and bincode for inter-service com
 - **Validation Integration**: Proofs validated via Validation Service; transactions via Transaction Service. ✅
 - **Sybil Resistance**: Reputation system with score-based seeder registration (min 100 points, gained via rewards/stakes). 🛡️
 - **Storage/Overlay Integration**: Block fetching from Storage, references in Overlay. 🗄️
+- **Error Recovery & Fallbacks**: Retries proof requests, queries backup node, and issues bounties (1000 sats) when no seeders are available. 🔄
 - **Metrics & Alerts**: Prometheus metrics and alerts for monitoring. 📊
 - **Testing**: Integration tests for end-to-end flow and bonus calculations. 🧪
 
@@ -74,5 +75,6 @@ Run `./tests/run_tests.sh` to start services and test:
 - **Bonus Calculations**: Verifies 10 sat speed bonus (<500ms) and 50 sat rarity bonus (<3 seeders).
 - **Dynamic Chunk Sizing**: Verifies 8MB chunks for high-TPS blocks and 32MB for standard blocks.
 - **Sybil Resistance**: Verifies reputation thresholds for seeder registration and score updates from rewards/stakes/slashes.
+- **Error Recovery**: Verifies retry logic, backup node queries, and bounty issuance for proof requests with no seeders.
 
 Contributions welcome! 🌟
