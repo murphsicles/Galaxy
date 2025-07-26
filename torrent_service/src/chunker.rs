@@ -5,12 +5,12 @@ use sv::block::Block;
 use hex;
 
 pub struct Chunker {
-    piece_size: usize,
+    config: Config,
 }
 
 impl Chunker {
     pub fn new(config: &Config) -> Self {
-        Self { piece_size: config.piece_size }
+        Self { config: config.clone() }
     }
 
     pub async fn offload(&self, blocks: &[Block]) -> Result<bip_metainfo::Metainfo, ServiceError> {
@@ -30,7 +30,23 @@ impl Chunker {
             block_hashes.push(hex::encode(block.header.hash()));
         }
 
-        let chunks = data.chunks(self.piece_size);
+        // Determine chunk size dynamically if enabled
+        let piece_size = if self.config.dynamic_chunk_size.unwrap_or(false) {
+            let total_size = data.len() as u64;
+            let tps = blocks.iter().map(|b| b.transactions.len() as u64).sum::<u64>();
+            // Adjust chunk size based on block size or TPS
+            if total_size > 100 * 1024 * 1024 || tps > 1000000 {
+                // Smaller chunks (8MB) for large or high-TPS blocks
+                8 * 1024 * 1024
+            } else {
+                // Default 32MB for smaller blocks
+                self.config.piece_size
+            }
+        } else {
+            self.config.piece_size
+        };
+
+        let chunks = data.chunks(piece_size);
         for chunk in chunks {
             builder.add_piece(chunk);
         }
