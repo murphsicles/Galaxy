@@ -29,6 +29,7 @@ The service is fully asynchronous, using Tokio and bincode for inter-service com
 - **Error Recovery & Fallbacks**: Retries proof requests, queries backup node, and issues bounties (1000 sats) when no seeders are available. 🔄
 - **Metrics & Alerts**: Prometheus metrics and alerts for monitoring. 📊
 - **Testing**: Integration tests for end-to-end flow and bonus calculations. 🧪
+- **Performance Benchmarking**: Benchmarks proof retrieval and offload throughput for high-TPS blocks (100M+ TPS) using Criterion. 📈
 
 ## Configuration ⚙️
 
@@ -76,5 +77,6 @@ Run `./tests/run_tests.sh` to start services and test:
 - **Dynamic Chunk Sizing**: Verifies 8MB chunks for high-TPS blocks and 32MB for standard blocks.
 - **Sybil Resistance**: Verifies reputation thresholds for seeder registration and score updates from rewards/stakes/slashes.
 - **Error Recovery**: Verifies retry logic, backup node queries, and bounty issuance for proof requests with no seeders.
+- **Performance Benchmarks**: Measures proof retrieval latency and offload throughput for high-TPS blocks in `tests/benchmark_torrent.rs`.
 
 Contributions welcome! 🌟
