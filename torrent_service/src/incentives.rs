@@ -77,6 +77,11 @@ impl IncentivesManager {
 
         let tx = self.build_op_return_tx(user_id, total_reward, "proof_reward").await?;
         self.broadcast_tx(&tx).await?;
+
+        // Update reputation: +10 points for successful proof reward
+        self.tracker.update_reputation(user_id, 10).await
+            .map_err(|e| ServiceError::IncentiveError(format!("Failed to update reputation: {}", e)))?;
+
         info!("Proof reward of {} sat (base: {}, bonus: {}) sent to user_id: {}", total_reward, reward, bonus, user_id);
         Ok(())
     }
@@ -85,6 +90,11 @@ impl IncentivesManager {
         let reward = mb_transferred * self.config.bulk_reward_per_mb; // 100 sat/MB
         let tx = self.build_op_return_tx(user_id, reward, "bulk_reward").await?;
         self.broadcast_tx(&tx).await?;
+
+        // Update reputation: +5 points per MB transferred
+        self.tracker.update_reputation(user_id, mb_transferred * 5).await
+            .map_err(|e| ServiceError::IncentiveError(format!("Failed to update reputation: {}", e)))?;
+
         info!("Bulk reward of {} sat sent to user_id: {} for {} MB", reward, user_id, mb_transferred);
         Ok(())
     }
@@ -95,6 +105,11 @@ impl IncentivesManager {
         }
         let tx = self.build_op_return_tx(user_id, amount, "stake").await?;
         self.broadcast_tx(&tx).await?;
+
+        // Update reputation: +100 points for successful stake
+        self.tracker.update_reputation(user_id, 100).await
+            .map_err(|e| ServiceError::IncentiveError(format!("Failed to update reputation: {}", e)))?;
+
         info!("Stake of {} sat accepted for user_id: {}", amount, user_id);
         Ok(())
     }
@@ -102,6 +117,12 @@ impl IncentivesManager {
     pub async fn slash(&self, user_id: &str, amount: u64) -> Result<(), ServiceError> {
         let tx = self.build_op_return_tx(user_id, amount, "slash").await?;
         self.broadcast_tx(&tx).await?;
+
+        // Slash reputation: -50 points per 100,000 sat slashed
+        let rep_penalty = (amount / 100000) * 50;
+        self.tracker.update_reputation(user_id, rep_penalty).await
+            .map_err(|e| ServiceError::IncentiveError(format!("Failed to update reputation: {}", e)))?;
+
         info!("Slashed {} sat from user_id: {}", amount, user_id);
         Ok(())
     }
