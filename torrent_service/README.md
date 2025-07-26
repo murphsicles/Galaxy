@@ -22,6 +22,7 @@ The service is fully asynchronous, using Tokio and bincode for inter-service com
 - **Incentive Structure**: Micropayments for seeding/proofs, staking/slashing for behavior. 💰
 - **UTXO Integration**: Transactions use real UTXOs from Storage Service for production-ready rewards/stakes. 🪙
 - **Dynamic Chunk Sizing**: Adjusts chunk sizes (8MB for large/high-TPS blocks, 32MB default) for optimized bandwidth. 📏
+- **Token Rotation**: JWT-based token rotation for secure inter-service authentication, refreshed hourly. 🔑
 - **Validation Integration**: Proofs validated via Validation Service; transactions via Transaction Service. ✅
 - **Sybil Resistance**: Reputation system with score-based seeder registration (min 100 points, gained via rewards/stakes). 🛡️
 - **Storage/Overlay Integration**: Block fetching from Storage, references in Overlay. 🗄️
@@ -43,7 +44,6 @@ bulk_reward_per_mb = 100 # sat
 dynamic_chunk_size = true # Enable dynamic chunk sizing based on block TPS/size
 tracker_port = 6969
 proof_rpc_port = 50063
-auth_token = "your_auth_token" # For inter-service authentication
 wallet_address = "your_wallet_address" # For UTXO queries
 ```
 ## Submodules 🛠️
