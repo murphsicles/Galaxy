@@ -55,7 +55,7 @@ wallet_address = "your_wallet_address" # For UTXO queries
 ## Integration 🔗
 
 - **Block Service (50054)**: Fetches aged blocks.
-- **Storage Service (50053)**: Queries blocks by timestamp/height.
+- **Storage Service (50053)**: Queries blocks by timestamp/height and UTXOs for transactions.
 - **Overlay Service (50056)**: Stores torrent references.
 - **Validation Service (50057)**: Validates proofs/transactions.
 - **Transaction Service (50052)**: Broadcasts incentive TXs.
