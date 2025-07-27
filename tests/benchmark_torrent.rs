@@ -10,6 +10,7 @@ use sv::ec::{Signature, Message};
 use torrent_service::service::{TorrentService, GetAgedBlocksRequest, GetAgedBlocksResponse, TorrentRequestType, TorrentResponseType};
 use torrent_service::utils::{ServiceError, Config, AgedThreshold};
 use torrent_service::proof_server::{ProofBundle, ProofRequest, ProofResponse};
+use torrent_service::tracker::TrackerManager;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use bip_metainfo::Metainfo;
@@ -65,7 +66,7 @@ struct ValidateProofResponse {
 
 #[derive(Serialize, Deserialize, Debug)]
 struct BroadcastTxRequest {
-    tx: SvTx,
+    tx_hex: String, // Use hex instead of SvTx to avoid serde issues
     token: String,
 }
 
@@ -113,9 +114,17 @@ struct GetUtxosResponse {
 
 #[derive(Serialize, Deserialize, Debug)]
 struct Utxo {
-    outpoint: OutPoint,
+    txid: String, // Use String for txid instead of Hash256
+    vout: u32,
     amount: u64,
     script_pubkey: String,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct ProofBundle {
+    tx_hex: String, // Use hex for Tx
+    path: Vec<String>, // Hex for hashes in MerklePath
+    header: Header,
 }
 
 fn setup_mocks(rt: &Runtime) -> Arc<TorrentService> {
@@ -313,34 +322,6 @@ fn setup_mocks(rt: &Runtime) -> Arc<TorrentService> {
                         error: String::new(),
                     };
                     let encoded = serialize(&MockResponseType::GetUtxos(resp)).unwrap();
-                    stream.write_all(&encoded).await.unwrap();
-                    stream.flush().await.unwrap();
-                }
-                _ => {}
-            }
-        }
-    });
-
-    // Mock backup node for fallback
-    let backup_listener = rt.block_on(TcpListener::bind("127.0.0.1:50064")).unwrap();
-    rt.spawn(async move {
-        loop {
-            let (mut stream, addr) = backup_listener.accept().await.unwrap();
-            let mut buffer = vec![0u8; 1024 * 1024];
-            let n = stream.read(&mut buffer).await.unwrap();
-            let req: MockRequestType = deserialize(&buffer[..n]).unwrap();
-            match req {
-                MockRequestType::ProofRequest(req) => {
-                    let proof = ProofBundle {
-                        tx: SvTx::default(),
-                        path: MerklePath::default(),
-                        header: Header::default(),
-                    };
-                    let resp = ProofResponse {
-                        proof: Some(proof),
-                        error: String::new(),
-                    };
-                    let encoded = serialize(&MockResponseType::ProofResponse(resp)).unwrap();
                     stream.write_all(&encoded).await.unwrap();
                     stream.flush().await.unwrap();
                 }
