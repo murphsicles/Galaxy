@@ -1,5 +1,5 @@
 // tests/benchmark_torrent.rs
-use criterion::{criterion_group, criterion_main, Criterion, BenchmarkId};
+use criterion::{criterion_group, criterion_main, Criterion};
 use tokio::runtime::Runtime;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -8,10 +8,13 @@ use sv::messages::{Block, BlockHeader as Header, Tx as SvTx, OutPoint, MerkleBlo
 use sv::wallet::{PrivateKey, PublicKey};
 use sv::ec::{Signature, Message};
 use torrent_service::service::{TorrentService, GetAgedBlocksRequest, GetAgedBlocksResponse, TorrentRequestType, TorrentResponseType};
-use torrent_service::utils::{Config, ServiceError, AgedThreshold};
+use torrent_service::utils::{ServiceError, Config, AgedThreshold};
 use torrent_service::proof_server::{ProofBundle, ProofRequest, ProofResponse};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use bip_metainfo::Metainfo;
+use tracing::{info, error};
+use tracing_subscriber;
 
 #[derive(Serialize, Deserialize, Debug)]
 enum MockRequestType {
@@ -115,7 +118,11 @@ struct Utxo {
     script_pubkey: String,
 }
 
-fn setup_mocks(rt: &Runtime) -> (Arc<TorrentService>, Vec<TcpListener>) {
+fn setup_mocks(rt: &Runtime) -> Arc<TorrentService> {
+    tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::INFO)
+        .init();
+
     let config = Config {
         piece_size: 32 * 1024 * 1024,
         aged_threshold: AgedThreshold::Months(60),
@@ -129,13 +136,11 @@ fn setup_mocks(rt: &Runtime) -> (Arc<TorrentService>, Vec<TcpListener>) {
         wallet_address: "default_address".to_string(),
         dynamic_chunk_size: Some(true),
     };
-
     let torrent_service = rt.block_on(TorrentService::new_with_config(&config));
     let torrent_service = Arc::new(torrent_service);
 
-    // Mock block_service
+    // Mock block_service with high-TPS block
     let block_listener = rt.block_on(TcpListener::bind("127.0.0.1:50054")).unwrap();
-    let block_service = Arc::clone(&torrent_service);
     rt.spawn(async move {
         loop {
             let (mut stream, _) = block_listener.accept().await.unwrap();
@@ -316,35 +321,7 @@ fn setup_mocks(rt: &Runtime) -> (Arc<TorrentService>, Vec<TcpListener>) {
         }
     });
 
-    // Mock proof_server for fast response
-    let proof_listener = rt.block_on(TcpListener::bind("127.0.0.1:50063")).unwrap();
-    rt.spawn(async move {
-        loop {
-            let (mut stream, addr) = proof_listener.accept().await.unwrap();
-            let mut buffer = vec![0u8; 1024 * 1024];
-            let n = stream.read(&mut buffer).await.unwrap();
-            let req: MockRequestType = deserialize(&buffer[..n]).unwrap();
-            match req {
-                MockRequestType::ProofRequest(req) => {
-                    let proof = ProofBundle {
-                        tx: SvTx::default(),
-                        path: MerklePath::default(),
-                        header: Header::default(),
-                    };
-                    let resp = ProofResponse {
-                        proof: Some(proof),
-                        error: String::new(),
-                    };
-                    let encoded = serialize(&MockResponseType::ProofResponse(resp)).unwrap();
-                    stream.write_all(&encoded).await.unwrap();
-                    stream.flush().await.unwrap();
-                }
-                _ => {}
-            }
-        }
-    });
-
-    // Mock backup node (for no-seeder fallback)
+    // Mock backup node for fallback
     let backup_listener = rt.block_on(TcpListener::bind("127.0.0.1:50064")).unwrap();
     rt.spawn(async move {
         loop {
@@ -372,25 +349,12 @@ fn setup_mocks(rt: &Runtime) -> (Arc<TorrentService>, Vec<TcpListener>) {
         }
     });
 
-    (
-        torrent_service,
-        vec![
-            block_listener,
-            overlay_listener,
-            validation_listener,
-            transaction_listener,
-            auth_listener,
-            alert_listener,
-            storage_listener,
-            proof_listener,
-            backup_listener,
-        ],
-    )
+    torrent_service
 }
 
 fn benchmark_torrent(c: &mut Criterion) {
     let rt = Runtime::new().unwrap();
-    let (torrent_service, _listeners) = setup_mocks(&rt);
+    let torrent_service = setup_mocks(&rt);
 
     let mut group = c.benchmark_group("torrent_service");
 
