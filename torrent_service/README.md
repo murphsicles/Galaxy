@@ -1,6 +1,10 @@
-# Torrent Microservice 🚀
+# The Vortex Network (BDV) 🌀 – BSV Torrent Overlay Microservice
 
 This service implements a torrent overlay network on top of Bitcoin SV (BSV) to offload aged block data, reducing storage burdens for miners while maintaining data availability through a decentralized, incentivized system. It integrates seamlessly with Galaxy's microservices architecture, using Rust for asynchronous operations and compatibility with existing torrent clients like Vuze.
+
+The Vortex Network (BDV) 🌀 is a decentralized data distribution system for BSV, enabling efficient archival and retrieval of aged blocks through gamified torrents.
+
+(BDV) - Bitcoin Data Vortex 🌀
 
 ## Overview 📄
 
