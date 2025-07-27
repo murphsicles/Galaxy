@@ -8,7 +8,9 @@ The Vortex Network (BDV) 🌀 is a decentralized data distribution system for BS
 
 ## Overview 📄
 
-The Torrent Microservice solves the "aged transaction problem" in BSV by allowing miners to prune old blocks (default: >5 years) and reference them via torrents. Key premises:
+The Torrent Microservice solves the "aged transaction problem" in BSV by allowing miners to prune old blocks (default: >5 years) and reference the block payload via torrents.
+
+Key premises:
 - **Pruning with Availability**: Miners offload blocks to torrents, storing references in the Overlay Service.
 - **SPV-Friendly**: Light clients can request merkle proofs without downloading full chunks.
 - **Incentives**: BSV micropayments reward seeders (100,000 sat stake, 100 sat/MB bulk, 100 sat/proof base + bonuses).
