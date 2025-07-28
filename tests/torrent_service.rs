@@ -205,29 +205,25 @@ struct BlockHeader {
 struct SvTx;
 
 impl torrent_service::service::Incentives {
-    async fn stake(&self, peer_id: &str, _amount: u64) -> Result<(), String> {
-        let tracker = torrent_service::service::TorrentService::new().await.tracker;
+    async fn stake(&self, peer_id: &str, _amount: u64, tracker: &torrent_service::tracker::TrackerManager) -> Result<(), String> {
         let mut rep = tracker.reputation.lock().await;
         rep.entry(peer_id.to_string()).or_insert_with(|| torrent_service::tracker::Reputation { score: 0 }).score += 100;
         Ok(())
     }
 
-    async fn reward_proof(&self, peer_id: &str, _info_hash: &str) -> Result<(), String> {
-        let tracker = torrent_service::service::TorrentService::new().await.tracker;
+    async fn reward_proof(&self, peer_id: &str, _info_hash: &str, tracker: &torrent_service::tracker::TrackerManager) -> Result<(), String> {
         let mut rep = tracker.reputation.lock().await;
         rep.entry(peer_id.to_string()).or_insert_with(|| torrent_service::tracker::Reputation { score: 0 }).score += 10;
         Ok(())
     }
 
-    async fn reward_bulk(&self, peer_id: &str, mb: u64) -> Result<(), String> {
-        let tracker = torrent_service::service::TorrentService::new().await.tracker;
+    async fn reward_bulk(&self, peer_id: &str, mb: u64, tracker: &torrent_service::tracker::TrackerManager) -> Result<(), String> {
         let mut rep = tracker.reputation.lock().await;
         rep.entry(peer_id.to_string()).or_insert_with(|| torrent_service::tracker::Reputation { score: 0 }).score += (mb * 5) as i32;
         Ok(())
     }
 
-    async fn slash(&self, peer_id: &str, _amount: u64) -> Result<(), String> {
-        let tracker = torrent_service::service::TorrentService::new().await.tracker;
+    async fn slash(&self, peer_id: &str, _amount: u64, tracker: &torrent_service::tracker::TrackerManager) -> Result<(), String> {
         let mut rep = tracker.reputation.lock().await;
         rep.entry(peer_id.to_string()).or_insert_with(|| torrent_service::tracker::Reputation { score: 0 }).score -= 50;
         Ok(())
@@ -843,11 +839,6 @@ async fn test_dynamic_chunk_sizing() {
 
 #[tokio::test]
 async fn test_sybil_resistance() {
-    // Imports for this test
-    use bincode::{deserialize, serialize};
-    use tokio::net::TcpListener;
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
     // Set up per-test tracing subscriber
     let subscriber = tracing_subscriber::fmt()
         .with_max_level(tracing::Level::INFO)
@@ -872,19 +863,19 @@ async fn test_sybil_resistance() {
     assert_eq!(result.unwrap_err(), "Insufficient reputation for seeder registration");
 
     // Simulate stake to gain reputation (+100 points)
-    incentives.stake(peer_id, 100000).await.unwrap();
+    incentives.stake(peer_id, 100000, &tracker).await.unwrap();
 
     // Test successful registration after stake
     tracker.register_seeder(peer_id, info_hash, &signature, &message, &pub_key).await.unwrap();
 
     // Simulate reward to gain more reputation (+10 points)
-    incentives.reward_proof(peer_id, info_hash).await.unwrap();
+    incentives.reward_proof(peer_id, info_hash, &tracker).await.unwrap();
 
     // Simulate bulk reward to gain more reputation (+5/MB)
-    incentives.reward_bulk(peer_id, 2).await.unwrap();
+    incentives.reward_bulk(peer_id, 2, &tracker).await.unwrap();
 
     // Simulate slash to reduce reputation (-50 points per 100,000 sat)
-    incentives.slash(peer_id, 100000).await.unwrap();
+    incentives.slash(peer_id, 100000, &tracker).await.unwrap();
 
     // Verify reputation is updated correctly (initial 0 +100 stake +10 proof +10 bulk (2MB *5) -50 slash = 70)
     let guard = tracker.reputation.lock().await;
