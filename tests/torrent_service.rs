@@ -5,8 +5,6 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::time::{sleep, Duration};
 use tracing::info;
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
-use sv::messages::{Block, BlockHeader, Tx as SvTx};
 
 // Mock torrent_service dependencies
 #[cfg(test)]
@@ -26,7 +24,7 @@ mod torrent_service {
 
         #[derive(Clone, Serialize, Deserialize, Debug)]
         pub struct GetAgedBlocksResponse {
-            pub blocks: Vec<super::super::Block>,
+            pub blocks: Vec<super::Block>,
             pub error: String,
         }
 
@@ -62,7 +60,7 @@ mod torrent_service {
 
     pub mod proof_server {
         use serde::{Deserialize, Serialize};
-        use super::super::BlockHeader;
+        use super::BlockHeader;
 
         #[derive(Clone, Serialize, Deserialize, Debug)]
         pub struct ProofBundle {
@@ -97,6 +95,42 @@ mod torrent_service {
             pub score: i32,
         }
 
+        #[derive(Clone, Debug)]
+        pub struct PrivateKey;
+
+        #[derive(Clone, Debug)]
+        pub struct PublicKey;
+
+        #[derive(Clone, Debug)]
+        pub struct Signature;
+
+        #[derive(Clone, Debug)]
+        pub struct Message;
+
+        impl PrivateKey {
+            pub fn from_random() -> Self {
+                PrivateKey
+            }
+        }
+
+        impl PublicKey {
+            pub fn from_private_key(_priv_key: &PrivateKey) -> Self {
+                PublicKey
+            }
+        }
+
+        impl Signature {
+            pub fn sign(_priv_key: &PrivateKey, _message: &Message) -> Self {
+                Signature
+            }
+        }
+
+        impl Message {
+            pub fn from_slice(_s: &[u8]) -> Result<Self, String> {
+                Ok(Message)
+            }
+        }
+
         impl TrackerManager {
             pub fn new() -> Self {
                 TrackerManager {
@@ -108,9 +142,9 @@ mod torrent_service {
                 &self,
                 _peer_id: &str,
                 _info_hash: &str,
-                _signature: &super::Signature,
-                _message: &super::Message,
-                _pub_key: &super::PublicKey,
+                _signature: &Signature,
+                _message: &Message,
+                _pub_key: &PublicKey,
             ) -> Result<(), String> {
                 let rep = self.reputation.lock().await;
                 if rep.get(_peer_id).map_or(0, |r| r.score) < 50 {
@@ -123,41 +157,20 @@ mod torrent_service {
     }
 }
 
-#[derive(Clone, Debug)]
-struct PrivateKey;
-
-#[derive(Clone, Debug)]
-struct PublicKey;
-
-#[derive(Clone, Debug)]
-struct Signature;
-
-#[derive(Clone, Debug)]
-struct Message;
-
-impl PrivateKey {
-    fn from_random() -> Self {
-        PrivateKey
-    }
+// Mock sv types
+#[derive(Clone, Default, Serialize, Deserialize, Debug)]
+struct Block {
+    header: BlockHeader,
+    txns: Vec<SvTx>,
 }
 
-impl PublicKey {
-    fn from_private_key(_priv_key: &PrivateKey) -> Self {
-        PublicKey
-    }
+#[derive(Clone, Default, Serialize, Deserialize, Debug)]
+struct BlockHeader {
+    timestamp: u32,
 }
 
-impl Signature {
-    fn sign(_priv_key: &PrivateKey, _message: &Message) -> Self {
-        Signature
-    }
-}
-
-impl Message {
-    fn from_slice(_s: &[u8]) -> Result<Self, String> {
-        Ok(Message)
-    }
-}
+#[derive(Clone, Default, Serialize, Deserialize, Debug)]
+struct SvTx;
 
 impl torrent_service::service::Incentives {
     async fn stake(&self, _peer_id: &str, _amount: u64) -> Result<(), String> {
@@ -775,10 +788,10 @@ async fn test_sybil_resistance() {
     let incentives = torrent_service.incentives.clone();
 
     // Test initial registration failure (low reputation)
-    let priv_key = PrivateKey::from_random();
-    let pub_key = PublicKey::from_private_key(&priv_key);
-    let message = Message::from_slice("test_message".as_bytes()).unwrap();
-    let signature = Signature::sign(&priv_key, &message);
+    let priv_key = torrent_service::tracker::PrivateKey::from_random();
+    let pub_key = torrent_service::tracker::PublicKey::from_private_key(&priv_key);
+    let message = torrent_service::tracker::Message::from_slice("test_message".as_bytes()).unwrap();
+    let signature = torrent_service::tracker::Signature::sign(&priv_key, &message);
     let peer_id = "test_peer";
     let info_hash = "dummy_info_hash";
     let err = tracker.register_seeder(peer_id, info_hash, &signature, &message, &pub_key).await.err().unwrap();
