@@ -5,16 +5,13 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use bincode::{deserialize, serialize};
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
 use tracing_subscriber;
-use sv::messages::{Block, BlockHeader, Tx as SvTx};
 
 // Mock torrent_service dependencies
 #[cfg(test)]
 mod torrent_service {
     pub mod service {
         use serde::{Deserialize, Serialize};
-        use std::sync::Arc;
 
         #[derive(Clone, Debug)]
         pub struct TorrentService;
@@ -24,7 +21,7 @@ mod torrent_service {
 
         #[derive(Clone, Serialize, Deserialize, Debug)]
         pub struct GetAgedBlocksResponse {
-            pub blocks: Vec<super::super::Block>,
+            pub blocks: Vec<crate::Block>,
             pub error: String,
         }
 
@@ -74,7 +71,7 @@ mod torrent_service {
 
     pub mod proof_server {
         use serde::{Deserialize, Serialize};
-        use super::super::BlockHeader;
+        use crate::BlockHeader;
 
         #[derive(Clone, Serialize, Deserialize, Debug)]
         pub struct ProofBundle {
@@ -93,6 +90,21 @@ mod torrent_service {
         }
     }
 }
+
+// Mock sv types
+#[derive(Clone, Default, Serialize, Deserialize, Debug)]
+struct Block {
+    header: BlockHeader,
+    txns: Vec<SvTx>,
+}
+
+#[derive(Clone, Default, Serialize, Deserialize, Debug)]
+struct BlockHeader {
+    timestamp: u32,
+}
+
+#[derive(Clone, Default, Serialize, Deserialize, Debug)]
+struct SvTx;
 
 #[derive(Serialize, Deserialize, Debug)]
 enum MockRequestType {
@@ -197,7 +209,7 @@ struct Utxo {
     script_pubkey: String,
 }
 
-fn setup_mocks(rt: &Runtime) -> Arc<torrent_service::service::TorrentService> {
+fn setup_mocks(rt: &Runtime) -> torrent_service::service::TorrentService {
     tracing_subscriber::fmt()
         .with_max_level(tracing::Level::INFO)
         .init();
@@ -216,7 +228,6 @@ fn setup_mocks(rt: &Runtime) -> Arc<torrent_service::service::TorrentService> {
         dynamic_chunk_size: Some(true),
     };
     let torrent_service = rt.block_on(torrent_service::service::TorrentService::new_with_config(&config));
-    let torrent_service = Arc::new(torrent_service);
 
     // Mock block_service
     let block_listener = rt.block_on(TcpListener::bind("127.0.0.1:50054")).unwrap();
@@ -250,10 +261,10 @@ fn setup_mocks(rt: &Runtime) -> Arc<torrent_service::service::TorrentService> {
     });
 
     // Mock overlay_service
-    let overlay_listener = rt.block_on(TcpListener::bind("127.0.0.1:50056")).unwrap();
+    let _overlay_listener = rt.block_on(TcpListener::bind("127.0.0.1:50056")).unwrap();
     rt.spawn(async move {
         loop {
-            let (mut stream, _) = block_listener.accept().await.unwrap();
+            let (mut stream, _) = _overlay_listener.accept().await.unwrap();
             let mut buffer = vec![0u8; 1024 * 1024];
             let n = stream.read(&mut buffer).await.unwrap();
             let req: MockRequestType = deserialize(&buffer[..n]).unwrap();
@@ -427,7 +438,7 @@ fn setup_mocks(rt: &Runtime) -> Arc<torrent_service::service::TorrentService> {
 
 fn benchmark_torrent(c: &mut Criterion) {
     let rt = Runtime::new().unwrap();
-    let torrent_service = setup_mocks(&rt);
+    let _torrent_service = setup_mocks(&rt);
 
     let mut group = c.benchmark_group("torrent_service");
 
