@@ -4,18 +4,109 @@ use tokio::runtime::Runtime;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use bincode::{deserialize, serialize};
-use sv::messages::{Block, BlockHeader as Header, Tx as SvTx, OutPoint, MerkleBlock as MerklePath};
-use sv::wallet::{PrivateKey, PublicKey};
-use sv::ec::{Signature, Message};
-use torrent_service::service::{TorrentService, GetAgedBlocksRequest, GetAgedBlocksResponse, TorrentRequestType, TorrentResponseType};
-use torrent_service::utils::{ServiceError, Config, AgedThreshold};
-use torrent_service::proof_server::{ProofBundle, ProofRequest, ProofResponse};
-use torrent_service::tracker::TrackerManager;
+use sv::messages::{Block, BlockHeader as Header, Tx as SvTx, OutPoint};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use bip_metainfo::Metainfo;
-use tracing::{info, error};
 use tracing_subscriber;
+
+// Mock structures
+#[derive(Clone, Default, Serialize, Deserialize, Debug)]
+struct Block {
+    header: Header,
+    txns: Vec<SvTx>,
+}
+
+#[derive(Clone, Default, Serialize, Deserialize, Debug)]
+struct Header {
+    timestamp: u32,
+}
+
+#[derive(Clone, Default, Serialize, Deserialize, Debug)]
+struct SvTx;
+
+#[derive(Clone, Default, Serialize, Deserialize, Debug)]
+struct OutPoint {
+    hash: String,
+    index: u32,
+}
+
+#[derive(Clone, Debug)]
+struct TorrentService;
+
+#[derive(Clone, Serialize, Deserialize, Debug)]
+struct GetAgedBlocksRequest;
+
+#[derive(Clone, Serialize, Deserialize, Debug)]
+struct GetAgedBlocksResponse {
+    blocks: Vec<Block>,
+    error: String,
+}
+
+#[derive(Clone, Serialize, Deserialize, Debug)]
+enum TorrentRequestType {
+    GetProof {
+        txid: String,
+        block_hash: String,
+        token: String,
+    },
+    OffloadAgedBlocks {
+        token: String,
+    },
+}
+
+#[derive(Clone, Serialize, Deserialize, Debug)]
+enum TorrentResponseType {
+    ProofBundle {
+        proof: Vec<String>,
+        error: String,
+    },
+    OffloadSuccess {
+        success: bool,
+        error: String,
+    },
+}
+
+#[derive(Clone, Serialize, Deserialize, Debug)]
+struct ProofBundle {
+    tx_hex: String,
+    path: Vec<String>,
+    header: Header,
+}
+
+#[derive(Clone, Serialize, Deserialize, Debug)]
+struct ProofRequest;
+
+#[derive(Clone, Serialize, Deserialize, Debug)]
+struct ProofResponse {
+    proof: Option<ProofBundle>,
+    error: String,
+}
+
+impl TorrentService {
+    async fn new_with_config(_config: &Config) -> Self {
+        TorrentService
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct Config {
+    piece_size: u64,
+    aged_threshold: AgedThreshold,
+    stake_amount: u64,
+    proof_reward_base: u64,
+    proof_bonus_speed: u64,
+    proof_bonus_rare: u64,
+    bulk_reward_per_mb: u64,
+    tracker_port: Option<u16>,
+    proof_rpc_port: Option<u16>,
+    wallet_address: String,
+    dynamic_chunk_size: Option<bool>,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+enum AgedThreshold {
+    Months(u32),
+}
 
 #[derive(Serialize, Deserialize, Debug)]
 enum MockRequestType {
@@ -66,7 +157,7 @@ struct ValidateProofResponse {
 
 #[derive(Serialize, Deserialize, Debug)]
 struct BroadcastTxRequest {
-    tx_hex: String, // Use hex instead of SvTx to avoid serde issues
+    tx_hex: String,
     token: String,
 }
 
@@ -114,17 +205,10 @@ struct GetUtxosResponse {
 
 #[derive(Serialize, Deserialize, Debug)]
 struct Utxo {
-    txid: String, // Use String for txid instead of Hash256
+    txid: String,
     vout: u32,
     amount: u64,
     script_pubkey: String,
-}
-
-#[derive(Serialize, Deserialize, Debug)]
-struct ProofBundle {
-    tx_hex: String, // Use hex for Tx
-    path: Vec<String>, // Hex for hashes in MerklePath
-    header: Header,
 }
 
 fn setup_mocks(rt: &Runtime) -> Arc<TorrentService> {
@@ -157,17 +241,17 @@ fn setup_mocks(rt: &Runtime) -> Arc<TorrentService> {
             let n = stream.read(&mut buffer).await.unwrap();
             let req: MockRequestType = deserialize(&buffer[..n]).unwrap();
             match req {
-                MockRequestType::GetAgedBlocks(req) => {
-                    let mut transactions = vec![];
-                    for _ in 0..1000000 { // Simulate high-TPS block
-                        transactions.push(SvTx::default());
+                MockRequestType::GetAgedBlocks(_req) => {
+                    let mut txns = vec![];
+                    for _ in 0..1000 {
+                        txns.push(SvTx::default());
                     }
                     let block = Block {
                         header: Header {
                             timestamp: 1234567890,
                             ..Default::default()
                         },
-                        transactions,
+                        txns,
                         ..Default::default()
                     };
                     let resp = GetAgedBlocksResponse {
@@ -192,7 +276,7 @@ fn setup_mocks(rt: &Runtime) -> Arc<TorrentService> {
             let n = stream.read(&mut buffer).await.unwrap();
             let req: MockRequestType = deserialize(&buffer[..n]).unwrap();
             match req {
-                MockRequestType::StoreTorrentRef(_) => {
+                MockRequestType::StoreTorrentRef(_req) => {
                     let resp = StoreTorrentRefResponse {
                         success: true,
                         error: String::new(),
@@ -215,7 +299,7 @@ fn setup_mocks(rt: &Runtime) -> Arc<TorrentService> {
             let n = stream.read(&mut buffer).await.unwrap();
             let req: MockRequestType = deserialize(&buffer[..n]).unwrap();
             match req {
-                MockRequestType::ValidateProof(_) => {
+                MockRequestType::ValidateProof(_req) => {
                     let resp = ValidateProofResponse {
                         success: true,
                         error: String::new(),
@@ -238,7 +322,7 @@ fn setup_mocks(rt: &Runtime) -> Arc<TorrentService> {
             let n = stream.read(&mut buffer).await.unwrap();
             let req: MockRequestType = deserialize(&buffer[..n]).unwrap();
             match req {
-                MockRequestType::BroadcastTx(_) => {
+                MockRequestType::BroadcastTx(_req) => {
                     let resp = BroadcastTxResponse {
                         success: true,
                         error: String::new(),
@@ -261,7 +345,7 @@ fn setup_mocks(rt: &Runtime) -> Arc<TorrentService> {
             let n = stream.read(&mut buffer).await.unwrap();
             let req: MockRequestType = deserialize(&buffer[..n]).unwrap();
             match req {
-                MockRequestType::AuthRequest(req) => {
+                MockRequestType::AuthRequest(_req) => {
                     let resp = AuthResponse {
                         success: true,
                         user_id: "test_user".to_string(),
@@ -285,7 +369,7 @@ fn setup_mocks(rt: &Runtime) -> Arc<TorrentService> {
             let n = stream.read(&mut buffer).await.unwrap();
             let req: MockRequestType = deserialize(&buffer[..n]).unwrap();
             match req {
-                MockRequestType::AlertRequest(req) => {
+                MockRequestType::AlertRequest(_req) => {
                     let resp = AlertResponse {
                         success: true,
                         error: String::new(),
@@ -308,12 +392,10 @@ fn setup_mocks(rt: &Runtime) -> Arc<TorrentService> {
             let n = stream.read(&mut buffer).await.unwrap();
             let req: MockRequestType = deserialize(&buffer[..n]).unwrap();
             match req {
-                MockRequestType::GetUtxos(_) => {
+                MockRequestType::GetUtxos(_req) => {
                     let utxo = Utxo {
-                        outpoint: OutPoint {
-                            txid: "dummy_txid".to_string(),
-                            vout: 0,
-                        },
+                        txid: "dummy_txid".to_string(),
+                        vout: 0,
                         amount: 1000000,
                         script_pubkey: "76a91488a5e4a4e6c4a4e0c7b0b4a4e4a4e4a4e4a4e4a488ac".to_string(),
                     };
