@@ -3,7 +3,7 @@ use bincode::{deserialize, serialize};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::time::{sleep, Duration};
-use tracing::{info, dispatcher::set_default};
+use tracing::{info, Dispatch, dispatcher::set_default};
 use tracing_subscriber::fmt::TestWriter;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -325,7 +325,8 @@ async fn test_torrent_service_end_to_end() {
         .with_max_level(tracing::Level::INFO)
         .with_writer(TestWriter::new())
         .finish();
-    let _guard = set_default(&subscriber);
+    let dispatch = Dispatch::new(subscriber);
+    let _guard = set_default(&dispatch);
 
     // Initialize torrent_service and start server
     let torrent_service = Arc::new(torrent_service::service::TorrentService::new().await);
@@ -535,7 +536,7 @@ async fn test_torrent_service_end_to_end() {
         }
     });
 
-    // Wait for aging to detect blocks
+    // Wait for servers to start
     sleep(Duration::from_secs(1)).await;
 
     // Simulate proof request
@@ -569,7 +570,8 @@ async fn test_dynamic_chunk_sizing() {
         .with_max_level(tracing::Level::INFO)
         .with_writer(TestWriter::new())
         .finish();
-    let _guard = set_default(&subscriber);
+    let dispatch = Dispatch::new(subscriber);
+    let _guard = set_default(&dispatch);
 
     // Initialize torrent_service and start server
     let torrent_service = Arc::new(torrent_service::service::TorrentService::new().await);
@@ -817,7 +819,8 @@ async fn test_sybil_resistance() {
         .with_max_level(tracing::Level::INFO)
         .with_writer(TestWriter::new())
         .finish();
-    let _guard = set_default(&subscriber);
+    let dispatch = Dispatch::new(subscriber);
+    let _guard = set_default(&dispatch);
 
     let torrent_service = Arc::new(torrent_service::service::TorrentService::new().await);
     let tracker = torrent_service.tracker.clone();
