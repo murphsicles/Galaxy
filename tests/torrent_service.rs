@@ -60,8 +60,9 @@ mod torrent_service {
                 }
             }
 
-            pub async fn start_server(&self) {
-                let listener = TcpListener::bind("127.0.0.1:50062").await.unwrap();
+            pub async fn start_server(&self) -> u16 {
+                let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let port = listener.local_addr().unwrap().port();
                 tokio::spawn(async move {
                     loop {
                         let (mut stream, _) = listener.accept().await.unwrap();
@@ -81,6 +82,7 @@ mod torrent_service {
                         }
                     }
                 });
+                port
             }
         }
 
@@ -170,14 +172,14 @@ mod torrent_service {
 
             pub async fn register_seeder(
                 &self,
-                _peer_id: &str,
+                peer_id: &str,
                 _info_hash: &str,
                 _signature: &Signature,
                 _message: &Message,
                 _pub_key: &PublicKey,
             ) -> Result<(), String> {
                 let rep = self.reputation.lock().await;
-                if rep.get(_peer_id).map_or(0, |r| r.score) < 50 {
+                if rep.get(peer_id).map_or(0, |r| r.score) < 50 {
                     Err("Insufficient reputation for seeder registration".to_string())
                 } else {
                     Ok(())
@@ -203,19 +205,31 @@ struct BlockHeader {
 struct SvTx;
 
 impl torrent_service::service::Incentives {
-    async fn stake(&self, _peer_id: &str, _amount: u64) -> Result<(), String> {
+    async fn stake(&self, peer_id: &str, _amount: u64) -> Result<(), String> {
+        let tracker = torrent_service::service::TorrentService::new().await.tracker;
+        let mut rep = tracker.reputation.lock().await;
+        rep.entry(peer_id.to_string()).or_insert_with(|| torrent_service::tracker::Reputation { score: 0 }).score += 100;
         Ok(())
     }
 
-    async fn reward_proof(&self, _peer_id: &str, _info_hash: &str) -> Result<(), String> {
+    async fn reward_proof(&self, peer_id: &str, _info_hash: &str) -> Result<(), String> {
+        let tracker = torrent_service::service::TorrentService::new().await.tracker;
+        let mut rep = tracker.reputation.lock().await;
+        rep.entry(peer_id.to_string()).or_insert_with(|| torrent_service::tracker::Reputation { score: 0 }).score += 10;
         Ok(())
     }
 
-    async fn reward_bulk(&self, _peer_id: &str, _mb: u64) -> Result<(), String> {
+    async fn reward_bulk(&self, peer_id: &str, mb: u64) -> Result<(), String> {
+        let tracker = torrent_service::service::TorrentService::new().await.tracker;
+        let mut rep = tracker.reputation.lock().await;
+        rep.entry(peer_id.to_string()).or_insert_with(|| torrent_service::tracker::Reputation { score: 0 }).score += (mb * 5) as i32;
         Ok(())
     }
 
-    async fn slash(&self, _peer_id: &str, _amount: u64) -> Result<(), String> {
+    async fn slash(&self, peer_id: &str, _amount: u64) -> Result<(), String> {
+        let tracker = torrent_service::service::TorrentService::new().await.tracker;
+        let mut rep = tracker.reputation.lock().await;
+        rep.entry(peer_id.to_string()).or_insert_with(|| torrent_service::tracker::Reputation { score: 0 }).score -= 50;
         Ok(())
     }
 }
@@ -340,10 +354,10 @@ async fn test_torrent_service_end_to_end() {
 
     // Initialize torrent_service and start server
     let torrent_service = Arc::new(torrent_service::service::TorrentService::new().await);
-    torrent_service.start_server().await;
+    let port = torrent_service.start_server().await;
 
     // Mock block_service
-    let block_listener = TcpListener::bind("127.0.0.1:50054").await.unwrap();
+    let block_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     tokio::spawn(async move {
         loop {
             let (mut stream, _) = block_listener.accept().await.unwrap();
@@ -374,7 +388,7 @@ async fn test_torrent_service_end_to_end() {
     });
 
     // Mock overlay_service
-    let overlay_listener = TcpListener::bind("127.0.0.1:50056").await.unwrap();
+    let overlay_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     tokio::spawn(async move {
         loop {
             let (mut stream, _) = overlay_listener.accept().await.unwrap();
@@ -397,7 +411,7 @@ async fn test_torrent_service_end_to_end() {
     });
 
     // Mock validation_service
-    let validation_listener = TcpListener::bind("127.0.0.1:50057").await.unwrap();
+    let validation_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     tokio::spawn(async move {
         loop {
             let (mut stream, _) = validation_listener.accept().await.unwrap();
@@ -420,7 +434,7 @@ async fn test_torrent_service_end_to_end() {
     });
 
     // Mock transaction_service
-    let transaction_listener = TcpListener::bind("127.0.0.1:50052").await.unwrap();
+    let transaction_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     tokio::spawn(async move {
         loop {
             let (mut stream, _) = transaction_listener.accept().await.unwrap();
@@ -443,7 +457,7 @@ async fn test_torrent_service_end_to_end() {
     });
 
     // Mock auth_service
-    let auth_listener = TcpListener::bind("127.0.0.1:50060").await.unwrap();
+    let auth_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     tokio::spawn(async move {
         loop {
             let (mut stream, _) = auth_listener.accept().await.unwrap();
@@ -467,7 +481,7 @@ async fn test_torrent_service_end_to_end() {
     });
 
     // Mock alert_service
-    let alert_listener = TcpListener::bind("127.0.0.1:50061").await.unwrap();
+    let alert_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     tokio::spawn(async move {
         loop {
             let (mut stream, _) = alert_listener.accept().await.unwrap();
@@ -490,7 +504,7 @@ async fn test_torrent_service_end_to_end() {
     });
 
     // Mock storage_service for UTXOs
-    let storage_listener = TcpListener::bind("127.0.0.1:50053").await.unwrap();
+    let storage_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     tokio::spawn(async move {
         loop {
             let (mut stream, _) = storage_listener.accept().await.unwrap();
@@ -519,7 +533,7 @@ async fn test_torrent_service_end_to_end() {
     });
 
     // Mock proof_server
-    let proof_listener = TcpListener::bind("127.0.0.1:50063").await.unwrap();
+    let proof_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     tokio::spawn(async move {
         loop {
             let (mut stream, _addr) = proof_listener.accept().await.unwrap();
@@ -550,7 +564,7 @@ async fn test_torrent_service_end_to_end() {
     sleep(Duration::from_secs(1)).await;
 
     // Simulate proof request
-    let mut stream = TcpStream::connect("127.0.0.1:50062").await.unwrap();
+    let mut stream = TcpStream::connect(format!("127.0.0.1:{}", port)).await.unwrap();
     let request = torrent_service::service::TorrentRequestType::GetProof {
         txid: "dummy_txid".to_string(),
         block_hash: "dummy_block_hash".to_string(),
@@ -590,10 +604,10 @@ async fn test_dynamic_chunk_sizing() {
 
     // Initialize torrent_service and start server
     let torrent_service = Arc::new(torrent_service::service::TorrentService::new().await);
-    torrent_service.start_server().await;
+    let port = torrent_service.start_server().await;
 
     // Mock block_service
-    let block_listener = TcpListener::bind("127.0.0.1:50054").await.unwrap();
+    let block_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     tokio::spawn(async move {
         loop {
             let (mut stream, _) = block_listener.accept().await.unwrap();
@@ -628,7 +642,7 @@ async fn test_dynamic_chunk_sizing() {
     });
 
     // Mock overlay_service
-    let overlay_listener = TcpListener::bind("127.0.0.1:50056").await.unwrap();
+    let overlay_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     tokio::spawn(async move {
         loop {
             let (mut stream, _) = overlay_listener.accept().await.unwrap();
@@ -651,7 +665,7 @@ async fn test_dynamic_chunk_sizing() {
     });
 
     // Mock validation_service
-    let validation_listener = TcpListener::bind("127.0.0.1:50057").await.unwrap();
+    let validation_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     tokio::spawn(async move {
         loop {
             let (mut stream, _) = validation_listener.accept().await.unwrap();
@@ -674,7 +688,7 @@ async fn test_dynamic_chunk_sizing() {
     });
 
     // Mock transaction_service
-    let transaction_listener = TcpListener::bind("127.0.0.1:50052").await.unwrap();
+    let transaction_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     tokio::spawn(async move {
         loop {
             let (mut stream, _) = transaction_listener.accept().await.unwrap();
@@ -697,7 +711,7 @@ async fn test_dynamic_chunk_sizing() {
     });
 
     // Mock auth_service
-    let auth_listener = TcpListener::bind("127.0.0.1:50060").await.unwrap();
+    let auth_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     tokio::spawn(async move {
         loop {
             let (mut stream, _) = auth_listener.accept().await.unwrap();
@@ -721,7 +735,7 @@ async fn test_dynamic_chunk_sizing() {
     });
 
     // Mock alert_service
-    let alert_listener = TcpListener::bind("127.0.0.1:50061").await.unwrap();
+    let alert_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     tokio::spawn(async move {
         loop {
             let (mut stream, _) = alert_listener.accept().await.unwrap();
@@ -744,7 +758,7 @@ async fn test_dynamic_chunk_sizing() {
     });
 
     // Mock storage_service for UTXOs
-    let storage_listener = TcpListener::bind("127.0.0.1:50053").await.unwrap();
+    let storage_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     tokio::spawn(async move {
         loop {
             let (mut stream, _) = storage_listener.accept().await.unwrap();
@@ -773,7 +787,7 @@ async fn test_dynamic_chunk_sizing() {
     });
 
     // Mock proof_server
-    let proof_listener = TcpListener::bind("127.0.0.1:50063").await.unwrap();
+    let proof_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     tokio::spawn(async move {
         loop {
             let (mut stream, _addr) = proof_listener.accept().await.unwrap();
@@ -804,7 +818,7 @@ async fn test_dynamic_chunk_sizing() {
     sleep(Duration::from_secs(1)).await;
 
     // Simulate proof request
-    let mut stream = TcpStream::connect("127.0.0.1:50062").await.unwrap();
+    let mut stream = TcpStream::connect(format!("127.0.0.1:{}", port)).await.unwrap();
     let request = torrent_service::service::TorrentRequestType::GetProof {
         txid: "dummy_txid".to_string(),
         block_hash: "dummy_block_hash".to_string(),
@@ -829,6 +843,11 @@ async fn test_dynamic_chunk_sizing() {
 
 #[tokio::test]
 async fn test_sybil_resistance() {
+    // Imports for this test
+    use bincode::{deserialize, serialize};
+    use tokio::net::TcpListener;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
     // Set up per-test tracing subscriber
     let subscriber = tracing_subscriber::fmt()
         .with_max_level(tracing::Level::INFO)
@@ -848,8 +867,9 @@ async fn test_sybil_resistance() {
     let signature = torrent_service::tracker::Signature::sign(&priv_key, &message);
     let peer_id = "test_peer";
     let info_hash = "dummy_info_hash";
-    let err = tracker.register_seeder(peer_id, info_hash, &signature, &message, &pub_key).await.err().unwrap();
-    assert_eq!(err.to_string(), "Insufficient reputation for seeder registration");
+    let result = tracker.register_seeder(peer_id, info_hash, &signature, &message, &pub_key).await;
+    assert!(result.is_err());
+    assert_eq!(result.unwrap_err(), "Insufficient reputation for seeder registration");
 
     // Simulate stake to gain reputation (+100 points)
     incentives.stake(peer_id, 100000).await.unwrap();
