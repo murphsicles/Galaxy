@@ -324,6 +324,11 @@ struct Utxo {
 
 #[tokio::test]
 async fn test_torrent_service_end_to_end() {
+    // Imports for this test
+    use bincode::{deserialize, serialize};
+    use tokio::net::TcpListener;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
     // Set up per-test tracing subscriber
     let subscriber = tracing_subscriber::fmt()
         .with_max_level(tracing::Level::INFO)
@@ -569,6 +574,11 @@ async fn test_torrent_service_end_to_end() {
 
 #[tokio::test]
 async fn test_dynamic_chunk_sizing() {
+    // Imports for this test
+    use bincode::{deserialize, serialize};
+    use tokio::net::TcpListener;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
     // Set up per-test tracing subscriber
     let subscriber = tracing_subscriber::fmt()
         .with_max_level(tracing::Level::INFO)
