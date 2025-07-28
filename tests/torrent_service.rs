@@ -31,18 +31,18 @@ struct OutPoint {
 #[derive(Clone, Default, Serialize, Deserialize, Debug)]
 struct MerklePath;
 
-#[derive(Clone, Serialize, Deserialize, Debug)]
+#[derive(Clone, Debug)]
 struct TorrentService {
     tracker: Arc<TrackerManager>,
     incentives: Arc<Incentives>,
 }
 
-#[derive(Clone, Default, Serialize, Deserialize, Debug)]
+#[derive(Clone, Debug)]
 struct TrackerManager {
     reputation: Arc<tokio::sync::Mutex<std::collections::HashMap<String, Reputation>>>,
 }
 
-#[derive(Clone, Default, Serialize, Deserialize, Debug)]
+#[derive(Clone, Debug)]
 struct Incentives;
 
 #[derive(Clone, Default, Serialize, Deserialize, Debug)]
@@ -106,14 +106,14 @@ impl TorrentService {
 impl TrackerManager {
     async fn register_seeder(
         &self,
-        peer_id: &str,
+        _peer_id: &str,
         _info_hash: &str,
         _signature: &Signature,
         _message: &Message,
         _pub_key: &PublicKey,
     ) -> Result<(), String> {
         let rep = self.reputation.lock().await;
-        if rep.get(peer_id).map_or(0, |r| r.score) < 50 {
+        if rep.get(_peer_id).map_or(0, |r| r.score) < 50 {
             Err("Insufficient reputation for seeder registration".to_string())
         } else {
             Ok(())
@@ -122,34 +122,34 @@ impl TrackerManager {
 }
 
 impl Incentives {
-    async fn stake(&self, peer_id: &str, amount: u64) -> Result<(), String> {
+    async fn stake(&self, _peer_id: &str, _amount: u64) -> Result<(), String> {
         Ok(())
     }
 
-    async fn reward_proof(&self, peer_id: &str, _info_hash: &str) -> Result<(), String> {
+    async fn reward_proof(&self, _peer_id: &str, _info_hash: &str) -> Result<(), String> {
         Ok(())
     }
 
-    async fn reward_bulk(&self, peer_id: &str, _mb: u64) -> Result<(), String> {
+    async fn reward_bulk(&self, _peer_id: &str, _mb: u64) -> Result<(), String> {
         Ok(())
     }
 
-    async fn slash(&self, peer_id: &str, _amount: u64) -> Result<(), String> {
+    async fn slash(&self, _peer_id: &str, _amount: u64) -> Result<(), String> {
         Ok(())
     }
 }
 
 // Mock types for removed dependencies
-#[derive(Clone, Default, Serialize, Deserialize, Debug)]
+#[derive(Clone, Default, Debug)]
 struct PrivateKey;
 
-#[derive(Clone, Default, Serialize, Deserialize, Debug)]
+#[derive(Clone, Default, Debug)]
 struct PublicKey;
 
-#[derive(Clone, Default, Serialize, Deserialize, Debug)]
+#[derive(Clone, Default, Debug)]
 struct Signature;
 
-#[derive(Clone, Default, Serialize, Deserialize, Debug)]
+#[derive(Clone, Default, Debug)]
 struct Message;
 
 impl PrivateKey {
@@ -294,7 +294,7 @@ async fn test_torrent_service_end_to_end() {
             let n = stream.read(&mut buffer).await.unwrap();
             let req: MockRequestType = deserialize(&buffer[..n]).unwrap();
             match req {
-                MockRequestType::GetAgedBlocks(req) => {
+                MockRequestType::GetAgedBlocks(_req) => {
                     let block = Block {
                         header: Header {
                             timestamp: 1234567890,
@@ -325,7 +325,7 @@ async fn test_torrent_service_end_to_end() {
             let n = stream.read(&mut buffer).await.unwrap();
             let req: MockRequestType = deserialize(&buffer[..n]).unwrap();
             match req {
-                MockRequestType::StoreTorrentRef(_) => {
+                MockRequestType::StoreTorrentRef(_req) => {
                     let resp = StoreTorrentRefResponse {
                         success: true,
                         error: String::new(),
@@ -348,7 +348,7 @@ async fn test_torrent_service_end_to_end() {
             let n = stream.read(&mut buffer).await.unwrap();
             let req: MockRequestType = deserialize(&buffer[..n]).unwrap();
             match req {
-                MockRequestType::ValidateProof(_) => {
+                MockRequestType::ValidateProof(_req) => {
                     let resp = ValidateProofResponse {
                         success: true,
                         error: String::new(),
@@ -371,7 +371,7 @@ async fn test_torrent_service_end_to_end() {
             let n = stream.read(&mut buffer).await.unwrap();
             let req: MockRequestType = deserialize(&buffer[..n]).unwrap();
             match req {
-                MockRequestType::BroadcastTx(_) => {
+                MockRequestType::BroadcastTx(_req) => {
                     let resp = BroadcastTxResponse {
                         success: true,
                         error: String::new(),
@@ -394,7 +394,7 @@ async fn test_torrent_service_end_to_end() {
             let n = stream.read(&mut buffer).await.unwrap();
             let req: MockRequestType = deserialize(&buffer[..n]).unwrap();
             match req {
-                MockRequestType::AuthRequest(req) => {
+                MockRequestType::AuthRequest(_req) => {
                     let resp = AuthResponse {
                         success: true,
                         user_id: "test_user".to_string(),
@@ -418,7 +418,7 @@ async fn test_torrent_service_end_to_end() {
             let n = stream.read(&mut buffer).await.unwrap();
             let req: MockRequestType = deserialize(&buffer[..n]).unwrap();
             match req {
-                MockRequestType::AlertRequest(req) => {
+                MockRequestType::AlertRequest(_req) => {
                     let resp = AlertResponse {
                         success: true,
                         error: String::new(),
@@ -441,7 +441,7 @@ async fn test_torrent_service_end_to_end() {
             let n = stream.read(&mut buffer).await.unwrap();
             let req: MockRequestType = deserialize(&buffer[..n]).unwrap();
             match req {
-                MockRequestType::GetUtxos(_) => {
+                MockRequestType::GetUtxos(_req) => {
                     let utxo = Utxo {
                         txid: "dummy_txid".to_string(),
                         vout: 0,
@@ -465,12 +465,12 @@ async fn test_torrent_service_end_to_end() {
     let proof_listener = TcpListener::bind("127.0.0.1:50063").await.unwrap();
     tokio::spawn(async move {
         loop {
-            let (mut stream, addr) = proof_listener.accept().await.unwrap();
+            let (mut stream, _addr) = proof_listener.accept().await.unwrap();
             let mut buffer = vec![0u8; 1024 * 1024];
             let n = stream.read(&mut buffer).await.unwrap();
             let req: MockRequestType = deserialize(&buffer[..n]).unwrap();
             match req {
-                MockRequestType::ProofRequest(req) => {
+                MockRequestType::ProofRequest(_req) => {
                     let proof = ProofBundle {
                         tx_hex: "dummy_tx_hex".to_string(),
                         path: vec![],
@@ -490,7 +490,7 @@ async fn test_torrent_service_end_to_end() {
     });
 
     // Initialize torrent_service
-    let torrent_service = Arc::new(TorrentService::new().await);
+    let _torrent_service = Arc::new(TorrentService::new().await);
 
     // Wait for aging to detect blocks
     sleep(Duration::from_secs(1)).await;
@@ -516,7 +516,6 @@ async fn test_torrent_service_end_to_end() {
             assert!(!proof.is_empty(), "Proof is empty");
             info!("Successfully retrieved proof: {:?}", proof);
         }
-        _ => { panic!("Unexpected response type"); }
     }
 }
 
@@ -535,7 +534,7 @@ async fn test_dynamic_chunk_sizing() {
             let n = stream.read(&mut buffer).await.unwrap();
             let req: MockRequestType = deserialize(&buffer[..n]).unwrap();
             match req {
-                MockRequestType::GetAgedBlocks(req) => {
+                MockRequestType::GetAgedBlocks(_req) => {
                     let mut txns = vec![];
                     for _ in 0..1000 {
                         txns.push(SvTx::default());
@@ -570,7 +569,7 @@ async fn test_dynamic_chunk_sizing() {
             let n = stream.read(&mut buffer).await.unwrap();
             let req: MockRequestType = deserialize(&buffer[..n]).unwrap();
             match req {
-                MockRequestType::StoreTorrentRef(req) => {
+                MockRequestType::StoreTorrentRef(_req) => {
                     let resp = StoreTorrentRefResponse {
                         success: true,
                         error: String::new(),
@@ -593,7 +592,7 @@ async fn test_dynamic_chunk_sizing() {
             let n = stream.read(&mut buffer).await.unwrap();
             let req: MockRequestType = deserialize(&buffer[..n]).unwrap();
             match req {
-                MockRequestType::ValidateProof(_) => {
+                MockRequestType::ValidateProof(_req) => {
                     let resp = ValidateProofResponse {
                         success: true,
                         error: String::new(),
@@ -616,7 +615,7 @@ async fn test_dynamic_chunk_sizing() {
             let n = stream.read(&mut buffer).await.unwrap();
             let req: MockRequestType = deserialize(&buffer[..n]).unwrap();
             match req {
-                MockRequestType::BroadcastTx(_) => {
+                MockRequestType::BroadcastTx(_req) => {
                     let resp = BroadcastTxResponse {
                         success: true,
                         error: String::new(),
@@ -639,7 +638,7 @@ async fn test_dynamic_chunk_sizing() {
             let n = stream.read(&mut buffer).await.unwrap();
             let req: MockRequestType = deserialize(&buffer[..n]).unwrap();
             match req {
-                MockRequestType::AuthRequest(req) => {
+                MockRequestType::AuthRequest(_req) => {
                     let resp = AuthResponse {
                         success: true,
                         user_id: "test_user".to_string(),
@@ -663,7 +662,7 @@ async fn test_dynamic_chunk_sizing() {
             let n = stream.read(&mut buffer).await.unwrap();
             let req: MockRequestType = deserialize(&buffer[..n]).unwrap();
             match req {
-                MockRequestType::AlertRequest(req) => {
+                MockRequestType::AlertRequest(_req) => {
                     let resp = AlertResponse {
                         success: true,
                         error: String::new(),
@@ -686,7 +685,7 @@ async fn test_dynamic_chunk_sizing() {
             let n = stream.read(&mut buffer).await.unwrap();
             let req: MockRequestType = deserialize(&buffer[..n]).unwrap();
             match req {
-                MockRequestType::GetUtxos(_) => {
+                MockRequestType::GetUtxos(_req) => {
                     let utxo = Utxo {
                         txid: "dummy_txid".to_string(),
                         vout: 0,
@@ -710,12 +709,12 @@ async fn test_dynamic_chunk_sizing() {
     let proof_listener = TcpListener::bind("127.0.0.1:50063").await.unwrap();
     tokio::spawn(async move {
         loop {
-            let (mut stream, addr) = proof_listener.accept().await.unwrap();
+            let (mut stream, _addr) = proof_listener.accept().await.unwrap();
             let mut buffer = vec![0u8; 1024 * 1024];
             let n = stream.read(&mut buffer).await.unwrap();
             let req: MockRequestType = deserialize(&buffer[..n]).unwrap();
             match req {
-                MockRequestType::ProofRequest(req) => {
+                MockRequestType::ProofRequest(_req) => {
                     let proof = ProofBundle {
                         tx_hex: "dummy_tx_hex".to_string(),
                         path: vec![],
@@ -735,7 +734,7 @@ async fn test_dynamic_chunk_sizing() {
     });
 
     // Initialize torrent_service
-    let torrent_service = Arc::new(TorrentService::new().await);
+    let _torrent_service = Arc::new(TorrentService::new().await);
 
     // Wait for aging to detect blocks
     sleep(Duration::from_secs(1)).await;
@@ -761,12 +760,11 @@ async fn test_dynamic_chunk_sizing() {
             assert!(!proof.is_empty(), "Proof is empty");
             info!("Successfully retrieved proof: {:?}", proof);
         }
-        _ => { panic!("Unexpected response type"); }
     }
 }
 
 #[tokio::test]
-async fn test_proof_reward_bonuses() {
+async fn test_sybil_resistance() {
     tracing_subscriber::fmt()
         .with_max_level(tracing::Level::INFO)
         .init();
@@ -779,7 +777,7 @@ async fn test_proof_reward_bonuses() {
     let priv_key = PrivateKey::from_random();
     let pub_key = PublicKey::from_private_key(&priv_key);
     let message = Message::from_str("test_message").unwrap();
-    let signature = Signature::sign(&priv_key, &message).unwrap();
+    let signature = Signature::sign(&priv_key, &message);
     let peer_id = "test_peer";
     let info_hash = "dummy_info_hash";
     let err = tracker.register_seeder(peer_id, info_hash, &signature, &message, &pub_key).await.err().unwrap();
