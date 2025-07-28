@@ -1,6 +1,5 @@
 // tests/torrent_service.rs
-use bincode::{deserialize, serialize};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::TcpStream;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::time::{sleep, Duration};
 use tracing::{info, Dispatch, dispatcher::set_default};
@@ -17,6 +16,8 @@ mod torrent_service {
     pub mod service {
         use serde::{Deserialize, Serialize};
         use std::sync::Arc;
+        use bincode::{deserialize, serialize};
+        use tokio::net::TcpListener;
 
         #[derive(Clone, Debug)]
         pub struct TorrentService {
