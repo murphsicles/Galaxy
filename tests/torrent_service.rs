@@ -11,6 +11,9 @@ use std::sync::Arc;
 // Mock torrent_service dependencies
 #[cfg(test)]
 mod torrent_service {
+    use bincode::{deserialize, serialize};
+    use tokio::net::TcpListener;
+
     pub mod service {
         use serde::{Deserialize, Serialize};
         use std::sync::Arc;
