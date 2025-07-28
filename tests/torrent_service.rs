@@ -4,177 +4,14 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::time::{sleep, Duration};
 use tracing::info;
+use torrent_service::service::{TorrentService, GetAgedBlocksRequest, GetAgedBlocksResponse, TorrentRequestType, TorrentResponseType};
+use torrent_service::proof_server::{ProofBundle, ProofRequest, ProofResponse};
+use torrent_service::tracker::TrackerManager;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use std::collections::HashMap;
-
-// Mock structures
-#[derive(Clone, Default, Serialize, Deserialize, Debug)]
-struct Block {
-    header: Header,
-    txns: Vec<SvTx>,
-}
-
-#[derive(Clone, Default, Serialize, Deserialize, Debug)]
-struct Header {
-    timestamp: u32,
-}
-
-#[derive(Clone, Default, Serialize, Deserialize, Debug)]
-struct SvTx;
-
-#[derive(Clone, Default, Serialize, Deserialize, Debug)]
-struct OutPoint {
-    hash: String,
-    index: u32,
-}
-
-#[derive(Clone, Default, Serialize, Deserialize, Debug)]
-struct MerklePath;
-
-#[derive(Clone, Debug)]
-struct TorrentService {
-    tracker: Arc<TrackerManager>,
-    incentives: Arc<Incentives>,
-}
-
-#[derive(Clone, Debug)]
-struct TrackerManager {
-    reputation: HashMap<String, Reputation>,
-}
-
-#[derive(Clone, Debug)]
-struct Incentives;
-
-#[derive(Clone, Default, Serialize, Deserialize, Debug)]
-struct Reputation {
-    score: i32,
-}
-
-#[derive(Clone, Serialize, Deserialize, Debug)]
-struct GetAgedBlocksRequest;
-
-#[derive(Clone, Serialize, Deserialize, Debug)]
-struct GetAgedBlocksResponse {
-    blocks: Vec<Block>,
-    error: String,
-}
-
-#[derive(Clone, Serialize, Deserialize, Debug)]
-enum TorrentRequestType {
-    GetProof {
-        txid: String,
-        block_hash: String,
-        token: String,
-    },
-}
-
-#[derive(Clone, Serialize, Deserialize, Debug)]
-enum TorrentResponseType {
-    ProofBundle {
-        proof: Vec<String>,
-        error: String,
-    },
-}
-
-#[derive(Clone, Serialize, Deserialize, Debug)]
-struct ProofBundle {
-    tx_hex: String,
-    path: Vec<String>,
-    header: Header,
-}
-
-#[derive(Clone, Serialize, Deserialize, Debug)]
-struct ProofRequest;
-
-#[derive(Clone, Serialize, Deserialize, Debug)]
-struct ProofResponse {
-    proof: Option<ProofBundle>,
-    error: String,
-}
-
-impl TorrentService {
-    async fn new() -> Self {
-        TorrentService {
-            tracker: Arc::new(TrackerManager {
-                reputation: HashMap::new(),
-            }),
-            incentives: Arc::new(Incentives),
-        }
-    }
-}
-
-impl TrackerManager {
-    async fn register_seeder(
-        &self,
-        _peer_id: &str,
-        _info_hash: &str,
-        _signature: &Signature,
-        _message: &Message,
-        _pub_key: &PublicKey,
-    ) -> Result<(), String> {
-        if self.reputation.get(_peer_id).map_or(0, |r| r.score) < 50 {
-            Err("Insufficient reputation for seeder registration".to_string())
-        } else {
-            Ok(())
-        }
-    }
-}
-
-impl Incentives {
-    async fn stake(&self, _peer_id: &str, _amount: u64) -> Result<(), String> {
-        Ok(())
-    }
-
-    async fn reward_proof(&self, _peer_id: &str, _info_hash: &str) -> Result<(), String> {
-        Ok(())
-    }
-
-    async fn reward_bulk(&self, _peer_id: &str, _mb: u64) -> Result<(), String> {
-        Ok(())
-    }
-
-    async fn slash(&self, _peer_id: &str, _amount: u64) -> Result<(), String> {
-        Ok(())
-    }
-}
-
-// Mock types for dependencies
-#[derive(Clone, Default, Debug)]
-struct PrivateKey;
-
-#[derive(Clone, Default, Debug)]
-struct PublicKey;
-
-#[derive(Clone, Default, Debug)]
-struct Signature;
-
-#[derive(Clone, Default, Debug)]
-struct Message;
-
-impl PrivateKey {
-    fn from_random() -> Self {
-        PrivateKey
-    }
-}
-
-impl PublicKey {
-    fn from_private_key(_priv_key: &PrivateKey) -> Self {
-        PublicKey
-    }
-}
-
-impl Signature {
-    fn sign(_priv_key: &PrivateKey, _message: &Message) -> Self {
-        Signature
-    }
-}
-
-impl Message {
-    fn from_str(_s: &str) -> Result<Self, String> {
-        Ok(Message)
-    }
-}
+use sv::messages::{Block, Header, Tx as SvTx, OutPoint};
+use sv::wallet::{PrivateKey, PublicKey};
+use sv::ec::{Signature, Message};
 
 #[derive(Serialize, Deserialize, Debug)]
 enum MockRequestType {
@@ -461,7 +298,7 @@ async fn test_torrent_service_end_to_end() {
         }
     });
 
-    // Mock proof_server for fast response
+    // Mock proof_server
     let proof_listener = TcpListener::bind("127.0.0.1:50063").await.unwrap();
     tokio::spawn(async move {
         loop {
@@ -525,7 +362,7 @@ async fn test_dynamic_chunk_sizing() {
         .with_max_level(tracing::Level::INFO)
         .init();
 
-    // Mock block_service with a large block
+    // Mock block_service
     let block_listener = TcpListener::bind("127.0.0.1:50054").await.unwrap();
     tokio::spawn(async move {
         loop {
@@ -705,7 +542,7 @@ async fn test_dynamic_chunk_sizing() {
         }
     });
 
-    // Mock proof_server for fast response
+    // Mock proof_server
     let proof_listener = TcpListener::bind("127.0.0.1:50063").await.unwrap();
     tokio::spawn(async move {
         loop {
@@ -776,8 +613,8 @@ async fn test_sybil_resistance() {
     // Test initial registration failure (low reputation)
     let priv_key = PrivateKey::from_random();
     let pub_key = PublicKey::from_private_key(&priv_key);
-    let message = Message::from_str("test_message").unwrap();
-    let signature = Signature::sign(&priv_key, &message);
+    let message = Message::from_slice("test_message".as_bytes()).unwrap();
+    let signature = priv_key.sign(&message).unwrap();
     let peer_id = "test_peer";
     let info_hash = "dummy_info_hash";
     let err = tracker.register_seeder(peer_id, info_hash, &signature, &message, &pub_key).await.err().unwrap();
@@ -799,6 +636,6 @@ async fn test_sybil_resistance() {
     incentives.slash(peer_id, 100000).await.unwrap();
 
     // Verify reputation is updated correctly (initial 0 +100 stake +10 proof +10 bulk (2MB *5) -50 slash = 70)
-    let rep = tracker.reputation.get(peer_id).unwrap();
+    let rep = tracker.reputation.lock().await.get(peer_id).unwrap();
     assert_eq!(rep.score, 70);
 }
