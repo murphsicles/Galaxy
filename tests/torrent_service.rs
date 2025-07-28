@@ -814,6 +814,7 @@ async fn test_sybil_resistance() {
     incentives.slash(peer_id, 100000).await.unwrap();
 
     // Verify reputation is updated correctly (initial 0 +100 stake +10 proof +10 bulk (2MB *5) -50 slash = 70)
-    let rep = tracker.reputation.lock().await.get(peer_id).unwrap();
+    let guard = tracker.reputation.lock().await;
+    let rep = guard.get(peer_id).unwrap();
     assert_eq!(rep.score, 70);
 }
