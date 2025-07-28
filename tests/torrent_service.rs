@@ -6,8 +6,9 @@ use tokio::time::{sleep, Duration};
 use tracing::info;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use std::collections::HashMap;
 
-// Mock structures to replace unavailable dependencies
+// Mock structures
 #[derive(Clone, Default, Serialize, Deserialize, Debug)]
 struct Block {
     header: Header,
@@ -39,7 +40,7 @@ struct TorrentService {
 
 #[derive(Clone, Debug)]
 struct TrackerManager {
-    reputation: Arc<tokio::sync::Mutex<std::collections::HashMap<String, Reputation>>>,
+    reputation: HashMap<String, Reputation>,
 }
 
 #[derive(Clone, Debug)]
@@ -96,7 +97,7 @@ impl TorrentService {
     async fn new() -> Self {
         TorrentService {
             tracker: Arc::new(TrackerManager {
-                reputation: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+                reputation: HashMap::new(),
             }),
             incentives: Arc::new(Incentives),
         }
@@ -112,8 +113,7 @@ impl TrackerManager {
         _message: &Message,
         _pub_key: &PublicKey,
     ) -> Result<(), String> {
-        let rep = self.reputation.lock().await;
-        if rep.get(_peer_id).map_or(0, |r| r.score) < 50 {
+        if self.reputation.get(_peer_id).map_or(0, |r| r.score) < 50 {
             Err("Insufficient reputation for seeder registration".to_string())
         } else {
             Ok(())
@@ -139,7 +139,7 @@ impl Incentives {
     }
 }
 
-// Mock types for removed dependencies
+// Mock types for dependencies
 #[derive(Clone, Default, Debug)]
 struct PrivateKey;
 
@@ -799,6 +799,6 @@ async fn test_sybil_resistance() {
     incentives.slash(peer_id, 100000).await.unwrap();
 
     // Verify reputation is updated correctly (initial 0 +100 stake +10 proof +10 bulk (2MB *5) -50 slash = 70)
-    let rep = tracker.reputation.lock().await.get(peer_id).unwrap();
+    let rep = tracker.reputation.get(peer_id).unwrap();
     assert_eq!(rep.score, 70);
 }
