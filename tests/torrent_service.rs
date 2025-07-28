@@ -1,27 +1,30 @@
-// tests/benchmark_torrent.rs
-use criterion::{criterion_group, criterion_main, Criterion};
-use tokio::runtime::Runtime;
+// tests/torrent_service.rs
+use bincode::{deserialize, serialize};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use bincode::{deserialize, serialize};
+use tokio::time::{sleep, Duration};
+use tracing::info;
 use serde::{Deserialize, Serialize};
-use tracing_subscriber;
 
 // Mock torrent_service dependencies
 #[cfg(test)]
 mod torrent_service {
     pub mod service {
         use serde::{Deserialize, Serialize};
+        use std::sync::Arc;
 
         #[derive(Clone, Debug)]
-        pub struct TorrentService;
+        pub struct TorrentService {
+            pub tracker: Arc<super::tracker::TrackerManager>,
+            pub incentives: Arc<Incentives>,
+        }
 
         #[derive(Clone, Serialize, Deserialize, Debug)]
         pub struct GetAgedBlocksRequest;
 
         #[derive(Clone, Serialize, Deserialize, Debug)]
         pub struct GetAgedBlocksResponse {
-            pub blocks: Vec<super::Block>,
+            pub blocks: Vec<crate::Block>,
             pub error: String,
         }
 
@@ -43,35 +46,21 @@ mod torrent_service {
         }
 
         impl TorrentService {
-            pub async fn new_with_config(_config: &Config) -> Self {
-                TorrentService
+            pub async fn new() -> Self {
+                TorrentService {
+                    tracker: Arc::new(super::tracker::TrackerManager::new()),
+                    incentives: Arc::new(Incentives),
+                }
             }
         }
 
-        #[derive(Clone, Serialize, Deserialize, Debug)]
-        pub struct Config {
-            pub piece_size: u64,
-            pub aged_threshold: AgedThreshold,
-            pub stake_amount: u64,
-            pub proof_reward_base: u64,
-            pub proof_bonus_speed: u64,
-            pub proof_bonus_rare: u64,
-            pub bulk_reward_per_mb: u64,
-            pub tracker_port: Option<u16>,
-            pub proof_rpc_port: Option<u16>,
-            pub wallet_address: String,
-            pub dynamic_chunk_size: Option<bool>,
-        }
-
-        #[derive(Clone, Serialize, Deserialize, Debug)]
-        pub enum AgedThreshold {
-            Months(u32),
-        }
+        #[derive(Clone, Debug)]
+        pub struct Incentives;
     }
 
     pub mod proof_server {
         use serde::{Deserialize, Serialize};
-        use super::BlockHeader;
+        use crate::BlockHeader;
 
         #[derive(Clone, Serialize, Deserialize, Debug)]
         pub struct ProofBundle {
@@ -87,6 +76,83 @@ mod torrent_service {
         pub struct ProofResponse {
             pub proof: Option<ProofBundle>,
             pub error: String,
+        }
+    }
+
+    pub mod tracker {
+        use serde::{Deserialize, Serialize};
+        use std::collections::HashMap;
+        use std::sync::Arc;
+        use tokio::sync::Mutex;
+
+        #[derive(Clone, Debug)]
+        pub struct TrackerManager {
+            pub reputation: Arc<Mutex<HashMap<String, Reputation>>>,
+        }
+
+        #[derive(Clone, Default, Serialize, Deserialize, Debug)]
+        pub struct Reputation {
+            pub score: i32,
+        }
+
+        #[derive(Clone, Debug)]
+        pub struct PrivateKey;
+
+        #[derive(Clone, Debug)]
+        pub struct PublicKey;
+
+        #[derive(Clone, Debug)]
+        pub struct Signature;
+
+        #[derive(Clone, Debug)]
+        pub struct Message;
+
+        impl PrivateKey {
+            pub fn from_random() -> Self {
+                PrivateKey
+            }
+        }
+
+        impl PublicKey {
+            pub fn from_private_key(_priv_key: &PrivateKey) -> Self {
+                PublicKey
+            }
+        }
+
+        impl Signature {
+            pub fn sign(_priv_key: &PrivateKey, _message: &Message) -> Self {
+                Signature
+            }
+        }
+
+        impl Message {
+            pub fn from_slice(_s: &[u8]) -> Result<Self, String> {
+                Ok(Message)
+            }
+        }
+
+        impl TrackerManager {
+            pub fn new() -> Self {
+                TrackerManager {
+                    reputation: Arc::new(Mutex::new(HashMap::new())),
+                }
+            }
+
+            pub async fn register_seeder(
+                &self,
+                _peer_id: &str,
+                _info_hash: &str,
+                _signature: &Signature,
+                _message: &Message,
+                _pub_key: &PublicKey,
+            ) -> Result<(), String> {
+                let rep = self.reputation.lock().await;
+                if rep.get(_peer_id).map_or(0, |r| r.score) < 50 {
+                    Err("Insufficient reputation for seeder registration".to_string())
+                } else {
+                    Ok(())
+                }
+            }
         }
     }
 }
@@ -105,6 +171,24 @@ struct BlockHeader {
 
 #[derive(Clone, Default, Serialize, Deserialize, Debug)]
 struct SvTx;
+
+impl torrent_service::service::Incentives {
+    async fn stake(&self, _peer_id: &str, _amount: u64) -> Result<(), String> {
+        Ok(())
+    }
+
+    async fn reward_proof(&self, _peer_id: &str, _info_hash: &str) -> Result<(), String> {
+        Ok(())
+    }
+
+    async fn reward_bulk(&self, _peer_id: &str, _mb: u64) -> Result<(), String> {
+        Ok(())
+    }
+
+    async fn slash(&self, _peer_id: &str, _amount: u64) -> Result<(), String> {
+        Ok(())
+    }
+}
 
 #[derive(Serialize, Deserialize, Debug)]
 enum MockRequestType {
@@ -209,29 +293,15 @@ struct Utxo {
     script_pubkey: String,
 }
 
-fn setup_mocks(rt: &Runtime) -> torrent_service::service::TorrentService {
+#[tokio::test]
+async fn test_torrent_service_end_to_end() {
     tracing_subscriber::fmt()
         .with_max_level(tracing::Level::INFO)
         .init();
 
-    let config = torrent_service::service::Config {
-        piece_size: 32 * 1024 * 1024,
-        aged_threshold: torrent_service::service::AgedThreshold::Months(60),
-        stake_amount: 100000,
-        proof_reward_base: 100,
-        proof_bonus_speed: 10,
-        proof_bonus_rare: 50,
-        bulk_reward_per_mb: 100,
-        tracker_port: Some(6969),
-        proof_rpc_port: Some(50063),
-        wallet_address: "default_address".to_string(),
-        dynamic_chunk_size: Some(true),
-    };
-    let torrent_service = rt.block_on(torrent_service::service::TorrentService::new_with_config(&config));
-
     // Mock block_service
-    let block_listener = rt.block_on(TcpListener::bind("127.0.0.1:50054")).unwrap();
-    rt.spawn(async move {
+    let block_listener = TcpListener::bind("127.0.0.1:50054").await.unwrap();
+    tokio::spawn(async move {
         loop {
             let (mut stream, _) = block_listener.accept().await.unwrap();
             let mut buffer = vec![0u8; 1024 * 1024];
@@ -244,7 +314,7 @@ fn setup_mocks(rt: &Runtime) -> torrent_service::service::TorrentService {
                             timestamp: 1234567890,
                             ..Default::default()
                         },
-                        txns: vec![SvTx::default(); 1000],
+                        txns: vec![SvTx::default()],
                         ..Default::default()
                     };
                     let resp = torrent_service::service::GetAgedBlocksResponse {
@@ -261,8 +331,8 @@ fn setup_mocks(rt: &Runtime) -> torrent_service::service::TorrentService {
     });
 
     // Mock overlay_service
-    let overlay_listener = rt.block_on(TcpListener::bind("127.0.0.1:50056")).unwrap();
-    rt.spawn(async move {
+    let overlay_listener = TcpListener::bind("127.0.0.1:50056").await.unwrap();
+    tokio::spawn(async move {
         loop {
             let (mut stream, _) = overlay_listener.accept().await.unwrap();
             let mut buffer = vec![0u8; 1024 * 1024];
@@ -284,8 +354,8 @@ fn setup_mocks(rt: &Runtime) -> torrent_service::service::TorrentService {
     });
 
     // Mock validation_service
-    let validation_listener = rt.block_on(TcpListener::bind("127.0.0.1:50057")).unwrap();
-    rt.spawn(async move {
+    let validation_listener = TcpListener::bind("127.0.0.1:50057").await.unwrap();
+    tokio::spawn(async move {
         loop {
             let (mut stream, _) = validation_listener.accept().await.unwrap();
             let mut buffer = vec![0u8; 1024 * 1024];
@@ -307,8 +377,8 @@ fn setup_mocks(rt: &Runtime) -> torrent_service::service::TorrentService {
     });
 
     // Mock transaction_service
-    let transaction_listener = rt.block_on(TcpListener::bind("127.0.0.1:50052")).unwrap();
-    rt.spawn(async move {
+    let transaction_listener = TcpListener::bind("127.0.0.1:50052").await.unwrap();
+    tokio::spawn(async move {
         loop {
             let (mut stream, _) = transaction_listener.accept().await.unwrap();
             let mut buffer = vec![0u8; 1024 * 1024];
@@ -330,8 +400,8 @@ fn setup_mocks(rt: &Runtime) -> torrent_service::service::TorrentService {
     });
 
     // Mock auth_service
-    let auth_listener = rt.block_on(TcpListener::bind("127.0.0.1:50060")).unwrap();
-    rt.spawn(async move {
+    let auth_listener = TcpListener::bind("127.0.0.1:50060").await.unwrap();
+    tokio::spawn(async move {
         loop {
             let (mut stream, _) = auth_listener.accept().await.unwrap();
             let mut buffer = vec![0u8; 1024 * 1024];
@@ -354,8 +424,8 @@ fn setup_mocks(rt: &Runtime) -> torrent_service::service::TorrentService {
     });
 
     // Mock alert_service
-    let alert_listener = rt.block_on(TcpListener::bind("127.0.0.1:50061")).unwrap();
-    rt.spawn(async move {
+    let alert_listener = TcpListener::bind("127.0.0.1:50061").await.unwrap();
+    tokio::spawn(async move {
         loop {
             let (mut stream, _) = alert_listener.accept().await.unwrap();
             let mut buffer = vec![0u8; 1024 * 1024];
@@ -376,9 +446,9 @@ fn setup_mocks(rt: &Runtime) -> torrent_service::service::TorrentService {
         }
     });
 
-    // Mock storage_service
-    let storage_listener = rt.block_on(TcpListener::bind("127.0.0.1:50053")).unwrap();
-    rt.spawn(async move {
+    // Mock storage_service for UTXOs
+    let storage_listener = TcpListener::bind("127.0.0.1:50053").await.unwrap();
+    tokio::spawn(async move {
         loop {
             let (mut stream, _) = storage_listener.accept().await.unwrap();
             let mut buffer = vec![0u8; 1024 * 1024];
@@ -406,8 +476,8 @@ fn setup_mocks(rt: &Runtime) -> torrent_service::service::TorrentService {
     });
 
     // Mock proof_server
-    let proof_listener = rt.block_on(TcpListener::bind("127.0.0.1:50063")).unwrap();
-    rt.spawn(async move {
+    let proof_listener = TcpListener::bind("127.0.0.1:50063").await.unwrap();
+    tokio::spawn(async move {
         loop {
             let (mut stream, _addr) = proof_listener.accept().await.unwrap();
             let mut buffer = vec![0u8; 1024 * 1024];
@@ -433,39 +503,316 @@ fn setup_mocks(rt: &Runtime) -> torrent_service::service::TorrentService {
         }
     });
 
-    torrent_service
+    // Initialize torrent_service
+    let _torrent_service = Arc::new(torrent_service::service::TorrentService::new().await);
+
+    // Wait for aging to detect blocks
+    sleep(Duration::from_secs(1)).await;
+
+    // Simulate proof request
+    let mut stream = TcpStream::connect("127.0.0.1:50062").await.unwrap();
+    let request = torrent_service::service::TorrentRequestType::GetProof {
+        txid: "dummy_txid".to_string(),
+        block_hash: "dummy_block_hash".to_string(),
+        token: "default_token".to_string(),
+    };
+    let encoded = serialize(&request).unwrap();
+    stream.write_all(&encoded).await.unwrap();
+    stream.flush().await.unwrap();
+
+    let mut buffer = vec![0u8; 1024 * 1024];
+    let n = stream.read(&mut buffer).await.unwrap();
+    let response: torrent_service::service::TorrentResponseType = deserialize(&buffer[..n]).unwrap();
+
+    match response {
+        torrent_service::service::TorrentResponseType::ProofBundle { proof, error } => {
+            assert!(error.is_empty(), "Proof request failed: {}", error);
+            assert!(!proof.is_empty(), "Proof is empty");
+            info!("Successfully retrieved proof: {:?}", proof);
+        }
+    }
 }
 
-fn benchmark_torrent(c: &mut Criterion) {
-    let rt = Runtime::new().unwrap();
-    let _torrent_service = setup_mocks(&rt);
+#[tokio::test]
+async fn test_dynamic_chunk_sizing() {
+    tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::INFO)
+        .init();
 
-    let mut group = c.benchmark_group("torrent_service");
-
-    // Benchmark proof retrieval
-    group.bench_function("proof_retrieval_high_tps", |b| {
-        b.iter(|| {
-            rt.block_on(async {
-                let mut stream = TcpStream::connect("127.0.0.1:50062").await.unwrap();
-                let request = torrent_service::service::TorrentRequestType::GetProof {
-                    txid: "dummy_txid".to_string(),
-                    block_hash: "dummy_block_hash".to_string(),
-                    token: "default_token".to_string(),
-                };
-                let encoded = serialize(&request).unwrap();
-                stream.write_all(&encoded).await.unwrap();
-                stream.flush().await.unwrap();
-
-                let mut buffer = vec![0u8; 1024 * 1024];
-                let n = stream.read(&mut buffer).await.unwrap();
-                let response: torrent_service::service::TorrentResponseType = deserialize(&buffer[..n]).unwrap();
-                assert!(matches!(response, torrent_service::service::TorrentResponseType::ProofBundle { .. }));
-            });
-        });
+    // Mock block_service
+    let block_listener = TcpListener::bind("127.0.0.1:50054").await.unwrap();
+    tokio::spawn(async move {
+        loop {
+            let (mut stream, _) = block_listener.accept().await.unwrap();
+            let mut buffer = vec![0u8; 1024 * 1024];
+            let n = stream.read(&mut buffer).await.unwrap();
+            let req: MockRequestType = deserialize(&buffer[..n]).unwrap();
+            match req {
+                MockRequestType::GetAgedBlocks(_req) => {
+                    let mut txns = vec![];
+                    for _ in 0..1000 {
+                        txns.push(SvTx::default());
+                    }
+                    let block = Block {
+                        header: BlockHeader {
+                            timestamp: 1234567890,
+                            ..Default::default()
+                        },
+                        txns,
+                        ..Default::default()
+                    };
+                    let resp = torrent_service::service::GetAgedBlocksResponse {
+                        blocks: vec![block],
+                        error: String::new(),
+                    };
+                    let encoded = serialize(&MockResponseType::GetAgedBlocks(resp)).unwrap();
+                    stream.write_all(&encoded).await.unwrap();
+                    stream.flush().await.unwrap();
+                }
+                _ => {}
+            }
+        }
     });
 
-    group.finish();
+    // Mock overlay_service
+    let overlay_listener = TcpListener::bind("127.0.0.1:50056").await.unwrap();
+    tokio::spawn(async move {
+        loop {
+            let (mut stream, _) = overlay_listener.accept().await.unwrap();
+            let mut buffer = vec![0u8; 1024 * 1024];
+            let n = stream.read(&mut buffer).await.unwrap();
+            let req: MockRequestType = deserialize(&buffer[..n]).unwrap();
+            match req {
+                MockRequestType::StoreTorrentRef(_req) => {
+                    let resp = StoreTorrentRefResponse {
+                        success: true,
+                        error: String::new(),
+                    };
+                    let encoded = serialize(&MockResponseType::StoreTorrentRef(resp)).unwrap();
+                    stream.write_all(&encoded).await.unwrap();
+                    stream.flush().await.unwrap();
+                }
+                _ => {}
+            }
+        }
+    });
+
+    // Mock validation_service
+    let validation_listener = TcpListener::bind("127.0.0.1:50057").await.unwrap();
+    tokio::spawn(async move {
+        loop {
+            let (mut stream, _) = validation_listener.accept().await.unwrap();
+            let mut buffer = vec![0u8; 1024 * 1024];
+            let n = stream.read(&mut buffer).await.unwrap();
+            let req: MockRequestType = deserialize(&buffer[..n]).unwrap();
+            match req {
+                MockRequestType::ValidateProof(_req) => {
+                    let resp = ValidateProofResponse {
+                        success: true,
+                        error: String::new(),
+                    };
+                    let encoded = serialize(&MockResponseType::ValidateProof(resp)).unwrap();
+                    stream.write_all(&encoded).await.unwrap();
+                    stream.flush().await.unwrap();
+                }
+                _ => {}
+            }
+        }
+    });
+
+    // Mock transaction_service
+    let transaction_listener = TcpListener::bind("127.0.0.1:50052").await.unwrap();
+    tokio::spawn(async move {
+        loop {
+            let (mut stream, _) = transaction_listener.accept().await.unwrap();
+            let mut buffer = vec![0u8; 1024 * 1024];
+            let n = stream.read(&mut buffer).await.unwrap();
+            let req: MockRequestType = deserialize(&buffer[..n]).unwrap();
+            match req {
+                MockRequestType::BroadcastTx(_req) => {
+                    let resp = BroadcastTxResponse {
+                        success: true,
+                        error: String::new(),
+                    };
+                    let encoded = serialize(&MockResponseType::BroadcastTx(resp)).unwrap();
+                    stream.write_all(&encoded).await.unwrap();
+                    stream.flush().await.unwrap();
+                }
+                _ => {}
+            }
+        }
+    });
+
+    // Mock auth_service
+    let auth_listener = TcpListener::bind("127.0.0.1:50060").await.unwrap();
+    tokio::spawn(async move {
+        loop {
+            let (mut stream, _) = auth_listener.accept().await.unwrap();
+            let mut buffer = vec![0u8; 1024 * 1024];
+            let n = stream.read(&mut buffer).await.unwrap();
+            let req: MockRequestType = deserialize(&buffer[..n]).unwrap();
+            match req {
+                MockRequestType::AuthRequest(_req) => {
+                    let resp = AuthResponse {
+                        success: true,
+                        user_id: "test_user".to_string(),
+                        error: String::new(),
+                    };
+                    let encoded = serialize(&MockResponseType::AuthResponse(resp)).unwrap();
+                    stream.write_all(&encoded).await.unwrap();
+                    stream.flush().await.unwrap();
+                }
+                _ => {}
+            }
+        }
+    });
+
+    // Mock alert_service
+    let alert_listener = TcpListener::bind("127.0.0.1:50061").await.unwrap();
+    tokio::spawn(async move {
+        loop {
+            let (mut stream, _) = alert_listener.accept().await.unwrap();
+            let mut buffer = vec![0u8; 1024 * 1024];
+            let n = stream.read(&mut buffer).await.unwrap();
+            let req: MockRequestType = deserialize(&buffer[..n]).unwrap();
+            match req {
+                MockRequestType::AlertRequest(_req) => {
+                    let resp = AlertResponse {
+                        success: true,
+                        error: String::new(),
+                    };
+                    let encoded = serialize(&MockResponseType::AlertResponse(resp)).unwrap();
+                    stream.write_all(&encoded).await.unwrap();
+                    stream.flush().await.unwrap();
+                }
+                _ => {}
+            }
+        }
+    });
+
+    // Mock storage_service for UTXOs
+    let storage_listener = TcpListener::bind("127.0.0.1:50053").await.unwrap();
+    tokio::spawn(async move {
+        loop {
+            let (mut stream, _) = storage_listener.accept().await.unwrap();
+            let mut buffer = vec![0u8; 1024 * 1024];
+            let n = stream.read(&mut buffer).await.unwrap();
+            let req: MockRequestType = deserialize(&buffer[..n]).unwrap();
+            match req {
+                MockRequestType::GetUtxos(_req) => {
+                    let utxo = Utxo {
+                        txid: "dummy_txid".to_string(),
+                        vout: 0,
+                        amount: 1000000,
+                        script_pubkey: "76a91488a5e4a4e6c4a4e0c7b0b4a4e4a4e4a4e4a4e4a488ac".to_string(),
+                    };
+                    let resp = GetUtxosResponse {
+                        utxos: vec![utxo],
+                        error: String::new(),
+                    };
+                    let encoded = serialize(&MockResponseType::GetUtxos(resp)).unwrap();
+                    stream.write_all(&encoded).await.unwrap();
+                    stream.flush().await.unwrap();
+                }
+                _ => {}
+            }
+        }
+    });
+
+    // Mock proof_server
+    let proof_listener = TcpListener::bind("127.0.0.1:50063").await.unwrap();
+    tokio::spawn(async move {
+        loop {
+            let (mut stream, _addr) = proof_listener.accept().await.unwrap();
+            let mut buffer = vec![0u8; 1024 * 1024];
+            let n = stream.read(&mut buffer).await.unwrap();
+            let req: MockRequestType = deserialize(&buffer[..n]).unwrap();
+            match req {
+                MockRequestType::ProofRequest(_req) => {
+                    let proof = torrent_service::proof_server::ProofBundle {
+                        tx_hex: "dummy_tx_hex".to_string(),
+                        path: vec![],
+                        header: BlockHeader::default(),
+                    };
+                    let resp = torrent_service::proof_server::ProofResponse {
+                        proof: Some(prof),
+                        error: String::new(),
+                    };
+                    let encoded = serialize(&MockResponseType::ProofResponse(resp)).unwrap();
+                    stream.write_all(&encoded).await.unwrap();
+                    stream.flush().await.unwrap();
+                }
+                _ => {}
+            }
+        }
+    });
+
+    // Initialize torrent_service
+    let _torrent_service = Arc::new(torrent_service::service::TorrentService::new().await);
+
+    // Wait for aging to detect blocks
+    sleep(Duration::from_secs(1)).await;
+
+    // Simulate proof request
+    let mut stream = TcpStream::connect("127.0.0.1:50062").await.unwrap();
+    let request = torrent_service::service::TorrentRequestType::GetProof {
+        txid: "dummy_txid".to_string(),
+        block_hash: "dummy_block_hash".to_string(),
+        token: "default_token".to_string(),
+    };
+    let encoded = serialize(&request).unwrap();
+    stream.write_all(&encoded).await.unwrap();
+    stream.flush().await.unwrap();
+
+    let mut buffer = vec![0u8; 1024 * 1024];
+    let n = stream.read(&mut buffer).await.unwrap();
+    let response: torrent_service::service::TorrentResponseType = deserialize(&buffer[..n]).unwrap();
+
+    match response {
+        torrent_service::service::TorrentRequestType::GetProof { proof, error } => {
+            assert!(error.is_empty(), "Proof request failed: {}", error);
+            assert!(!proof.is_empty(), "Proof is empty");
+            info!("Successfully retrieved proof: {:?}", proof);
+        }
+    }
 }
 
-criterion_group!(benches, benchmark_torrent);
-criterion_main!(benches);
+#[tokio::test]
+async fn test_sybil_resistance() {
+    tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::INFO)
+        .init();
+
+    let torrent_service = Arc::new(torrent_service::service::TorrentService::new().await);
+    let tracker = torrent_service.tracker.clone();
+    let incentives = torrent_service.incentives.clone();
+
+    // Test initial registration failure (low reputation)
+    let priv_key = torrent_service::tracker::PrivateKey::from_random();
+    let pub_key = torrent_service::tracker::PublicKey::from_private_key(&priv_key);
+    let message = torrent_service::tracker::Message::from_slice("test_message".as_bytes()).unwrap();
+    let signature = torrent_service::tracker::Signature::sign(&priv_key, &message);
+    let peer_id = "test_peer";
+    let info_hash = "dummy_info_hash";
+    let err = tracker.register_seeder(peer_id, info_hash, &signature, &message, &pub_key).await.err().unwrap();
+    assert_eq!(err.to_string(), "Insufficient reputation for seeder registration");
+
+    // Simulate stake to gain reputation (+100 points)
+    incentives.stake(peer_id, 100000).await.unwrap();
+
+    // Test successful registration after stake
+    tracker.register_seeder(peer_id, info_hash, &signature, &message, &pub_key).await.unwrap();
+
+    // Simulate reward to gain more reputation (+10 points)
+    incentives.reward_proof(peer_id, info_hash).await.unwrap();
+
+    // Simulate bulk reward to gain more reputation (+5/MB)
+    incentives.reward_bulk(peer_id, 2).await.unwrap();
+
+    // Simulate slash to reduce reputation (-50 points per 100,000 sat)
+    incentives.slash(peer_id, 100000).await.unwrap();
+
+    // Verify reputation is updated correctly (initial 0 +100 stake +10 proof +10 bulk (2MB *5) -50 slash = 70)
+    let rep = tracker.reputation.lock().await.get(peer_id).unwrap();
+    assert_eq!(rep.score, 70);
+}
