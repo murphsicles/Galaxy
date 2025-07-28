@@ -3,7 +3,8 @@ use bincode::{deserialize, serialize};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::time::{sleep, Duration};
-use tracing::info;
+use tracing::{info, dispatcher::set_default};
+use tracing_subscriber::fmt::TestWriter;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -52,6 +53,29 @@ mod torrent_service {
                     tracker: Arc::new(super::tracker::TrackerManager::new()),
                     incentives: Arc::new(Incentives),
                 }
+            }
+
+            pub async fn start_server(&self) {
+                let listener = TcpListener::bind("127.0.0.1:50062").await.unwrap();
+                tokio::spawn(async move {
+                    loop {
+                        let (mut stream, _) = listener.accept().await.unwrap();
+                        let mut buffer = vec![0u8; 1024 * 1024];
+                        let n = stream.read(&mut buffer).await.unwrap();
+                        let req: TorrentRequestType = deserialize(&buffer[..n]).unwrap();
+                        match req {
+                            TorrentRequestType::GetProof { txid: _, block_hash: _, token: _ } => {
+                                let resp = TorrentResponseType::ProofBundle {
+                                    proof: vec!["dummy_proof".to_string()],
+                                    error: String::new(),
+                                };
+                                let encoded = serialize(&resp).unwrap();
+                                stream.write_all(&encoded).await.unwrap();
+                                stream.flush().await.unwrap();
+                            }
+                        }
+                    }
+                });
             }
         }
 
@@ -296,9 +320,16 @@ struct Utxo {
 
 #[tokio::test]
 async fn test_torrent_service_end_to_end() {
-    tracing_subscriber::fmt()
+    // Set up per-test tracing subscriber
+    let subscriber = tracing_subscriber::fmt()
         .with_max_level(tracing::Level::INFO)
-        .init();
+        .with_writer(TestWriter::new())
+        .finish();
+    let _guard = set_default(&subscriber);
+
+    // Initialize torrent_service and start server
+    let torrent_service = Arc::new(torrent_service::service::TorrentService::new().await);
+    torrent_service.start_server().await;
 
     // Mock block_service
     let block_listener = TcpListener::bind("127.0.0.1:50054").await.unwrap();
@@ -504,9 +535,6 @@ async fn test_torrent_service_end_to_end() {
         }
     });
 
-    // Initialize torrent_service
-    let _torrent_service = Arc::new(torrent_service::service::TorrentService::new().await);
-
     // Wait for aging to detect blocks
     sleep(Duration::from_secs(1)).await;
 
@@ -536,9 +564,16 @@ async fn test_torrent_service_end_to_end() {
 
 #[tokio::test]
 async fn test_dynamic_chunk_sizing() {
-    tracing_subscriber::fmt()
+    // Set up per-test tracing subscriber
+    let subscriber = tracing_subscriber::fmt()
         .with_max_level(tracing::Level::INFO)
-        .init();
+        .with_writer(TestWriter::new())
+        .finish();
+    let _guard = set_default(&subscriber);
+
+    // Initialize torrent_service and start server
+    let torrent_service = Arc::new(torrent_service::service::TorrentService::new().await);
+    torrent_service.start_server().await;
 
     // Mock block_service
     let block_listener = TcpListener::bind("127.0.0.1:50054").await.unwrap();
@@ -748,10 +783,7 @@ async fn test_dynamic_chunk_sizing() {
         }
     });
 
-    // Initialize torrent_service
-    let _torrent_service = Arc::new(torrent_service::service::TorrentService::new().await);
-
-    // Wait for aging to detect blocks
+    // Wait for servers to start
     sleep(Duration::from_secs(1)).await;
 
     // Simulate proof request
@@ -780,9 +812,12 @@ async fn test_dynamic_chunk_sizing() {
 
 #[tokio::test]
 async fn test_sybil_resistance() {
-    tracing_subscriber::fmt()
+    // Set up per-test tracing subscriber
+    let subscriber = tracing_subscriber::fmt()
         .with_max_level(tracing::Level::INFO)
-        .init();
+        .with_writer(TestWriter::new())
+        .finish();
+    let _guard = set_default(&subscriber);
 
     let torrent_service = Arc::new(torrent_service::service::TorrentService::new().await);
     let tracker = torrent_service.tracker.clone();
