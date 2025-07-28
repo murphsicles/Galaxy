@@ -82,11 +82,26 @@ storage_service/
     ├── Cargo.toml
     └── README.md
 tests/
+    ├── benchmark_torrent.rs
     ├── Cargo.toml
     ├── config.toml
     ├── run_tests.sh
     ├── spv_validation.rs
-    └── throughput.rs
+    ├── throughput.rs
+    └── torrent_service.rs
+torrent_service/
+    ├── src/
+        ├── aging.rs
+        ├── chunker.rs
+        ├── incentives.rs
+        ├── lib.rs
+        ├── main.rs
+        ├── proof_server.rs
+        ├── service.rs
+        ├── tracker.rs
+        └── utils.rs
+    ├── Cargo.toml
+    └── README.md
 transaction_service/
     ├── src/
         ├── lib.rs
@@ -105,5 +120,6 @@ validation_service/
     └── README.md
 .gitignore
 Cargo.toml
+FILETREE
 LICENSE
 README.md
