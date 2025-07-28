@@ -17,10 +17,12 @@
   - Manages private blockchain overlays with persistent storage (sled).
   - Provides SPV proofs with caching and streaming.
   - Supports mining with dynamic difficulty and transaction selection.
+  - Decentralized data distribution via torrent-like protocol with sybil resistance.
 - **Security**:
   - Token-based authentication with JWTs.
   - Role-based access control (RBAC) for miners and clients.
   - Rate limiting to prevent abuse (1000 req/s per service).
+  - Sybil resistance for decentralized data sharing.
 - **Microservices Architecture**:
   - `network_service`: P2P networking with peer pool management.
   - `transaction_service`: Transaction validation, queuing, and indexing.
@@ -34,12 +36,14 @@
   - `alert_service`: Monitors network health and sends notifications.
   - `index_service`: Indexes transactions and blocks for efficient querying.
   - `api_service`: Public-facing API gateway for transaction submission and block queries.
+  - `torrent_service`: Decentralized data distribution for aged blocks and SPV proofs, with sybil resistance and dynamic chunk sizing.
 - **Performance Optimizations**:
   - Asynchronous TCP communication with `bincode` serialization.
   - Batching for transactions, blocks, and UTXOs.
   - Lean message structures with 4GB buffer hints for large blocks.
   - Transaction queuing and SPV proof caching.
   - Scalable UTXO storage with Tiger Beetle DB.
+  - Dynamic chunk sizing for efficient data transfer in torrent-like protocol.
   - Prometheus metrics for performance monitoring.
   - Structured logging with tracing for observability.
   - Sharding for distributed processing.
@@ -114,6 +118,10 @@ cargo run
 cd api_service
 cargo run
 ```
+```bash
+cd torrent_service
+cargo run
+```
 
 ### Tiger Beetle Setup
 For `storage_service`, start a Tiger Beetle server:
@@ -139,6 +147,7 @@ Test services using a TCP client or custom scripts with `bincode` serialization,
 - `index_service`: `localhost:50059`
 - `auth_service`: `localhost:50060`
 - `alert_service`: `localhost:50061`
+- `torrent_service`: `localhost:50062` (or dynamic port in tests)
 
 ### Testnet Integration
 Galaxy is configured to connect to BSV testnet nodes. See `tests/config.toml` for settings:
@@ -148,7 +157,8 @@ Galaxy is configured to connect to BSV testnet nodes. See `tests/config.toml` fo
 - Authentication settings.
 - Alert and indexing configurations.
 - Overlay consensus rules (e.g., `restrict_op_return`).
-- Test cases for all services.
+- Torrent service configurations for sybil resistance and chunk sizing.
+- Test cases for all services, including `torrent_service` with mocked dependencies.
 
 Run the full pipeline test:
 ```bash
@@ -158,13 +168,13 @@ chmod +x run_tests.sh
 ```
 
 ### Metrics
-Monitor performance using the `GetMetrics` endpoint on each service (e.g., `localhost:50057` for `validation_service`):
+Monitor performance using the `GetMetrics` endpoint on each service (e.g., `localhost:50057` for `validation_service`, dynamic port for `torrent_service` in tests):
 ```bash
 # Example TCP client or custom script needed for bincode+tokio communication
 # Use a tool like netcat or a custom Rust client to send GetMetrics requests
 ```
 Metrics include:
-- `*_requests_total`: Total requests per service (e.g., `block_requests_total`).
+- `*_requests_total`: Total requests per service (e.g., `block_requests_total`, `torrent_requests_total`).
 - `*_latency_ms`: Average request latency (ms).
 - `*_alert_count`: Total alerts sent.
 - `*_index_throughput`: Indexed items per second (where applicable).
@@ -180,7 +190,7 @@ Subscribe to alerts using the `alert_service` with a TCP client:
 ### Logging
 View logs with the `tracing` crate at the `INFO` level (configurable in `tests/config.toml` under `[metrics][log_level]`).
 
-See individual service READMEs for detailed test commands.
+See individual service READMEs for detailed test commands, including `torrent_service/README.md` for torrent-specific tests.
 
 ## 🔄 CI/CD
 
@@ -189,7 +199,7 @@ Galaxy uses GitHub Actions for continuous integration and deployment:
 - **Formatting**: Ensures code adheres to `rustfmt` standards.
 - **Linting**: Runs `clippy` for code quality.
 - **Dependency Checks**: Validates dependencies with `cargo outdated`.
-- **Tests**: Runs unit and integration tests, starting dependent services.
+- **Tests**: Runs unit and integration tests, starting dependent services, including `torrent_service` with mocked block, overlay, validation, transaction, auth, alert, storage, and proof services.
 
 Check the [CI workflow](.github/workflows/ci.yml) for details.
 
@@ -202,6 +212,8 @@ Galaxy is optimized for ultra-high performance:
 - **Transaction Queuing**: Handles high transaction volumes efficiently.
 - **SPV Proof Caching**: Optimizes proof generation with LRU cache.
 - **Streaming**: Supports continuous transaction, proof, and mining work processing.
+- **Decentralized Data Distribution**: `torrent_service` enables efficient sharing of aged blocks and SPV proofs with dynamic chunk sizing.
+- **Sybil Resistance**: `torrent_service` implements reputation-based access control to prevent sybil attacks.
 - **Metrics**: Monitors TPS, latency, and errors with Prometheus.
 - **Logging**: Structured logging with `tracing` for observability.
 - **Sharding**: Distributed processing with shard-aware logic.
@@ -226,6 +238,7 @@ Galaxy is optimized for ultra-high performance:
 | `alert_service/`     | Network health monitoring and notifications |
 | `index_service/`     | Transaction and block indexing       |
 | `api_service/`       | Public-facing API gateway for transaction submission and block queries |
+| `torrent_service/`   | Decentralized data distribution for aged blocks and SPV proofs with sybil resistance |
 | `shared/`            | Shared utilities (ShardManager)      |
 | `tests/`             | Test configuration and scripts       |
 | `Cargo.toml`         | Workspace configuration              |
