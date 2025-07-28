@@ -5,6 +5,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::time::{sleep, Duration};
 use tracing::info;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 
 // Mock torrent_service dependencies
 #[cfg(test)]
@@ -735,7 +736,7 @@ async fn test_dynamic_chunk_sizing() {
                         header: BlockHeader::default(),
                     };
                     let resp = torrent_service::proof_server::ProofResponse {
-                        proof: Some(prof),
+                        proof: Some(proof),
                         error: String::new(),
                     };
                     let encoded = serialize(&MockResponseType::ProofResponse(resp)).unwrap();
@@ -769,7 +770,7 @@ async fn test_dynamic_chunk_sizing() {
     let response: torrent_service::service::TorrentResponseType = deserialize(&buffer[..n]).unwrap();
 
     match response {
-        torrent_service::service::TorrentRequestType::GetProof { proof, error } => {
+        torrent_service::service::TorrentResponseType::ProofBundle { proof, error } => {
             assert!(error.is_empty(), "Proof request failed: {}", error);
             assert!(!proof.is_empty(), "Proof is empty");
             info!("Successfully retrieved proof: {:?}", proof);
