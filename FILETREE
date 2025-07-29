@@ -6,7 +6,6 @@ alert_service/
         ├── lib.rs
         ├── main.rs
         └── service.rs
-    ├── build.rs
     ├── Cargo.toml
     └── README.md
 api_service/
@@ -25,7 +24,6 @@ block_service/
         ├── lib.rs
         ├── main.rs
         └── service.rs
-    ├── build.rs
     ├── Cargo.toml
     └── README.md
 consensus_service/
@@ -33,7 +31,6 @@ consensus_service/
         ├── lib.rs
         ├── main.rs
         └── service.rs
-    ├── build.rs
     ├── Cargo.toml
     └── README.md
 index_service/
@@ -41,7 +38,6 @@ index_service/
         ├── lib.rs
         ├── main.rs
         └── service.rs
-    ├── build.rs
     ├── Cargo.toml
     └── README.md
 mining_service/
@@ -49,7 +45,6 @@ mining_service/
         ├── lib.rs
         ├── main.rs
         └── service.rs
-    ├── build.rs
     ├── Cargo.toml
     └── README.md
 network_service/
@@ -57,7 +52,6 @@ network_service/
         ├── lib.rs
         ├── main.rs
         └── service.rs
-    ├── build.rs
     ├── Cargo.toml
     └── README.md
 overlay_service/
@@ -65,7 +59,6 @@ overlay_service/
         ├── lib.rs
         ├── main.rs
         └── service.rs
-    ├── build.rs
     ├── Cargo.toml
     └── README.md
 shared/
@@ -78,7 +71,6 @@ storage_service/
         ├── lib.rs
         ├── main.rs
         └── service.rs
-    ├── build.rs
     ├── Cargo.toml
     └── README.md
 tests/
@@ -107,7 +99,6 @@ transaction_service/
         ├── lib.rs
         ├── main.rs
         └── service.rs
-    ├── build.rs
     ├── Cargo.toml
     └── README.md
 validation_service/
@@ -115,7 +106,6 @@ validation_service/
         ├── lib.rs
         ├── main.rs
         └── service.rs
-    ├── build.rs
     ├── Cargo.toml
     └── README.md
 .gitignore

@@ -5,7 +5,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing::{info, warn, error};
 use std::collections::HashMap;
 use std::num::NonZeroU32;
-use std::.sync::Arc;
+use std::sync::Arc;
 use tokio::sync::Mutex;
 use toml;
 use prometheus::{Counter, Gauge, Registry};
