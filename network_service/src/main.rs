@@ -4,10 +4,10 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing::{info, warn, error};
 use async_channel::{Sender, Receiver, unbounded};
-use sv::messages::{Inv, InvVect, Hashable};
+use sv::messages::{Inv, InvVect};
 use sv::network::Network;
 use hex::encode;
-use governor::{Quota, RateLimiter};
+use governor::{Quota, RateLimiter, state::InMemoryState, clock::DefaultClock, state::NotKeyed};
 use prometheus::{IntCounter, Gauge, Registry};
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -155,6 +155,7 @@ struct BlockResponse {
     error: String,
 }
 
+#[derive(Clone)]
 struct NetworkService {
     transaction_service_addr: String,
     block_service_addr: String,
@@ -166,7 +167,7 @@ struct NetworkService {
     latency_ms: Gauge,
     alert_count: IntCounter,
     errors_total: IntCounter,
-    rate_limiter: Arc<RateLimiter>,
+    rate_limiter: Arc<RateLimiter<NotKeyed, InMemoryState, DefaultClock>>,
     shard_manager: Arc<ShardManager>,
 }
 
@@ -213,16 +214,16 @@ impl NetworkService {
 
     async fn authenticate(&self, token: &str) -> Result<String, String> {
         let mut stream = TcpStream::connect(&self.auth_service_addr).await
-            .map_err(|e| format("Failed to connect to auth_service: {}", e))?;
+            .map_err(|e| format!("Failed to connect to auth_service: {}", e))?;
         let request = AuthRequest { token: token.to_string() };
-        let encoded = serialize(&request).map_err(|e| format("Serialization error: {}", e))?;
-        stream.write_all(&encoded).await.map_err(|e| format("Write error: {}", e))?;
-        stream.flush().await.map_err(|e| format("Flush error: {}", e))?;
+        let encoded = serialize(&request).map_err(|e| format!("Serialization error: {}", e))?;
+        stream.write_all(&encoded).await.map_err(|e| format!("Write error: {}", e))?;
+        stream.flush().await.map_err(|e| format!("Flush error: {}", e))?;
 
         let mut buffer = vec![0u8; 1024 * 1024];
-        let n = stream.read(&mut buffer).await.map_err(|e| format("Read error: {}", e))?;
+        let n = stream.read(&mut buffer).await.map_err(|e| format!("Read error: {}", e))?;
         let response: AuthResponse = deserialize(&buffer[..n])
-            .map_err(|e| format("Deserialization error: {}", e))?;
+            .map_err(|e| format!("Deserialization error: {}", e))?;
         
         if response.success {
             Ok(response.user_id)
@@ -233,20 +234,20 @@ impl NetworkService {
 
     async fn authorize(&self, user_id: &str, method: &str) -> Result<(), String> {
         let mut stream = TcpStream::connect(&self.auth_service_addr).await
-            .map_err(|e| format("Failed to connect to auth_service: {}", e))?;
+            .map_err(|e| format!("Failed to connect to auth_service: {}", e))?;
         let request = AuthorizeRequest {
             user_id: user_id.to_string(),
             service: "network_service".to_string(),
             method: method.to_string(),
         };
-        let encoded = serialize(&request).map_err(|e| format("Serialization error: {}", e))?;
-        stream.write_all(&encoded).await.map_err(|e| format("Write error: {}", e))?;
-        stream.flush().await.map_err(|e| format("Flush error: {}", e))?;
+        let encoded = serialize(&request).map_err(|e| format!("Serialization error: {}", e))?;
+        stream.write_all(&encoded).await.map_err(|e| format!("Write error: {}", e))?;
+        stream.flush().await.map_err(|e| format!("Flush error: {}", e))?;
 
         let mut buffer = vec![0u8; 1024 * 1024];
-        let n = stream.read(&mut buffer).await.map_err(|e| format("Read error: {}", e))?;
+        let n = stream.read(&mut buffer).await.map_err(|e| format!("Read error: {}", e))?;
         let response: AuthorizeResponse = deserialize(&buffer[..n])
-            .map_err(|e| format("Deserialization error: {}", e))?;
+            .map_err(|e| format!("Deserialization error: {}", e))?;
         
         if response.allowed {
             Ok(())
@@ -257,20 +258,20 @@ impl NetworkService {
 
     async fn send_alert(&self, event_type: &str, message: &str, severity: u32) -> Result<(), String> {
         let mut stream = TcpStream::connect(&self.alert_service_addr).await
-            .map_err(|e| format("Failed to connect to alert_service: {}", e))?;
+            .map_err(|e| format!("Failed to connect to alert_service: {}", e))?;
         let request = AlertRequest {
             event_type: event_type.to_string(),
             message: message.to_string(),
             severity,
         };
-        let encoded = serialize(&request).map_err(|e| format("Serialization error: {}", e))?;
-        stream.write_all(&encoded).await.map_err(|e| format("Write error: {}", e))?;
-        stream.flush().await.map_err(|e| format("Flush error: {}", e))?;
+        let encoded = serialize(&request).map_err(|e| format!("Serialization error: {}", e))?;
+        stream.write_all(&encoded).await.map_err(|e| format!("Write error: {}", e))?;
+        stream.flush().await.map_err(|e| format!("Flush error: {}", e))?;
 
         let mut buffer = vec![0u8; 1024 * 1024];
-        let n = stream.read(&mut buffer).await.map_err(|e| format("Read error: {}", e))?;
+        let n = stream.read(&mut buffer).await.map_err(|e| format!("Read error: {}", e))?;
         let response: AlertResponse = deserialize(&buffer[..n])
-            .map_err(|e| format("Deserialization error: {}", e))?;
+            .map_err(|e| format!("Deserialization error: {}", e))?;
         
         if response.success {
             self.alert_count.inc();
@@ -289,7 +290,7 @@ impl NetworkService {
             let user_id = self.authenticate(&ping_request.token).await?;
             self.authorize(&user_id, "Ping").await?;
             self.rate_limiter.until_ready().await;
-            let response = format("Pong: {}", ping_request.message);
+            let response = format!("Pong: {}", ping_request.message);
             self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
             Ok(NetworkResponse {
                 ping: Some(PingResponse { response, error: "".to_string() }),
@@ -319,30 +320,30 @@ impl NetworkService {
             
             let tx_bytes = hex::decode(&broadcast_transaction.tx_hex).map_err(|e| {
                 warn!("Invalid transaction hex: {}", e);
-                let _ = self.send_alert("broadcast_invalid_tx", &format("Invalid transaction hex: {}", e), 2);
-                format("Invalid transaction hex: {}", e)
+                let _ = self.send_alert("broadcast_invalid_tx", &format!("Invalid transaction hex: {}", e), 2);
+                format!("Invalid transaction hex: {}", e)
             })?;
-            let tx: Transaction = sv_deserialize(&tx_bytes).map_err(|e| {
+            let tx: Transaction = deserialize(&tx_bytes).map_err(|e| {
                 warn!("Invalid transaction: {}", e);
-                let _ = self.send_alert("broadcast_invalid_tx_deserialization", &format("Invalid transaction: {}", e), 2);
-                format("Invalid transaction: {}", e)
+                let _ = self.send_alert("broadcast_invalid_tx_deserialization", &format!("Invalid transaction: {}", e), 2);
+                format!("Invalid transaction: {}", e)
             })?;
 
             let mut stream = TcpStream::connect(&self.transaction_service_addr).await
-                .map_err(|e| format("Failed to connect to transaction_service: {}", e))?;
+                .map_err(|e| format!("Failed to connect to transaction_service: {}", e))?;
             let tx_request = TransactionRequest { tx_hex: broadcast_transaction.tx_hex.clone() };
-            let encoded = serialize(&tx_request).map_err(|e| format("Serialization error: {}", e))?;
-            stream.write_all(&encoded).await.map_err(|e| format("Write error: {}", e))?;
-            stream.flush().await.map_err(|e| format("Flush error: {}", e))?;
+            let encoded = serialize(&tx_request).map_err(|e| format!("Serialization error: {}", e))?;
+            stream.write_all(&encoded).await.map_err(|e| format!("Write error: {}", e))?;
+            stream.flush().await.map_err(|e| format!("Flush error: {}", e))?;
 
             let mut buffer = vec![0u8; 1024 * 1024];
-            let n = stream.read(&mut buffer).await.map_err(|e| format("Read error: {}", e))?;
+            let n = stream.read(&mut buffer).await.map_err(|e| format!("Read error: {}", e))?;
             let tx_response: TransactionResponse = deserialize(&buffer[..n])
-                .map_err(|e| format("Deserialization error: {}", e))?;
+                .map_err(|e| format!("Deserialization error: {}", e))?;
 
             if !tx_response.success {
                 warn!("Transaction processing failed: {}", tx_response.error);
-                let _ = self.send_alert("broadcast_tx_failed", &format("Transaction processing failed: {}", tx_response.error), 2);
+                let _ = self.send_alert("broadcast_tx_failed", &format!("Transaction processing failed: {}", tx_response.error), 2);
                 return Err(tx_response.error);
             }
 
@@ -361,25 +362,25 @@ impl NetworkService {
             
             let block_bytes = hex::decode(&broadcast_block.block_hex).map_err(|e| {
                 warn!("Invalid block hex: {}", e);
-                let _ = self.send_alert("broadcast_invalid_block", &format("Invalid block hex: {}", e), 2);
-                format("Invalid block hex: {}", e)
+                let _ = self.send_alert("broadcast_invalid_block", &format!("Invalid block hex: {}", e), 2);
+                format!("Invalid block hex: {}", e)
             })?;
 
             let mut stream = TcpStream::connect(&self.block_service_addr).await
-                .map_err(|e| format("Failed to connect to block_service: {}", e))?;
+                .map_err(|e| format!("Failed to connect to block_service: {}", e))?;
             let block_request = BlockRequest { block_hex: broadcast_block.block_hex.clone() };
-            let encoded = serialize(&block_request).map_err(|e| format("Serialization error: {}", e))?;
-            stream.write_all(&encoded).await.map_err(|e| format("Write error: {}", e))?;
-            stream.flush().await.map_err(|e| format("Flush error: {}", e))?;
+            let encoded = serialize(&block_request).map_err(|e| format!("Serialization error: {}", e))?;
+            stream.write_all(&encoded).await.map_err(|e| format!("Write error: {}", e))?;
+            stream.flush().await.map_err(|e| format!("Flush error: {}", e))?;
 
             let mut buffer = vec![0u8; 1024 * 1024];
-            let n = stream.read(&mut buffer).await.map_err(|e| format("Read error: {}", e))?;
+            let n = stream.read(&mut buffer).await.map_err(|e| format!("Read error: {}", e))?;
             let block_response: BlockResponse = deserialize(&buffer[..n])
-                .map_err(|e| format("Deserialization error: {}", e))?;
+                .map_err(|e| format!("Deserialization error: {}", e))?;
 
             if !block_response.success {
                 warn!("Block validation failed: {}", block_response.error);
-                let _ = self.send_alert("broadcast_block_failed", &format("Block validation failed: {}", block_response.error), 2);
+                let _ = self.send_alert("broadcast_block_failed", &format!("Block validation failed: {}", block_response.error), 2);
                 return Err(block_response.error);
             }
 
@@ -422,7 +423,7 @@ impl NetworkService {
         loop {
             match listener.accept().await {
                 Ok((mut stream, addr)) => {
-                    let service = self;
+                    let service = self.clone();
                     tokio::spawn(async move {
                         let mut buffer = vec![0u8; 1024 * 1024];
                         match stream.read(&mut buffer).await {
