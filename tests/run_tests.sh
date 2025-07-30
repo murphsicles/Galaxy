@@ -13,6 +13,7 @@ cd ../overlay_service && cargo run &
 cd ../validation_service && cargo run &
 cd ../mining_service && cargo run &
 cd ../torrent_service && cargo run &
+cd ../merchant_service && cargo run &
 
 # Wait for services to start
 sleep 5
@@ -52,6 +53,16 @@ grpcurl -plaintext -d '{"miner_id": "miner1"}' localhost:50058 mining.Mining/Get
 # Run torrent_service test
 echo "Running torrent_service unit tests..."
 cargo test --test torrent_service -- --nocapture
+
+# Test merchant_service (REST, use curl)
+echo "Testing merchant_service: Health"
+curl http://localhost:50063/v1/health
+
+echo "Testing merchant_service: Policy"
+curl http://localhost:50063/v1/policy
+
+echo "Testing merchant_service: Submit Tx"
+curl -X POST http://localhost:50063/v1/tx -H "Authorization: Bearer test_token" -H "Content-Type: application/json" -d '{"raw_tx": "01000000010000000000000000000000000000000000000000000000000000000000000000ffffffff0100ffffffff0100ffffffff"}'
 
 # Clean up
 pkill -f tigerbeetle

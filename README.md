@@ -37,6 +37,7 @@
   - `index_service`: Indexes transactions and blocks for efficient querying.
   - `api_service`: Public-facing API gateway for transaction submission and block queries.
   - `torrent_service`: Decentralized data distribution for aged blocks and SPV proofs, with sybil resistance and dynamic chunk sizing.
+  - `merchant_service`: Merchant API for transaction submission, broadcasting, status tracking, and callbacks with REST endpoints.
 - **Performance Optimizations**:
   - Asynchronous TCP communication with `bincode` serialization.
   - Batching for transactions, blocks, and UTXOs.
@@ -122,6 +123,10 @@ cargo run
 cd torrent_service
 cargo run
 ```
+```bash
+cd merchant_service
+cargo run
+```
 
 ### Tiger Beetle Setup
 For `storage_service`, start a Tiger Beetle server:
@@ -147,7 +152,8 @@ Test services using a TCP client or custom scripts with `bincode` serialization,
 - `index_service`: `localhost:50059`
 - `auth_service`: `localhost:50060`
 - `alert_service`: `localhost:50061`
-- `torrent_service`: `localhost:50062` (or dynamic port in tests)
+- `torrent_service`: `localhost:50062`
+- `merchant_service`: `localhost:50063`
 
 ### Testnet Integration
 Galaxy is configured to connect to BSV testnet nodes. See `tests/config.toml` for settings:
@@ -221,6 +227,7 @@ Galaxy is optimized for ultra-high performance:
 - **Rate Limiting**: Prevents endpoint abuse with 1000 req/s limit.
 - **Alerting**: Real-time notifications for network health.
 - **Indexing**: Efficient querying for transactions and blocks.
+- **Merchant API**: RESTful endpoints for high-volume tx processing with async delegation to other services.
 
 ## 📚 Project Structure
 
@@ -239,6 +246,7 @@ Galaxy is optimized for ultra-high performance:
 | `index_service/`     | Transaction and block indexing       |
 | `api_service/`       | Public-facing API gateway for transaction submission and block queries |
 | `torrent_service/`   | Decentralized data distribution for aged blocks and SPV proofs with sybil resistance |
+| `merchant_service/`  | Merchant API for tx submission, status, and proofs |
 | `shared/`            | Shared utilities (ShardManager)      |
 | `tests/`             | Test configuration and scripts       |
 | `Cargo.toml`         | Workspace configuration              |
