@@ -19,6 +19,7 @@ members = [
     "index_service",
     "api_service",
     "torrent_service",
+    "merchant_service",
 ]
 resolver = "2"
 
