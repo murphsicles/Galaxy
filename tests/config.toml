@@ -1,6 +1,6 @@
 # Configuration for Galaxy node testing
-# Version: 0.0.2-alpha
-# Updated: 2025-07-02
+# Version: 0.1.0
+# Updated: 2025-07-30
 
 [sharding]
 shard_id = 0  # Default shard ID for single-node testing
