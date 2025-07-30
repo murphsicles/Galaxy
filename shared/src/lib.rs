@@ -22,7 +22,7 @@ impl ShardManager {
         let config: toml::Value = toml::from_str(config_str).expect("Failed to parse config");
         let shard_id = config["sharding"]["shard_id"].as_integer().unwrap_or(0) as u32;
         let shard_count = config["sharding"]["shard_count"].as_integer().unwrap_or(1) as u32;
-        let node_map = config["sharding"]["nodes"]
+        let node_map = config["testnet"]["nodes"]
             .as_array()
             .unwrap()
             .iter()
