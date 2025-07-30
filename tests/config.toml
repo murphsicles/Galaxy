@@ -26,3 +26,11 @@ enable_prometheus = true  # Enable Prometheus metrics endpoint
 prometheus_port = 9090  # Port for Prometheus metrics scraping
 alert_threshold = 5  # Maximum severity level for alerts
 log_level = "info"  # Tracing log level (debug, info, warn, error)
+
+# Merchant confuguration
+[merchant]
+port = 50063
+callback_retries = 5
+rate_limit = 10000  # req/s, higher for merchant volume
+log_level = "info"
+auth_token_rotation_interval_secs = 3600  # Align with torrent_service
