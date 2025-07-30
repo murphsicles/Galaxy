@@ -40,6 +40,13 @@ index_service/
         └── service.rs
     ├── Cargo.toml
     └── README.md
+merchant_service/
+    ├── src/
+        ├── lib.rs
+        ├── main.rs
+        └── service.rs
+    ├── Cargo.toml
+    └── README.md
 mining_service/
     ├── src/
         ├── lib.rs
@@ -109,6 +116,7 @@ validation_service/
     ├── Cargo.toml
     └── README.md
 .gitignore
+Cargo.lock
 Cargo.toml
 FILETREE
 LICENSE
