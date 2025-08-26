@@ -9,6 +9,7 @@ use axum::{
 use bincode::{deserialize, serialize};
 use bitcoin_hashes::{sha256d, Hash};
 use dashmap::DashMap;
+use dotenv::dotenv;
 use governor::{Quota, RateLimiter};
 use hex;
 use jsonwebtoken::{decode, DecodingKey, Validation};
@@ -18,6 +19,7 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use shared::ShardManager;
 use sled::Db;
+use std::env;
 use std::num::NonZeroU32;
 use std::sync::Arc;
 use sv::merkle::MerklePath;
@@ -52,18 +54,7 @@ pub enum TxStatus {
 // Shared cache: txid -> (status, callback_url, extra_info like block_hash)
 type Cache = Arc<DashMap<[u8; 32], (TxStatus, Option<String>, Option<String>)>>;
 
-// Ports from README/config
-const AUTH_PORT: u16 = 50060;
-const TX_PORT: u16 = 50052;
-const NETWORK_PORT: u16 = 50051;
-const INDEX_PORT: u16 = 50059;
-const BLOCK_PORT: u16 = 50054;
-const VALIDATION_PORT: u16 = 50057;
-const CONSENSUS_PORT: u16 = 50055;
-const ALERT_PORT: u16 = 50061;
-const STORAGE_PORT: u16 = 50053;
-
-// JWT secret (align with auth_service, placeholder)
+// Environment variables for addresses
 lazy_static! {
     static ref JWT_SECRET: String = "secret_key".to_string();  // From torrent_service example
     static ref DECODING_KEY: DecodingKey = DecodingKey::from_secret(JWT_SECRET.as_bytes());
@@ -252,10 +243,19 @@ pub struct MerchantService {
     alert_service_addr: String,
     client: Client,
     auth_token: Arc<Mutex<String>>,
+    consensus_service_addr: String,
+    transaction_service_addr: String,
+    network_service_addr: String,
+    index_service_addr: String,
+    block_service_addr: String,
+    validation_service_addr: String,
+    storage_service_addr: String,
 }
 
 impl MerchantService {
     pub async fn new() -> Self {
+        dotenv().ok();
+
         let config_str = include_str!("../../tests/config.toml");
         let config: toml::Value = toml::from_str(config_str).expect("Failed to parse config");
 
@@ -275,7 +275,7 @@ impl MerchantService {
         let db = Arc::new(Mutex::new(sled::open("merchant_db").unwrap()));
 
         let auth_token = Arc::new(Mutex::new("initial_token".to_string()));
-        let auth_service_addr = "127.0.0.1:50060".to_string();
+        let auth_service_addr = env::var("AUTH_ADDR").unwrap_or("127.0.0.1:50060".to_string());
         let clone_auth_addr = auth_service_addr.clone();
         let clone_token = auth_token.clone();
         tokio::spawn(async move {
@@ -303,9 +303,16 @@ impl MerchantService {
             rate_limiter,
             shard_manager: Arc::new(ShardManager::new()),
             auth_service_addr,
-            alert_service_addr: "127.0.0.1:50061".to_string(),
+            alert_service_addr: env::var("ALERT_ADDR").unwrap_or("127.0.0.1:50061".to_string()),
             client: Client::new(),
             auth_token,
+            consensus_service_addr: env::var("CONSENSUS_ADDR").unwrap_or("127.0.0.1:50055".to_string()),
+            transaction_service_addr: env::var("TRANSACTION_ADDR").unwrap_or("127.0.0.1:50052".to_string()),
+            network_service_addr: env::var("NETWORK_ADDR").unwrap_or("127.0.0.1:50051".to_string()),
+            index_service_addr: env::var("INDEX_ADDR").unwrap_or("127.0.0.1:50059".to_string()),
+            block_service_addr: env::var("BLOCK_ADDR").unwrap_or("127.0.0.1:50054".to_string()),
+            validation_service_addr: env::var("VALIDATION_ADDR").unwrap_or("127.0.0.1:50057".to_string()),
+            storage_service_addr: env::var("STORAGE_ADDR").unwrap_or("127.0.0.1:50053".to_string()),
         }
     }
 
@@ -435,8 +442,7 @@ impl MerchantService {
 
     // GET /v1/policy
     async fn get_policy(State(cache): State<Cache>) -> impl IntoResponse {
-        // Delegate to consensus
-        let mut stream = match TcpStream::connect(format!("127.0.0.1:{}", CONSENSUS_PORT)).await {
+        let mut stream = match TcpStream::connect(env::var("CONSENSUS_ADDR").unwrap_or("127.0.0.1:50055".to_string())).await {
             Ok(s) => s,
             Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
         };
@@ -477,12 +483,14 @@ impl MerchantService {
         let txid_str = hex::encode(txid_array);
         let callback_url = headers.get("X-CallbackUrl").and_then(|v| v.to_str().ok()).map(String::from);
 
+        let token = "merchant_token".to_string(); // Use self.auth_token.lock().await.clone() in full impl
+
         // Validate via transaction_service
-        let mut stream = match TcpStream::connect(format!("127.0.0.1:{}", TX_PORT)).await {
+        let mut stream = match TcpStream::connect(env::var("TRANSACTION_ADDR").unwrap_or("127.0.0.1:50052".to_string())).await {
             Ok(s) => s,
             Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
         };
-        let req = TxRequestType::ValidateTransaction { tx_hex: body.raw_tx.clone(), token: "merchant_token".to_string() };  // Use refreshed token
+        let req = TxRequestType::ValidateTransaction { tx_hex: body.raw_tx.clone(), token: token.clone() };
         let encoded = match serialize(&req) {
             Ok(e) => e,
             Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
@@ -504,11 +512,11 @@ impl MerchantService {
         }
 
         // Process/queue via transaction_service
-        let mut stream = match TcpStream::connect(format!("127.0.0.1:{}", TX_PORT)).await {
+        let mut stream = match TcpStream::connect(env::var("TRANSACTION_ADDR").unwrap_or("127.0.0.1:50052".to_string())).await {
             Ok(s) => s,
             Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
         };
-        let req = TxRequestType::ProcessTransaction { tx_hex: body.raw_tx.clone(), token: "merchant_token".to_string() };
+        let req = TxRequestType::ProcessTransaction { tx_hex: body.raw_tx.clone(), token: token.clone() };
         let encoded = match serialize(&req) {
             Ok(e) => e,
             Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
@@ -530,11 +538,11 @@ impl MerchantService {
         }
 
         // Broadcast via network_service
-        let mut stream = match TcpStream::connect(format!("127.0.0.1:{}", NETWORK_PORT)).await {
+        let mut stream = match TcpStream::connect(env::var("NETWORK_ADDR").unwrap_or("127.0.0.1:50051".to_string())).await {
             Ok(s) => s,
             Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
         };
-        let req = BroadcastTxRequest { tx_hex: body.raw_tx, token: "merchant_token".to_string() };
+        let req = BroadcastTxRequest { tx_hex: body.raw_tx, token: token.clone() };
         let encoded = match serialize(&req) {
             Ok(e) => e,
             Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
@@ -593,12 +601,14 @@ impl MerchantService {
             return Json(TxResponse { txid: txid_str, status: status.clone(), extra_info: extra.clone() }).into_response();
         }
 
+        let token = "merchant_token".to_string(); // Use self.auth_token
+
         // Query index_service
-        let mut stream = match TcpStream::connect(format!("127.0.0.1:{}", INDEX_PORT)).await {
+        let mut stream = match TcpStream::connect(env::var("INDEX_ADDR").unwrap_or("127.0.0.1:50059".to_string())).await {
             Ok(s) => s,
             Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
         };
-        let req = GetTxStatusRequest { txid: txid_str.clone(), token: "merchant_token".to_string() };
+        let req = GetTxStatusRequest { txid: txid_str.clone(), token: token.clone() };
         let encoded = match serialize(&req) {
             Ok(e) => e,
             Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
@@ -633,14 +643,15 @@ impl MerchantService {
     // Background block monitor (poll for new blocks, update statuses)
     pub async fn start_block_monitor(cache: Cache) {
         loop {
-            let mut stream = match TcpStream::connect(format!("127.0.0.1:{}", BLOCK_PORT)).await {
+            let token = "merchant_token".to_string(); // Use self.auth_token
+            let mut stream = match TcpStream::connect(env::var("BLOCK_ADDR").unwrap_or("127.0.0.1:50054".to_string())).await {
                 Ok(s) => s,
                 Err(_) => {
                     sleep(Duration::from_secs(10)).await;
                     continue;
                 }
             };
-            let req = GetRecentBlocksRequest { token: "merchant_token".to_string() };
+            let req = GetRecentBlocksRequest { token };
             let encoded = match serialize(&req) {
                 Ok(e) => e,
                 Err(_) => {
@@ -687,8 +698,9 @@ impl MerchantService {
                         if matches!(entry.0, TxStatus::SeenOnNetwork | TxStatus::SentToNetwork) {
                             *entry = (TxStatus::Mined, entry.1.clone(), Some(block.header.hash().to_string()));
                             // Generate proof via validation
-                            let proof = ProofBundle { tx: tx.clone(), path: MerklePath::new(&block), header: block.header };
-                            let mut v_stream = match TcpStream::connect(format!("127.0.0.1:{}", VALIDATION_PORT)).await {
+                            let path = MerklePath::new(&block);
+                            let proof = ProofBundle { tx: tx.clone(), path, header: block.header };
+                            let mut v_stream = match TcpStream::connect(env::var("VALIDATION_ADDR").unwrap_or("127.0.0.1:50057".to_string())).await {
                                 Ok(s) => s,
                                 Err(_) => continue,
                             };
