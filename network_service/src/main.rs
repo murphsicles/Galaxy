@@ -4,7 +4,6 @@ use std::io::Cursor;
 use std::num::NonZeroU32;
 use std::sync::Arc;
 
-use async_channel::{Receiver, Sender, unbounded};
 use bincode::{deserialize, serialize};
 use dotenv::dotenv;
 use governor::{Quota, RateLimiter};
@@ -338,11 +337,11 @@ impl NetworkService {
             severity,
         };
         let encoded = serialize(&request).map_err(|e| format!("Serialization error: {}", e))?;
-        stream.write_all(&encoded).await.map_err(|e| format!("Write error: {}", e))?;
-        stream.flush().await.map_err(|e| format!("Flush error: {}", e))?;
+        stream.write_all(&encoded).await map_err(|e| format!("Write error: {}", e))?;
+        stream.flush().await map_err(|e| format!("Flush error: {}", e))?;
 
         let mut buffer = vec![0u8; 1024 * 1024];
-        let n = stream.read(&mut buffer).await.map_err(|e| format!("Read error: {}", e))?;
+        let n = stream.read(&mut buffer).await map_err(|e| format!("Read error: {}", e))?;
         let response: AlertResponse = deserialize(&buffer[..n])
             .map_err(|e| format!("Deserialization error: {}", e))?;
         
@@ -406,11 +405,11 @@ impl NetworkService {
                 .map_err(|e| format!("Failed to connect to transaction_service: {}", e))?;
             let tx_request = TransactionRequest { tx_hex: broadcast_transaction.tx_hex.clone() };
             let encoded = serialize(&tx_request).map_err(|e| format!("Serialization error: {}", e))?;
-            stream.write_all(&encoded).await.map_err(|e| format!("Write error: {}", e))?;
-            stream.flush().await.map_err(|e| format!("Flush error: {}", e))?;
+            stream.write_all(&encoded).await map_err(|e| format!("Write error: {}", e))?;
+            stream.flush().await map_err(|e| format!("Flush error: {}", e))?;
 
             let mut buffer = vec![0u8; 1024 * 1024];
-            let n = stream.read(&mut buffer).await.map_err(|e| format!("Read error: {}", e))?;
+            let n = stream.read(&mut buffer).await map_err(|e| format!("Read error: {}", e))?;
             let tx_response: TransactionResponse = deserialize(&buffer[..n])
                 .map_err(|e| format!("Deserialization error: {}", e))?;
 
@@ -453,11 +452,11 @@ impl NetworkService {
                 .map_err(|e| format!("Failed to connect to block_service: {}", e))?;
             let block_request = BlockRequest { block_hex: broadcast_block.block_hex.clone() };
             let encoded = serialize(&block_request).map_err(|e| format!("Serialization error: {}", e))?;
-            stream.write_all(&encoded).await.map_err(|e| format!("Write error: {}", e))?;
-            stream.flush().await.map_err(|e| format!("Flush error: {}", e))?;
+            stream.write_all(&encoded).await map_err(|e| format!("Write error: {}", e))?;
+            stream.flush().await map_err(|e| format!("Flush error: {}", e))?;
 
             let mut buffer = vec![0u8; 1024 * 1024];
-            let n = stream.read(&mut buffer).await.map_err(|e| format!("Read error: {}", e))?;
+            let n = stream.read(&mut buffer).await map_err(|e| format!("Read error: {}", e))?;
             let block_response: BlockResponse = deserialize(&buffer[..n])
                 .map_err(|e| format!("Deserialization error: {}", e))?;
 
