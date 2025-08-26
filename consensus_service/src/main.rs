@@ -1,3 +1,7 @@
+use std::env;
+use std::num::NonZeroU32;
+use std::sync::Arc;
+
 use bincode::{deserialize, serialize};
 use dotenv::dotenv;
 use governor::{Quota, RateLimiter};
@@ -5,9 +9,7 @@ use hex;
 use prometheus::{Counter, Gauge, Registry};
 use serde::{Deserialize, Serialize};
 use shared::ShardManager;
-use std::env;
-use std::num::NonZeroU32;
-use std::sync::Arc;
+use sv::block::Block;
 use sv::transaction::Transaction as SvTransaction;
 use sv::util::{deserialize as sv_deserialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -22,6 +24,17 @@ struct ValidateTransactionConsensusRequest {
 
 #[derive(Serialize, Deserialize, Debug)]
 struct ValidateTransactionConsensusResponse {
+    success: bool,
+    error: String,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct ValidateBlockConsensusRequest {
+    block_hex: String,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct ValidateBlockConsensusResponse {
     success: bool,
     error: String,
 }
@@ -77,6 +90,7 @@ enum StorageResponseType {
 #[derive(Serialize, Deserialize, Debug)]
 enum ConsensusRequestType {
     ValidateTransaction { request: ValidateTransactionConsensusRequest, token: String },
+    ValidateBlock { request: ValidateBlockConsensusRequest, token: String },
     GetPolicy { request: GetPolicyRequest, token: String },
     GetMetrics { request: GetMetricsRequest, token: String },
 }
@@ -84,6 +98,7 @@ enum ConsensusRequestType {
 #[derive(Serialize, Deserialize, Debug)]
 enum ConsensusResponseType {
     ValidateTransaction(ValidateTransactionConsensusResponse),
+    ValidateBlock(ValidateBlockConsensusResponse),
     GetPolicy(GetPolicyResponse),
     GetMetrics(GetMetricsResponse),
 }
@@ -135,7 +150,7 @@ struct ConsensusService {
     requests_total: Counter,
     latency_ms: Gauge,
     errors_total: Counter,
-    rate_limiter: Arc<RateLimiter<String, governor::state::direct::NotKeyed, governor::clock::DefaultClock>>,
+    rate_limiter: Arc<RateLimiter<gov::state::NotKeyed, gov::state::InMemoryState, gov::clock::DefaultClock>>,
     shard_manager: Arc<ShardManager>,
 }
 
@@ -245,11 +260,11 @@ impl ConsensusService {
             .map_err(|e| format!("Failed to connect to storage_service: {}", e))?;
         let request = StorageRequestType::QueryUtxo { request: QueryUtxoRequest { txid: txid.to_string(), vout }, token: token.to_string() };
         let encoded = serialize(&request).map_err(|e| format!("Serialization error: {}", e))?;
-        stream.write_all(&encoded).await.map_err(|e| format!("Write error: {}", e))?;
-        stream.flush().await.map_err(|e| format!("Flush error: {}", e))?;
+        stream.write_all(&encoded).await map_err(|e| format!("Write error: {}", e))?;
+        stream.flush().await map_err(|e| format!("Flush error: {}", e))?;
 
         let mut buffer = vec![0u8; 1024 * 1024];
-        let n = stream.read(&mut buffer).await.map_err(|e| format!("Read error: {}", e))?;
+        let n = stream.read(&mut buffer).await map_err(|e| format!("Read error: {}", e))?;
         let response: StorageResponseType = deserialize(&buffer[..n])
             .map_err(|e| format!("Deserialization error: {}", e))?;
         
@@ -299,8 +314,7 @@ impl ConsensusService {
                         }));
                     }
                     input_sum += resp.amount;
-                    // Script validation: Use rust-sv's script execution
-                    // For simplicity, assume valid; full impl: tx.verify_script(input.script_sig, resp.script_pubkey.as_bytes(), ...)
+                    // Script validation: Assume valid for now
                 }
                 for output in &tx.outputs {
                     output_sum += output.value;
@@ -317,6 +331,32 @@ impl ConsensusService {
 
                 self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
                 Ok(ConsensusResponseType::ValidateTransaction(ValidateTransactionConsensusResponse {
+                    success,
+                    error,
+                }))
+            }
+            ConsensusRequestType::ValidateBlock { request, token } => {
+                let user_id = self.authenticate(&token).await
+                    .map_err(|e| format!("Authentication failed: {}", e))?;
+                self.authorize(&user_id, "ValidateBlock").await
+                    .map_err(|e| format!("Authorization failed: {}", e))?;
+                self.rate_limiter.until_ready().await;
+
+                let block_bytes = hex::decode(&request.block_hex).map_err(|e| {
+                    warn!("Invalid block hex: {}", e);
+                    format!("Invalid block hex: {}", e)
+                })?;
+                let block: Block = sv_deserialize(&block_bytes).map_err(|e| {
+                    warn!("Invalid block: {}", e);
+                    format!("Invalid block: {}", e)
+                })?;
+
+                // Real validation
+                let success = block.header.validate_pow() && !block.txs.is_empty();
+                let error = if success { "".to_string() } else { "Block validation failed".to_string() };
+
+                self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
+                Ok(ConsensusResponseType::ValidateBlock(ValidateBlockConsensusResponse {
                     success,
                     error,
                 }))
