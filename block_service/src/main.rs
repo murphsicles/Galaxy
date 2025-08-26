@@ -1,19 +1,22 @@
-// block_service/src/main.rs
 use bincode::{deserialize, serialize};
-use serde::{Deserialize, Serialize};
-use tokio::net::{TcpListener, TcpStream};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tracing::{info, warn, error};
-use sv::block::Block;
-use sv::util::{deserialize as sv_deserialize};
+use chrono::{Duration, Utc};
+use dotenv::dotenv;
+use governor::{Quota, RateLimiter};
+use governor::clock::DefaultClock;
+use governor::state::direct::NotKeyed;
+use hex;
 use prometheus::{Counter, Gauge, Registry};
+use serde::{Deserialize, Serialize};
+use shared::{AgedThreshold, ShardManager};
+use std::env;
 use std::num::NonZeroU32;
 use std::sync::Arc;
+use sv::block::Block;
+use sv::util::{deserialize as sv_deserialize};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream};
 use toml;
-use governor::{Quota, RateLimiter};
-use shared::{ShardManager, AgedThreshold};
-use chrono::{Duration, Utc};
-use hex;
+use tracing::{error, info, warn};
 
 #[derive(Serialize, Deserialize, Debug)]
 struct AuthRequest {
@@ -114,7 +117,7 @@ struct BlockService {
     latency_ms: Gauge,
     alert_count: Counter,
     errors_total: Counter,
-    rate_limiter: Arc<RateLimiter<String, governor::state::direct::NotKeyed, governor::clock::DefaultClock>>,
+    rate_limiter: Arc<RateLimiter<NotKeyed, governor::state::InMemoryState, DefaultClock>>,
     shard_manager: Arc<ShardManager>,
 }
 
@@ -154,6 +157,8 @@ enum StorageResponseType {
 
 impl BlockService {
     async fn new() -> Self {
+        dotenv().ok();
+
         let config_str = include_str!("../../tests/config.toml");
         let config: toml::Value = toml::from_str(config_str).expect("Failed to parse config");
         let shard_id = config["sharding"]["shard_id"].as_integer().unwrap_or(0) as u32;
@@ -172,9 +177,9 @@ impl BlockService {
         )));
 
         BlockService {
-            auth_service_addr: "127.0.0.1:50060".to_string(),
-            alert_service_addr: "127.0.0.1:50061".to_string(),
-            storage_service_addr: "127.0.0.1:50052".to_string(), // Assume port
+            auth_service_addr: env::var("AUTH_ADDR").unwrap_or("127.0.0.1:50060".to_string()),
+            alert_service_addr: env::var("ALERT_ADDR").unwrap_or("127.0.0.1:50061".to_string()),
+            storage_service_addr: env::var("STORAGE_ADDR").unwrap_or("127.0.0.1:50053".to_string()),
             registry,
             requests_total,
             latency_ms,
@@ -190,13 +195,13 @@ impl BlockService {
             .map_err(|e| format!("Failed to connect to auth_service: {}", e))?;
         let request = AuthRequest { token: token.to_string() };
         let encoded = serialize(&request).map_err(|e| format!("Serialization error: {}", e))?;
-        stream.write_all(&encoded).await.map_err(|e| format("Write error: {}", e))?;
-        stream.flush().await.map_err(|e| format("Flush error: {}", e))?;
+        stream.write_all(&encoded).await.map_err(|e| format!("Write error: {}", e))?;
+        stream.flush().await.map_err(|e| format!("Flush error: {}", e))?;
 
         let mut buffer = vec![0u8; 1024 * 1024];
-        let n = stream.read(&mut buffer).await.map_err(|e| format("Read error: {}", e))?;
+        let n = stream.read(&mut buffer).await.map_err(|e| format!("Read error: {}", e))?;
         let response: AuthResponse = deserialize(&buffer[..n])
-            .map_err(|e| format("Deserialization error: {}", e))?;
+            .map_err(|e| format!("Deserialization error: {}", e))?;
         
         if response.success {
             Ok(response.user_id)
@@ -213,14 +218,14 @@ impl BlockService {
             service: "block_service".to_string(),
             method: method.to_string(),
         };
-        let encoded = serialize(&request).map_err(|e| format("Serialization error: {}", e))?;
-        stream.write_all(&encoded).await.map_err(|e| format("Write error: {}", e))?;
-        stream.flush().await.map_err(|e| format("Flush error: {}", e))?;
+        let encoded = serialize(&request).map_err(|e| format!("Serialization error: {}", e))?;
+        stream.write_all(&encoded).await.map_err(|e| format!("Write error: {}", e))?;
+        stream.flush().await.map_err(|e| format!("Flush error: {}", e))?;
 
         let mut buffer = vec![0u8; 1024 * 1024];
-        let n = stream.read(&mut buffer).await.map_err(|e| format("Read error: {}", e))?;
+        let n = stream.read(&mut buffer).await.map_err(|e| format!("Read error: {}", e))?;
         let response: AuthorizeResponse = deserialize(&buffer[..n])
-            .map_err(|e| format("Deserialization error: {}", e))?;
+            .map_err(|e| format!("Deserialization error: {}", e))?;
         
         if response.allowed {
             Ok(())
@@ -237,14 +242,14 @@ impl BlockService {
             message: message.to_string(),
             severity,
         };
-        let encoded = serialize(&request).map_err(|e| format("Serialization error: {}", e))?;
-        stream.write_all(&encoded).await.map_err(|e| format("Write error: {}", e))?;
-        stream.flush().await.map_err(|e| format("Flush error: {}", e))?;
+        let encoded = serialize(&request).map_err(|e| format!("Serialization error: {}", e))?;
+        stream.write_all(&encoded).await.map_err(|e| format!("Write error: {}", e))?;
+        stream.flush().await.map_err(|e| format!("Flush error: {}", e))?;
 
         let mut buffer = vec![0u8; 1024 * 1024];
-        let n = stream.read(&mut buffer).await.map_err(|e| format("Read error: {}", e))?;
+        let n = stream.read(&mut buffer).await.map_err(|e| format!("Read error: {}", e))?;
         let response: AlertResponse = deserialize(&buffer[..n])
-            .map_err(|e| format("Deserialization error: {}", e))?;
+            .map_err(|e| format!("Deserialization error: {}", e))?;
         
         if response.success {
             self.alert_count.inc();
@@ -262,13 +267,13 @@ impl BlockService {
             before_timestamp,
         });
         let encoded = serialize(&request).map_err(|e| format!("Serialization error: {}", e))?;
-        stream.write_all(&encoded).await.map_err(|e| format("Write error: {}", e))?;
-        stream.flush().await.map_err(|e| format("Flush error: {}", e))?;
+        stream.write_all(&encoded).await.map_err(|e| format!("Write error: {}", e))?;
+        stream.flush().await.map_err(|e| format!("Flush error: {}", e))?;
 
         let mut buffer = vec![0u8; 1024 * 1024];
-        let n = stream.read(&mut buffer).await.map_err(|e| format("Read error: {}", e))?;
+        let n = stream.read(&mut buffer).await.map_err(|e| format!("Read error: {}", e))?;
         let response: StorageResponseType = deserialize(&buffer[..n])
-            .map_err(|e| format("Deserialization error: {}", e))?;
+            .map_err(|e| format!("Deserialization error: {}", e))?;
         
         match response {
             StorageResponseType::GetBlocksByTimestamp(resp) => {
@@ -288,14 +293,14 @@ impl BlockService {
         let request = StorageRequestType::GetBlocksByHeight(GetBlocksByHeightRequest {
             max_height,
         });
-        let encoded = serialize(&request).map_err(|e| format("Serialization error: {}", e))?;
-        stream.write_all(&encoded).await.map_err(|e| format("Write error: {}", e))?;
-        stream.flush().await.map_err(|e| format("Flush error: {}", e))?;
+        let encoded = serialize(&request).map_err(|e| format!("Serialization error: {}", e))?;
+        stream.write_all(&encoded).await.map_err(|e| format!("Write error: {}", e))?;
+        stream.flush().await.map_err(|e| format!("Flush error: {}", e))?;
 
         let mut buffer = vec![0u8; 1024 * 1024];
-        let n = stream.read(&mut buffer).await.map_err(|e| format("Read error: {}", e))?;
+        let n = stream.read(&mut buffer).await.map_err(|e| format!("Read error: {}", e))?;
         let response: StorageResponseType = deserialize(&buffer[..n])
-            .map_err(|e| format("Deserialization error: {}", e))?;
+            .map_err(|e| format!("Deserialization error: {}", e))?;
         
         match response {
             StorageResponseType::GetBlocksByHeight(resp) => {
@@ -467,8 +472,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_max_level(tracing::Level::INFO)
         .init();
 
-    let addr = "127.0.0.1:50054";
+    let addr = env::var("BLOCK_ADDR").unwrap_or("127.0.0.1:50054".to_string());
     let block_service = BlockService::new().await;
-    block_service.run(addr).await?;
+    block_service.run(&addr).await?;
     Ok(())
 }
