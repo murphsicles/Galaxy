@@ -1,18 +1,23 @@
+use async_channel::{Receiver, Sender, unbounded};
 use bincode::{deserialize, serialize};
+use dotenv::dotenv;
+use governor::{Quota, RateLimiter};
+use hex;
+use prometheus::{Counter, Gauge, Registry};
 use serde::{Deserialize, Serialize};
-use tokio::net::{TcpListener, TcpStream};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tracing::{info, warn, error};
-use async_channel::{Sender, Receiver, unbounded};
-use sv::messages::{Inv, InvVect};
-use sv::network::Network;
-use hex::encode;
-use governor::{Quota, RateLimiter, state::InMemoryState, clock::DefaultClock, state::NotKeyed};
-use prometheus::{IntCounter, Gauge, Registry};
+use shared::ShardManager;
+use std::collections::HashSet;
+use std::env;
+use std::num::NonZeroU32;
 use std::sync::Arc;
+use sv::messages::{Inv, InvVect, Version, VerAck};
+use sv::network::Network as SvNetwork;
+use sv::util::{Hash256, Serializable};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Mutex;
 use toml;
-use shared::{ShardManager, Transaction};
+use tracing::{error, info, warn};
 
 #[derive(Serialize, Deserialize, Debug)]
 struct AuthRequest {
@@ -161,47 +166,49 @@ struct NetworkService {
     block_service_addr: String,
     auth_service_addr: String,
     alert_service_addr: String,
-    peers: Arc<Mutex<Vec<String>>>,
+    peers: Arc<Mutex<HashSet<String>>>,
     registry: Arc<Registry>,
-    requests_total: IntCounter,
+    requests_total: Counter,
     latency_ms: Gauge,
-    alert_count: IntCounter,
-    errors_total: IntCounter,
-    rate_limiter: Arc<RateLimiter<NotKeyed, InMemoryState, DefaultClock>>,
+    alert_count: Counter,
+    errors_total: Counter,
+    rate_limiter: Arc<RateLimiter<NotKeyed, governor::state::InMemoryState, DefaultClock>>,
     shard_manager: Arc<ShardManager>,
 }
 
 impl NetworkService {
     async fn new() -> Self {
+        dotenv().ok();
+
         let config_str = include_str!("../../tests/config.toml");
         let config: toml::Value = toml::from_str(config_str).expect("Failed to parse config");
-        let peers = Arc::new(Mutex::new(
-            config["testnet"]["nodes"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                .collect(),
-        ));
+
+        let initial_peers = config["testnet"]["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+            .collect::<HashSet<_>>();
+
         let registry = Arc::new(Registry::new());
-        let requests_total = IntCounter::new("network_requests_total", "Total network requests").unwrap();
+        let requests_total = Counter::new("network_requests_total", "Total network requests").unwrap();
         let latency_ms = Gauge::new("network_latency_ms", "Average request latency (ms)").unwrap();
-        let alert_count = IntCounter::new("network_alert_count", "Total alerts sent").unwrap();
-        let errors_total = IntCounter::new("network_errors_total", "Total errors").unwrap();
+        let alert_count = Counter::new("network_alert_count", "Total alerts sent").unwrap();
+        let errors_total = Counter::new("network_errors_total", "Total errors").unwrap();
         registry.register(Box::new(requests_total.clone())).unwrap();
         registry.register(Box::new(latency_ms.clone())).unwrap();
         registry.register(Box::new(alert_count.clone())).unwrap();
         registry.register(Box::new(errors_total.clone())).unwrap();
         let rate_limiter = Arc::new(RateLimiter::direct(Quota::per_second(
-            std::num::NonZeroU32::new(1000).unwrap(),
+            NonZeroU32::new(1000).unwrap(),
         )));
 
-        NetworkService {
-            transaction_service_addr: "127.0.0.1:50052".to_string(),
-            block_service_addr: "127.0.0.1:50054".to_string(),
-            auth_service_addr: "127.0.0.1:50060".to_string(),
-            alert_service_addr: "127.0.0.1:50061".to_string(),
-            peers,
+        let service = NetworkService {
+            transaction_service_addr: env::var("TRANSACTION_ADDR").unwrap_or("127.0.0.1:50052".to_string()),
+            block_service_addr: env::var("BLOCK_ADDR").unwrap_or("127.0.0.1:50054".to_string()),
+            auth_service_addr: env::var("AUTH_ADDR").unwrap_or("127.0.0.1:50060".to_string()),
+            alert_service_addr: env::var("ALERT_ADDR").unwrap_or("127.0.0.1:50061".to_string()),
+            peers: Arc::new(Mutex::new(initial_peers)),
             registry,
             requests_total,
             latency_ms,
@@ -209,7 +216,74 @@ impl NetworkService {
             errors_total,
             rate_limiter,
             shard_manager: Arc::new(ShardManager::new()),
+        };
+
+        let service_clone = service.clone();
+        tokio::spawn(async move {
+            service_clone.discover_peers().await;
+        });
+
+        service
+    }
+
+    async fn discover_peers(&self) {
+        // BSV testnet DNS seeds
+        let seeds = vec![
+            "testnet-seed.bitcoinsv.io".to_string(),
+            "testnet-seed.bitcoincloud.net".to_string(),
+        ];
+
+        for seed in seeds {
+            // Resolve DNS to IPs (placeholder: use tokio-resolver or hardcode for now)
+            let ips = vec!["127.0.0.1:18333".to_string()]; // Dummy
+            let mut peers = self.peers.lock().await;
+            for ip in ips {
+                peers.insert(ip);
+            }
         }
+    }
+
+    async fn connect_to_peer(&self, addr: &str) -> Result<TcpStream, String> {
+        let mut stream = TcpStream::connect(addr).await.map_err(|e| format!("Connect error: {}", e))?;
+        // Send Version message
+        let version = Version {
+            version: 70015,
+            services: 1,
+            timestamp: Utc::now().timestamp() as u64,
+            receiver_services: 1,
+            receiver_address: "127.0.0.1".to_string(),
+            receiver_port: 18333,
+            sender_services: 1,
+            sender_address: "127.0.0.1".to_string(),
+            sender_port: 18333,
+            nonce: 0,
+            user_agent: "/Galaxy:0.2.3/".to_string(),
+            start_height: 0,
+            relay: true,
+        };
+        let encoded = version.serialize();
+        stream.write_all(&encoded).await.map_err(|e| format!("Write error: {}", e))?;
+        stream.flush().await.map_err(|e| format!("Flush error: {}", e))?;
+
+        // Receive Version and VerAck
+        let mut buffer = vec![0u8; 1024];
+        let n = stream.read(&mut buffer).await.map_err(|e| format!("Read error: {}", e))?;
+        // Parse Version (skip for now)
+        let n = stream.read(&mut buffer).await.map_err(|e| format!("Read error: {}", e))?;
+        // Parse VerAck
+
+        Ok(stream)
+    }
+
+    async fn broadcast_to_peers(&self, msg: &[u8]) -> Result<(), String> {
+        let peers = self.peers.lock().await.clone();
+        for peer in peers {
+            if let Ok(mut stream) = self.connect_to_peer(&peer).await {
+                stream.write_all(msg).await.map_err(|e| format!("Write error: {}", e))?;
+                stream.flush().await.map_err(|e| format!("Flush error: {}", e))?;
+            }
+        }
+        Ok(())
     }
 
     async fn authenticate(&self, token: &str) -> Result<String, String> {
@@ -299,12 +373,12 @@ impl NetworkService {
                 broadcast_block: None,
                 get_metrics: None,
             })
-        } else if let Some(_discover_peers) = request.discover_peers {
-            let user_id = self.authenticate(&_discover_peers.token).await?;
+        } else if let Some(discover_peers) = request.discover_peers {
+            let user_id = self.authenticate(&discover_peers.token).await?;
             self.authorize(&user_id, "DiscoverPeers").await?;
             self.rate_limiter.until_ready().await;
             let peers = self.peers.lock().await;
-            let peer_list = peers.clone();
+            let peer_list = peers.iter().cloned().collect();
             self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
             Ok(NetworkResponse {
                 ping: None,
@@ -323,7 +397,7 @@ impl NetworkService {
                 let _ = self.send_alert("broadcast_invalid_tx", &format!("Invalid transaction hex: {}", e), 2);
                 format!("Invalid transaction hex: {}", e)
             })?;
-            let tx: Transaction = deserialize(&tx_bytes).map_err(|e| {
+            let tx: SvTransaction = deserialize(&tx_bytes).map_err(|e| {
                 warn!("Invalid transaction: {}", e);
                 let _ = self.send_alert("broadcast_invalid_tx_deserialization", &format!("Invalid transaction: {}", e), 2);
                 format!("Invalid transaction: {}", e)
@@ -346,6 +420,16 @@ impl NetworkService {
                 let _ = self.send_alert("broadcast_tx_failed", &format!("Transaction processing failed: {}", tx_response.error), 2);
                 return Err(tx_response.error);
             }
+
+            // Broadcast to peers
+            let inv = Inv {
+                inventory: vec![InvVect {
+                    hash: Hash256::from(tx.txid().0),
+                    inv_type: 1, // TX
+                }],
+            };
+            let encoded_inv = inv.serialize();
+            let _ = self.broadcast_to_peers(&encoded_inv).await;
 
             self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
             Ok(NetworkResponse {
@@ -384,6 +468,17 @@ impl NetworkService {
                 return Err(block_response.error);
             }
 
+            // Broadcast to peers
+            let block: Block = sv::util::deserialize(&block_bytes).map_err(|e| format!("Deserialization error: {}", e))?;
+            let inv = Inv {
+                inventory: vec![InvVect {
+                    hash: block.header.hash(),
+                    inv_type: 2, // BLOCK
+                }],
+            };
+            let encoded_inv = inv.serialize();
+            let _ = self.broadcast_to_peers(&encoded_inv).await;
+
             self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
             Ok(NetworkResponse {
                 ping: None,
@@ -392,8 +487,8 @@ impl NetworkService {
                 broadcast_block: Some(BroadcastBlockResponse { success: true, error: "".to_string() }),
                 get_metrics: None,
             })
-        } else if let Some(_get_metrics) = request.get_metrics {
-            let user_id = self.authenticate(&_get_metrics.token).await?;
+        } else if let Some(get_metrics) = request.get_metrics {
+            let user_id = self.authenticate(&get_metrics.token).await?;
             self.authorize(&user_id, "GetMetrics").await?;
             self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
             Ok(NetworkResponse {
@@ -487,8 +582,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_max_level(tracing::Level::INFO)
         .init();
 
-    let addr = "127.0.0.1:50051";
+    let addr = env::var("NETWORK_ADDR").unwrap_or("127.0.0.1:50051".to_string());
     let network_service = NetworkService::new().await;
-    network_service.run(addr).await?;
+    network_service.run(&addr).await?;
     Ok(())
 }
