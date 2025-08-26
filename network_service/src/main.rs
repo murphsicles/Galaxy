@@ -172,7 +172,7 @@ struct NetworkService {
     latency_ms: Gauge,
     alert_count: Counter,
     errors_total: Counter,
-    rate_limiter: Arc<RateLimiter<NotKeyed, governor::state::InMemoryState, DefaultClock>>,
+    rate_limiter: Arc<RateLimiter<gov::state::NotKeyed, gov::state::InMemoryState, gov::clock::DefaultClock>>,
     shard_manager: Arc<ShardManager>,
 }
 
@@ -247,7 +247,7 @@ impl NetworkService {
             sender_address: "127.0.0.1".to_string(),
             sender_port: 18333,
             nonce: 0,
-            user_agent: "/Galaxy:0.1/".to_string(),
+            user_agent: "/Galaxy:0.2.3/".to_string(),
             start_height: 0,
             relay: true,
         };
@@ -337,11 +337,11 @@ impl NetworkService {
             severity,
         };
         let encoded = serialize(&request).map_err(|e| format!("Serialization error: {}", e))?;
-        stream.write_all(&encoded).await map_err(|e| format!("Write error: {}", e))?;
-        stream.flush().await map_err(|e| format!("Flush error: {}", e))?;
+        stream.write_all(&encoded).await.map_err(|e| format!("Write error: {}", e))?;
+        stream.flush().await.map_err(|e| format!("Flush error: {}", e))?;
 
         let mut buffer = vec![0u8; 1024 * 1024];
-        let n = stream.read(&mut buffer).await map_err(|e| format!("Read error: {}", e))?;
+        let n = stream.read(&mut buffer).await.map_err(|e| format!("Read error: {}", e))?;
         let response: AlertResponse = deserialize(&buffer[..n])
             .map_err(|e| format!("Deserialization error: {}", e))?;
         
