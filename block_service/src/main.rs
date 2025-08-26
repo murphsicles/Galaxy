@@ -1,16 +1,15 @@
+use std::env;
+use std::num::NonZeroU32;
+use std::sync::Arc;
+
 use bincode::{deserialize, serialize};
 use chrono::{Duration, Utc};
 use dotenv::dotenv;
 use governor::{Quota, RateLimiter};
-use governor::clock::DefaultClock;
-use governor::state::direct::NotKeyed;
 use hex;
 use prometheus::{Counter, Gauge, Registry};
 use serde::{Deserialize, Serialize};
 use shared::{AgedThreshold, ShardManager};
-use std::env;
-use std::num::NonZeroU32;
-use std::sync::Arc;
 use sv::block::Block;
 use sv::util::{deserialize as sv_deserialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -112,12 +111,13 @@ struct BlockService {
     auth_service_addr: String,
     alert_service_addr: String,
     storage_service_addr: String,
+    consensus_service_addr: String,
     registry: Arc<Registry>,
     requests_total: Counter,
     latency_ms: Gauge,
     alert_count: Counter,
     errors_total: Counter,
-    rate_limiter: Arc<RateLimiter<NotKeyed, governor::state::InMemoryState, DefaultClock>>,
+    rate_limiter: Arc<RateLimiter<gov::state::NotKeyed, gov::state::InMemoryState, gov::clock::DefaultClock>>,
     shard_manager: Arc<ShardManager>,
 }
 
@@ -145,14 +145,35 @@ struct GetBlocksByHeightResponse {
 
 #[derive(Serialize, Deserialize, Debug)]
 enum StorageRequestType {
-    GetBlocksByTimestamp(GetBlocksByTimestampRequest),
-    GetBlocksByHeight(GetBlocksByHeightRequest),
+    GetBlocksByTimestamp { request: GetBlocksByTimestampRequest, token: String },
+    GetBlocksByHeight { request: GetBlocksByHeightRequest, token: String },
 }
 
 #[derive(Serialize, Deserialize, Debug)]
 enum StorageResponseType {
     GetBlocksByTimestamp(GetBlocksByTimestampResponse),
     GetBlocksByHeight(GetBlocksByHeightResponse),
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct ValidateBlockConsensusRequest {
+    block_hex: String,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct ValidateBlockConsensusResponse {
+    success: bool,
+    error: String,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+enum ConsensusRequestType {
+    ValidateBlock { request: ValidateBlockConsensusRequest, token: String },
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+enum ConsensusResponseType {
+    ValidateBlock(ValidateBlockConsensusResponse),
 }
 
 impl BlockService {
@@ -180,6 +201,7 @@ impl BlockService {
             auth_service_addr: env::var("AUTH_ADDR").unwrap_or("127.0.0.1:50060".to_string()),
             alert_service_addr: env::var("ALERT_ADDR").unwrap_or("127.0.0.1:50061".to_string()),
             storage_service_addr: env::var("STORAGE_ADDR").unwrap_or("127.0.0.1:50053".to_string()),
+            consensus_service_addr: env::var("CONSENSUS_ADDR").unwrap_or("127.0.0.1:50055".to_string()),
             registry,
             requests_total,
             latency_ms,
@@ -260,12 +282,12 @@ impl BlockService {
         }
     }
 
-    async fn fetch_blocks_by_timestamp(&self, before_timestamp: i64) -> Result<Vec<Block>, String> {
+    async fn fetch_blocks_by_timestamp(&self, before_timestamp: i64, token: &str) -> Result<Vec<Block>, String> {
         let mut stream = TcpStream::connect(&self.storage_service_addr).await
             .map_err(|e| format!("Failed to connect to storage_service: {}", e))?;
-        let request = StorageRequestType::GetBlocksByTimestamp(GetBlocksByTimestampRequest {
+        let request = StorageRequestType::GetBlocksByTimestamp { request: GetBlocksByTimestampRequest {
             before_timestamp,
-        });
+        }, token: token.to_string() };
         let encoded = serialize(&request).map_err(|e| format!("Serialization error: {}", e))?;
         stream.write_all(&encoded).await.map_err(|e| format!("Write error: {}", e))?;
         stream.flush().await.map_err(|e| format!("Flush error: {}", e))?;
@@ -287,18 +309,18 @@ impl BlockService {
         }
     }
 
-    async fn fetch_blocks_by_height(&self, max_height: u64) -> Result<Vec<Block>, String> {
+    async fn fetch_blocks_by_height(&self, max_height: u64, token: &str) -> Result<Vec<Block>, String> {
         let mut stream = TcpStream::connect(&self.storage_service_addr).await
             .map_err(|e| format!("Failed to connect to storage_service: {}", e))?;
-        let request = StorageRequestType::GetBlocksByHeight(GetBlocksByHeightRequest {
+        let request = StorageRequestType::GetBlocksByHeight { request: GetBlocksByHeightRequest {
             max_height,
-        });
+        }, token: token.to_string() };
         let encoded = serialize(&request).map_err(|e| format!("Serialization error: {}", e))?;
-        stream.write_all(&encoded).await.map_err(|e| format!("Write error: {}", e))?;
-        stream.flush().await.map_err(|e| format!("Flush error: {}", e))?;
+        stream.write_all(&encoded).await map_err(|e| format!("Write error: {}", e))?;
+        stream.flush().await map_err(|e| format!("Flush error: {}", e))?;
 
         let mut buffer = vec![0u8; 1024 * 1024];
-        let n = stream.read(&mut buffer).await.map_err(|e| format!("Read error: {}", e))?;
+        let n = stream.read(&mut buffer).await map_err(|e| format!("Read error: {}", e))?;
         let response: StorageResponseType = deserialize(&buffer[..n])
             .map_err(|e| format!("Deserialization error: {}", e))?;
         
@@ -314,10 +336,34 @@ impl BlockService {
         }
     }
 
-    async fn get_current_tip_height(&self) -> Result<u64, String> {
-        // Placeholder: Query storage_service or internal state for current chain tip height
-        // For now, return a dummy value
-        Ok(1000000)
+    async fn get_current_tip_height(&self, token: &str) -> Result<u64, String> {
+        let blocks = self.fetch_blocks_by_height(u64::MAX, token).await?;
+        if blocks.is_empty() {
+            Err("No blocks found".to_string())
+        } else {
+            // Assume blocks are sorted by height; return height of last. Since height not in Block, placeholder
+            Ok(800000)
+        }
+    }
+
+    async fn validate_block_consensus(&self, block_hex: &str, token: &str) -> Result<ValidateBlockConsensusResponse, String> {
+        let mut stream = TcpStream::connect(&self.consensus_service_addr).await
+            .map_err(|e| format!("Failed to connect to consensus_service: {}", e))?;
+        let request = ConsensusRequestType::ValidateBlock { request: ValidateBlockConsensusRequest { block_hex: block_hex.to_string() }, token: token.to_string() };
+        let encoded = serialize(&request).map_err(|e| format!("Serialization error: {}", e))?;
+        stream.write_all(&encoded).await map_err(|e| format!("Write error: {}", e))?;
+        stream.flush().await map_err(|e| format!("Flush error: {}", e))?;
+
+        let mut buffer = vec![0u8; 1024 * 1024];
+        let n = stream.read(&mut buffer).await map_err(|e| format!("Read error: {}", e))?;
+        let response: ConsensusResponseType = deserialize(&buffer[..n])
+            .map_err(|e| format!("Deserialization error: {}", e))?;
+
+        if let ConsensusResponseType::ValidateBlock(resp) = response {
+            Ok(resp)
+        } else {
+            Err("Unexpected response type".to_string())
+        }
     }
 
     async fn handle_request(&self, request: BlockRequestType) -> Result<BlockResponseType, String> {
@@ -343,14 +389,12 @@ impl BlockService {
                     format!("Invalid block: {}", e)
                 })?;
 
-                // Placeholder: Validate block against consensus rules
-                let success = true;
-                let error = if success { "".to_string() } else { "Block validation failed".to_string() };
+                let resp = self.validate_block_consensus(&request.block_hex, &token).await?;
 
                 self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
                 Ok(BlockResponseType::ValidateBlock(ValidateBlockResponse {
-                    success,
-                    error,
+                    success: resp.success,
+                    error: resp.error,
                 }))
             }
             BlockRequestType::GetMetrics { request, token } => {
@@ -380,16 +424,16 @@ impl BlockService {
                 let blocks = match get_aged_request.threshold {
                     AgedThreshold::Months(months) => {
                         let cutoff = Utc::now() - Duration::days(months as i64 * 30);
-                        self.fetch_blocks_by_timestamp(cutoff.timestamp()).await
+                        self.fetch_blocks_by_timestamp(cutoff.timestamp(), &get_aged_request.token).await
                             .map_err(|e| format!("Failed to fetch aged blocks: {}", e))?
                     }
                     AgedThreshold::Blocks(height) => {
-                        let current_tip = self.get_current_tip_height().await
+                        let current_tip = self.get_current_tip_height(&get_aged_request.token).await
                             .map_err(|e| format!("Failed to get chain tip: {}", e))?;
                         if height >= current_tip {
                             vec![]
                         } else {
-                            self.fetch_blocks_by_height(current_tip - height).await
+                            self.fetch_blocks_by_height(current_tip - height, &get_aged_request.token).await
                                 .map_err(|e| format!("Failed to fetch aged blocks: {}", e))?
                         }
                     }
