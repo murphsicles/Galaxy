@@ -1,3 +1,9 @@
+use std::env;
+use std::io::Cursor;
+use std::num::NonZeroU32;
+use std::pin::Pin;
+use std::sync::Arc;
+
 use async_stream::try_stream;
 use bincode::{deserialize, serialize};
 use dotenv::dotenv;
@@ -8,11 +14,6 @@ use lru::LruCache;
 use prometheus::{Counter, Gauge, Registry};
 use serde::{Deserialize, Serialize};
 use shared::ShardManager;
-use std::env;
-use std::io::Cursor;
-use std::num::NonZeroU32;
-use std::pin::Pin;
-use std::sync::Arc;
 use sv::block::Header;
 use sv::messages::Tx;
 use sv::util::{Hash256, Serializable};
@@ -148,8 +149,22 @@ struct QueryUtxoResponse {
 }
 
 #[derive(Serialize, Deserialize, Debug)]
+struct GetTxStatusRequest {
+    txid: String,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct GetTxStatusResponse {
+    status: String,
+    block_hash: Option<String>,
+    block_height: Option<u64>,
+    merkle_path: Option<String>,
+    error: String,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
 enum BlockRequestType {
-    GetBlockHeaders { request: GetBlockHeadersRequest },
+    GetBlockHeaders { request: GetBlockHeadersRequest, token: String },
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -165,6 +180,16 @@ enum StorageRequestType {
 #[derive(Serialize, Deserialize, Debug)]
 enum StorageResponseType {
     QueryUtxo(QueryUtxoResponse),
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+enum IndexRequestType {
+    GetTxStatus { request: GetTxStatusRequest, token: String },
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+enum IndexResponseType {
+    GetTxStatus(GetTxStatusResponse),
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -189,6 +214,7 @@ enum ValidationResponseType {
 struct ValidationService {
     block_service_addr: String,
     storage_service_addr: String,
+    index_service_addr: String,
     auth_service_addr: String,
     alert_service_addr: String,
     proof_cache: Arc<Mutex<LruCache<String, (String, Vec<String>)>>>,
@@ -198,7 +224,7 @@ struct ValidationService {
     cache_hits: Counter,
     alert_count: Counter,
     errors_total: Counter,
-    rate_limiter: Arc<RateLimiter<String, governor::state::direct::NotKeyed, governor::clock::DefaultClock>>,
+    rate_limiter: Arc<RateLimiter<NotKeyed, governor::state::InMemoryState, DefaultClock>>,
     shard_manager: Arc<ShardManager>,
 }
 
@@ -229,6 +255,7 @@ impl ValidationService {
         ValidationService {
             block_service_addr: env::var("BLOCK_ADDR").unwrap_or("127.0.0.1:50054".to_string()),
             storage_service_addr: env::var("STORAGE_ADDR").unwrap_or("127.0.0.1:50053".to_string()),
+            index_service_addr: env::var("INDEX_ADDR").unwrap_or("127.0.0.1:50059".to_string()),
             auth_service_addr: env::var("AUTH_ADDR").unwrap_or("127.0.0.1:50060".to_string()),
             alert_service_addr: env::var("ALERT_ADDR").unwrap_or("127.0.0.1:50061".to_string()),
             proof_cache,
@@ -313,7 +340,27 @@ impl ValidationService {
         }
     }
 
-    async fn generate_spv_proof(&self, txid: &str) -> Result<(String, Vec<String>), String> {
+    async fn get_tx_status(&self, txid: &str, token: &str) -> Result<GetTxStatusResponse, String> {
+        let mut stream = TcpStream::connect(&self.index_service_addr).await
+            .map_err(|e| format!("Failed to connect to index_service: {}", e))?;
+        let request = IndexRequestType::GetTxStatus { request: GetTxStatusRequest { txid: txid.to_string() }, token: token.to_string() };
+        let encoded = serialize(&request).map_err(|e| format!("Serialization error: {}", e))?;
+        stream.write_all(&encoded).await.map_err(|e| format!("Write error: {}", e))?;
+        stream.flush().await.map_err(|e| format!("Flush error: {}", e))?;
+
+        let mut buffer = vec![0u8; 1024 * 1024];
+        let n = stream.read(&mut buffer).await.map_err(|e| format!("Read error: {}", e))?;
+        let response: IndexResponseType = deserialize(&buffer[..n])
+            .map_err(|e| format!("Deserialization error: {}", e))?;
+
+        if let IndexResponseType::GetTxStatus(resp) = response {
+            Ok(resp)
+        } else {
+            Err("Unexpected response type".to_string())
+        }
+    }
+
+    async fn generate_spv_proof(&self, txid: &str, token: &str) -> Result<(String, Vec<String>), String> {
         self.proof_requests.inc();
         let start = std::time::Instant::now();
 
@@ -335,12 +382,17 @@ impl ValidationService {
             format!("Invalid transaction: {}", e)
         })?;
 
-        // TODO: Fetch block_hash from index_service using txid
-        let block_hash = "0000000000000000000000000000000000000000000000000000000000000000".to_string();
+        let status = self.get_tx_status(txid, token).await?;
+        if status.error.is_empty() && status.block_hash.is_none() {
+            warn!("No block hash found for txid: {}", txid);
+            let _ = self.send_alert("spv_no_block_hash", &format!("No block hash found for txid: {}", txid), 3);
+            return Err("No block hash found".to_string());
+        }
+        let block_hash = status.block_hash.unwrap_or_default();
 
         let mut stream = TcpStream::connect(&self.block_service_addr).await
             .map_err(|e| format!("Failed to connect to block_service: {}", e))?;
-        let block_request = BlockRequestType::GetBlockHeaders { request: GetBlockHeadersRequest { block_hash } };
+        let block_request = BlockRequestType::GetBlockHeaders { request: GetBlockHeadersRequest { block_hash }, token: token.to_string() };
         let encoded = serialize(&block_request).map_err(|e| format!("Serialization error: {}", e))?;
         stream.write_all(&encoded).await.map_err(|e| format!("Write error: {}", e))?;
         stream.flush().await.map_err(|e| format!("Flush error: {}", e))?;
@@ -365,7 +417,7 @@ impl ValidationService {
             return Err("No block headers found".to_string());
         }
 
-        // TODO: Fetch actual block and its tx_hashes from block_service or index
+        // Fetch actual block for tx_hashes (add GetBlockByHash to block_service if needed; placeholder with dummy)
         let dummy_tx_hashes = vec![tx.hash(), Hash256::default()];
         let path = self.calculate_merkle_path(&tx.hash().0, &dummy_tx_hashes);
 
@@ -463,7 +515,7 @@ impl ValidationService {
                     .map_err(|e| format!("Authorization failed: {}", e))?;
                 self.rate_limiter.until_ready().await;
 
-                let (merkle_path, block_headers) = self.generate_spv_proof(&request.txid).await?;
+                let (merkle_path, block_headers) = self.generate_spv_proof(&request.txid, &token).await?;
 
                 self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
                 Ok(ValidationResponseType::GenerateSPVProof(GenerateSPVProofResponse {
@@ -499,7 +551,7 @@ impl ValidationService {
                 let mut proof_cache = self.proof_cache.lock().await;
 
                 for txid in request.txids {
-                    let result = self.generate_spv_proof(&txid).await;
+                    let result = self.generate_spv_proof(&txid, &token).await;
                     match result {
                         Ok((merkle_path_hex, block_headers)) => {
                             proof_cache.put(txid.clone(), (merkle_path_hex.clone(), block_headers.clone()));
@@ -531,7 +583,7 @@ impl ValidationService {
                     .map_err(|e| format!("Authorization failed: {}", e))?;
                 self.rate_limiter.until_ready().await;
 
-                let result = self.generate_spv_proof(&request.txid).await;
+                let result = self.generate_spv_proof(&request.txid, &token).await;
                 match result {
                     Ok((merkle_path_hex, block_headers)) => {
                         let mut proof_cache = self.proof_cache.lock().await;
@@ -590,7 +642,7 @@ impl ValidationService {
                 service.proof_requests.inc();
                 let start = std::time::Instant::now();
 
-                let result = service.generate_spv_proof(&req.txid).await;
+                let result = service.generate_spv_proof(&req.txid, &token).await;
                 match result {
                     Ok((merkle_path_hex, block_headers)) => {
                         let mut proof_cache = service.proof_cache.lock().await;
