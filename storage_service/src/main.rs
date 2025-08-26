@@ -504,4 +504,93 @@ impl StorageService {
                 Ok(StorageResponseType::GetBlocksByTimestamp(GetBlocksByTimestampResponse { blocks, error: "".to_string() }))
             }
             StorageRequestType::GetBlocksByHeight { request, token } => {
-            
+                let user_id = self.authenticate(&token).await
+                    .map_err(|e| format!("Authentication failed: {}", e))?;
+                self.authorize(&user_id, "GetBlocksByHeight").await
+                    .map_err(|e| format!("Authorization failed: {}", e))?;
+                self.rate_limiter.until_ready().await;
+
+                // Placeholder (full implementation requires block storage API)
+                let blocks = vec![];
+
+                self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
+                Ok(StorageResponseType::GetBlocksByHeight(GetBlocksByHeightResponse { blocks, error: "".to_string() }))
+            }
+        }
+    }
+
+    async fn run(&self, addr: &str) -> Result<(), Box<dyn std::error::Error>> {
+        let listener = TcpListener::bind(addr).await?;
+        info!("Storage service running on {}", addr);
+
+        loop {
+            match listener.accept().await {
+                Ok((mut stream, addr)) => {
+                    let service = self;
+                    tokio::spawn(async move {
+                        let mut buffer = vec![0u8; 1024 * 1024];
+                        match stream.read(&mut buffer).await {
+                            Ok(n) => {
+                                let request: StorageRequestType = match deserialize(&buffer[..n]) {
+                                    Ok(req) => req,
+                                    Err(e) => {
+                                        error!("Deserialization error: {}", e);
+                                        service.errors_total.inc();
+                                        return;
+                                    }
+                                };
+                                match service.handle_request(request).await {
+                                    Ok(response) => {
+                                        let encoded = serialize(&response).unwrap();
+                                        if let Err(e) = stream.write_all(&encoded).await {
+                                            error!("Write error: {}", e);
+                                            service.errors_total.inc();
+                                        }
+                                        if let Err(e) = stream.flush().await {
+                                            error!("Flush error: {}", e);
+                                            service.errors_total.inc();
+                                        }
+                                    }
+                                    Err(e) => {
+                                        error!("Request error: {}", e);
+                                        service.errors_total.inc();
+                                        let response = StorageResponseType::QueryUtxo(QueryUtxoResponse {
+                                            exists: false,
+                                            script_pubkey: "".to_string(),
+                                            amount: 0,
+                                            error: e,
+                                        });
+                                        let encoded = serialize(&response).unwrap();
+                                        if let Err(e) = stream.write_all(&encoded).await {
+                                            error!("Write error: {}", e);
+                                        }
+                                        if let Err(e) = stream.flush().await {
+                                            error!("Flush error: {}", e);
+                                        }
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                error!("Read error: {}", e);
+                                service.errors_total.inc();
+                            }
+                        }
+                    });
+                }
+                Err(e) => error!("Accept error: {}", e),
+            }
+        }
+    }
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::INFO)
+        .init();
+
+    let addr = env::var("STORAGE_ADDR").unwrap_or("127.0.0.1:50053".to_string());
+    let storage_service = StorageService::new().await;
+    storage_service.run(&addr).await?;
+    Ok(())
+}
