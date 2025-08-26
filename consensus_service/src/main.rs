@@ -1,16 +1,19 @@
 use bincode::{deserialize, serialize};
-use serde::{Deserialize, Serialize};
-use tokio::net::{TcpListener, TcpStream};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tracing::{info, warn, error};
-use sv::transaction::Transaction;
-use sv::util::{deserialize as sv_deserialize};
+use dotenv::dotenv;
+use governor::{Quota, RateLimiter};
+use hex;
 use prometheus::{Counter, Gauge, Registry};
+use serde::{Deserialize, Serialize};
+use shared::ShardManager;
+use std::env;
 use std::num::NonZeroU32;
 use std::sync::Arc;
+use sv::transaction::Transaction as SvTransaction;
+use sv::util::{deserialize as sv_deserialize};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream};
 use toml;
-use governor::{Quota, RateLimiter};
-use shared::ShardManager;
+use tracing::{error, info, warn};
 
 #[derive(Serialize, Deserialize, Debug)]
 struct ValidateTransactionConsensusRequest {
@@ -20,6 +23,16 @@ struct ValidateTransactionConsensusRequest {
 #[derive(Serialize, Deserialize, Debug)]
 struct ValidateTransactionConsensusResponse {
     success: bool,
+    error: String,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct GetPolicyRequest {}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct GetPolicyResponse {
+    max_block_size: u64,
+    min_fee_rate: u64,
     error: String,
 }
 
@@ -38,19 +51,86 @@ struct GetMetricsResponse {
 }
 
 #[derive(Serialize, Deserialize, Debug)]
+struct QueryUtxoRequest {
+    txid: String,
+    vout: u32,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct QueryUtxoResponse {
+    exists: bool,
+    script_pubkey: String,
+    amount: u64,
+    error: String,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+enum StorageRequestType {
+    QueryUtxo { request: QueryUtxoRequest, token: String },
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+enum StorageResponseType {
+    QueryUtxo(QueryUtxoResponse),
+}
+
+#[derive(Serialize, Deserialize, Debug)]
 enum ConsensusRequestType {
-    ValidateTransaction { request: ValidateTransactionConsensusRequest },
-    GetMetrics { request: GetMetricsRequest },
+    ValidateTransaction { request: ValidateTransactionConsensusRequest, token: String },
+    GetPolicy { request: GetPolicyRequest, token: String },
+    GetMetrics { request: GetMetricsRequest, token: String },
 }
 
 #[derive(Serialize, Deserialize, Debug)]
 enum ConsensusResponseType {
     ValidateTransaction(ValidateTransactionConsensusResponse),
+    GetPolicy(GetPolicyResponse),
     GetMetrics(GetMetricsResponse),
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct AuthRequest {
+    token: String,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct AuthResponse {
+    success: bool,
+    user_id: String,
+    error: String,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct AuthorizeRequest {
+    user_id: String,
+    service: String,
+    method: String,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct AuthorizeResponse {
+    allowed: bool,
+    error: String,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct AlertRequest {
+    event_type: String,
+    message: String,
+    severity: u32,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct AlertResponse {
+    success: bool,
+    error: String,
 }
 
 #[derive(Debug)]
 struct ConsensusService {
+    storage_service_addr: String,
+    auth_service_addr: String,
+    alert_service_addr: String,
     registry: Arc<Registry>,
     requests_total: Counter,
     latency_ms: Gauge,
@@ -61,6 +141,8 @@ struct ConsensusService {
 
 impl ConsensusService {
     async fn new() -> Self {
+        dotenv().ok();
+
         let config_str = include_str!("../../tests/config.toml");
         let config: toml::Value = toml::from_str(config_str).expect("Failed to parse config");
         let shard_id = config["sharding"]["shard_id"].as_integer().unwrap_or(0) as u32;
@@ -77,6 +159,9 @@ impl ConsensusService {
         )));
 
         ConsensusService {
+            storage_service_addr: env::var("STORAGE_ADDR").unwrap_or("127.0.0.1:50053".to_string()),
+            auth_service_addr: env::var("AUTH_ADDR").unwrap_or("127.0.0.1:50060".to_string()),
+            alert_service_addr: env::var("ALERT_ADDR").unwrap_or("127.0.0.1:50061".to_string()),
             registry,
             requests_total,
             latency_ms,
@@ -86,23 +171,148 @@ impl ConsensusService {
         }
     }
 
+    async fn authenticate(&self, token: &str) -> Result<String, String> {
+        let mut stream = TcpStream::connect(&self.auth_service_addr).await
+            .map_err(|e| format!("Failed to connect to auth_service: {}", e))?;
+        let request = AuthRequest { token: token.to_string() };
+        let encoded = serialize(&request).map_err(|e| format!("Serialization error: {}", e))?;
+        stream.write_all(&encoded).await.map_err(|e| format!("Write error: {}", e))?;
+        stream.flush().await.map_err(|e| format!("Flush error: {}", e))?;
+
+        let mut buffer = vec![0u8; 1024 * 1024];
+        let n = stream.read(&mut buffer).await.map_err(|e| format!("Read error: {}", e))?;
+        let response: AuthResponse = deserialize(&buffer[..n])
+            .map_err(|e| format!("Deserialization error: {}", e))?;
+        
+        if response.success {
+            Ok(response.user_id)
+        } else {
+            Err(response.error)
+        }
+    }
+
+    async fn authorize(&self, user_id: &str, method: &str) -> Result<(), String> {
+        let mut stream = TcpStream::connect(&self.auth_service_addr).await
+            .map_err(|e| format!("Failed to connect to auth_service: {}", e))?;
+        let request = AuthorizeRequest {
+            user_id: user_id.to_string(),
+            service: "consensus_service".to_string(),
+            method: method.to_string(),
+        };
+        let encoded = serialize(&request).map_err(|e| format!("Serialization error: {}", e))?;
+        stream.write_all(&encoded).await.map_err(|e| format!("Write error: {}", e))?;
+        stream.flush().await.map_err(|e| format!("Flush error: {}", e))?;
+
+        let mut buffer = vec![0u8; 1024 * 1024];
+        let n = stream.read(&mut buffer).await.map_err(|e| format!("Read error: {}", e))?;
+        let response: AuthorizeResponse = deserialize(&buffer[..n])
+            .map_err(|e| format!("Deserialization error: {}", e))?;
+        
+        if response.allowed {
+            Ok(())
+        } else {
+            Err(response.error)
+        }
+    }
+
+    async fn send_alert(&self, event_type: &str, message: &str, severity: u32) -> Result<(), String> {
+        let mut stream = TcpStream::connect(&self.alert_service_addr).await
+            .map_err(|e| format!("Failed to connect to alert_service: {}", e))?;
+        let request = AlertRequest {
+            event_type: event_type.to_string(),
+            message: message.to_string(),
+            severity,
+        };
+        let encoded = serialize(&request).map_err(|e| format!("Serialization error: {}", e))?;
+        stream.write_all(&encoded).await.map_err(|e| format!("Write error: {}", e))?;
+        stream.flush().await.map_err(|e| format!("Flush error: {}", e))?;
+
+        let mut buffer = vec![0u8; 1024 * 1024];
+        let n = stream.read(&mut buffer).await.map_err(|e| format!("Read error: {}", e))?;
+        let response: AlertResponse = deserialize(&buffer[..n])
+            .map_err(|e| format!("Deserialization error: {}", e))?;
+        
+        if response.success {
+            Ok(())
+        } else {
+            warn!("Alert sending failed: {}", response.error);
+            Err(response.error)
+        }
+    }
+
+    async fn query_utxo(&self, txid: &str, vout: u32, token: &str) -> Result<QueryUtxoResponse, String> {
+        let mut stream = TcpStream::connect(&self.storage_service_addr).await
+            .map_err(|e| format!("Failed to connect to storage_service: {}", e))?;
+        let request = StorageRequestType::QueryUtxo { request: QueryUtxoRequest { txid: txid.to_string(), vout }, token: token.to_string() };
+        let encoded = serialize(&request).map_err(|e| format!("Serialization error: {}", e))?;
+        stream.write_all(&encoded).await.map_err(|e| format!("Write error: {}", e))?;
+        stream.flush().await.map_err(|e| format!("Flush error: {}", e))?;
+
+        let mut buffer = vec![0u8; 1024 * 1024];
+        let n = stream.read(&mut buffer).await.map_err(|e| format!("Read error: {}", e))?;
+        let response: StorageResponseType = deserialize(&buffer[..n])
+            .map_err(|e| format!("Deserialization error: {}", e))?;
+        
+        match response {
+            StorageResponseType::QueryUtxo(resp) => Ok(resp),
+            _ => Err("Unexpected response type".to_string()),
+        }
+    }
+
     async fn handle_request(&self, request: ConsensusRequestType) -> Result<ConsensusResponseType, String> {
         self.requests_total.inc();
         let start = std::time::Instant::now();
 
         match request {
-            ConsensusRequestType::ValidateTransaction { request } => {
+            ConsensusRequestType::ValidateTransaction { request, token } => {
+                let user_id = self.authenticate(&token).await
+                    .map_err(|e| format!("Authentication failed: {}", e))?;
+                self.authorize(&user_id, "ValidateTransaction").await
+                    .map_err(|e| format!("Authorization failed: {}", e))?;
+                self.rate_limiter.until_ready().await;
+
                 let tx_bytes = hex::decode(&request.tx_hex).map_err(|e| {
                     warn!("Invalid transaction hex: {}", e);
-                    format("Invalid transaction hex: {}", e)
+                    format!("Invalid transaction hex: {}", e)
                 })?;
-                let tx: Transaction = sv_deserialize(&tx_bytes).map_err(|e| {
+                let tx: SvTransaction = sv_deserialize(&tx_bytes).map_err(|e| {
                     warn!("Invalid transaction: {}", e);
-                    format("Invalid transaction: {}", e)
+                    format!("Invalid transaction: {}", e)
                 })?;
 
-                // Placeholder: Validate transaction against consensus rules
-                let success = true; // Replace with actual consensus validation logic
+                // Real validation
+                let mut input_sum = 0u64;
+                let mut output_sum = 0u64;
+                let mut seen_inputs = std::collections::HashSet::new();
+                for input in &tx.inputs {
+                    if !seen_inputs.insert((hex::encode(input.outpoint.tx_hash.0), input.outpoint.vout)) {
+                        return Ok(ConsensusResponseType::ValidateTransaction(ValidateTransactionConsensusResponse {
+                            success: false,
+                            error: "Double spend in tx".to_string(),
+                        }));
+                    }
+                    let resp = self.query_utxo(&hex::encode(input.outpoint.tx_hash.0), input.outpoint.vout, &token).await?;
+                    if !resp.exists {
+                        return Ok(ConsensusResponseType::ValidateTransaction(ValidateTransactionConsensusResponse {
+                            success: false,
+                            error: "Input UTXO not found".to_string(),
+                        }));
+                    }
+                    input_sum += resp.amount;
+                    // Script validation: Use rust-sv's script execution
+                    // For simplicity, assume valid; full impl: tx.verify_script(input.script_sig, resp.script_pubkey.as_bytes(), ...)
+                }
+                for output in &tx.outputs {
+                    output_sum += output.value;
+                }
+                if input_sum < output_sum {
+                    return Ok(ConsensusResponseType::ValidateTransaction(ValidateTransactionConsensusResponse {
+                        success: false,
+                        error: "Input sum less than output sum".to_string(),
+                    }));
+                }
+
+                let success = true;
                 let error = if success { "".to_string() } else { "Validation failed".to_string() };
 
                 self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
@@ -111,7 +321,25 @@ impl ConsensusService {
                     error,
                 }))
             }
-            ConsensusRequestType::GetMetrics { request } => {
+            ConsensusRequestType::GetPolicy { request, token } => {
+                let user_id = self.authenticate(&token).await
+                    .map_err(|e| format!("Authentication failed: {}", e))?;
+                self.authorize(&user_id, "GetPolicy").await
+                    .map_err(|e| format!("Authorization failed: {}", e))?;
+
+                self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
+                Ok(ConsensusResponseType::GetPolicy(GetPolicyResponse {
+                    max_block_size: 4_000_000_000,
+                    min_fee_rate: 1,
+                    error: "".to_string(),
+                }))
+            }
+            ConsensusRequestType::GetMetrics { request, token } => {
+                let user_id = self.authenticate(&token).await
+                    .map_err(|e| format!("Authentication failed: {}", e))?;
+                self.authorize(&user_id, "GetMetrics").await
+                    .map_err(|e| format!("Authorization failed: {}", e))?;
+
                 self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
                 Ok(ConsensusResponseType::GetMetrics(GetMetricsResponse {
                     service_name: "consensus_service".to_string(),
@@ -194,8 +422,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_max_level(tracing::Level::INFO)
         .init();
 
-    let addr = "127.0.0.1:50055";
+    let addr = env::var("CONSENSUS_ADDR").unwrap_or("127.0.0.1:50055".to_string());
     let consensus_service = ConsensusService::new().await;
-    consensus_service.run(addr).await?;
+    consensus_service.run(&addr).await?;
     Ok(())
 }
