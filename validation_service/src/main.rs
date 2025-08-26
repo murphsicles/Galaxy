@@ -323,11 +323,11 @@ impl ValidationService {
             severity,
         };
         let encoded = serialize(&request).map_err(|e| format!("Serialization error: {}", e))?;
-        stream.write_all(&encoded).await.map_err(|e| format!("Write error: {}", e))?;
-        stream.flush().await.map_err(|e| format!("Flush error: {}", e))?;
+        stream.write_all(&encoded).await map_err(|e| format!("Write error: {}", e))?;
+        stream.flush().await map_err(|e| format!("Flush error: {}", e))?;
 
         let mut buffer = vec![0u8; 1024 * 1024];
-        let n = stream.read(&mut buffer).await.map_err(|e| format!("Read error: {}", e))?;
+        let n = stream.read(&mut buffer).await map_err(|e| format!("Read error: {}", e))?;
         let response: AlertResponse = deserialize(&buffer[..n])
             .map_err(|e| format!("Deserialization error: {}", e))?;
         
@@ -345,11 +345,11 @@ impl ValidationService {
             .map_err(|e| format!("Failed to connect to index_service: {}", e))?;
         let request = IndexRequestType::GetTxStatus { request: GetTxStatusRequest { txid: txid.to_string() }, token: token.to_string() };
         let encoded = serialize(&request).map_err(|e| format!("Serialization error: {}", e))?;
-        stream.write_all(&encoded).await.map_err(|e| format!("Write error: {}", e))?;
-        stream.flush().await.map_err(|e| format!("Flush error: {}", e))?;
+        stream.write_all(&encoded).await map_err(|e| format!("Write error: {}", e))?;
+        stream.flush().await map_err(|e| format!("Flush error: {}", e))?;
 
         let mut buffer = vec![0u8; 1024 * 1024];
-        let n = stream.read(&mut buffer).await.map_err(|e| format!("Read error: {}", e))?;
+        let n = stream.read(&mut buffer).await map_err(|e| format!("Read error: {}", e))?;
         let response: IndexResponseType = deserialize(&buffer[..n])
             .map_err(|e| format!("Deserialization error: {}", e))?;
 
@@ -394,11 +394,11 @@ impl ValidationService {
             .map_err(|e| format!("Failed to connect to block_service: {}", e))?;
         let block_request = BlockRequestType::GetBlockHeaders { request: GetBlockHeadersRequest { block_hash }, token: token.to_string() };
         let encoded = serialize(&block_request).map_err(|e| format!("Serialization error: {}", e))?;
-        stream.write_all(&encoded).await.map_err(|e| format!("Write error: {}", e))?;
-        stream.flush().await.map_err(|e| format!("Flush error: {}", e))?;
+        stream.write_all(&encoded).await map_err(|e| format!("Write error: {}", e))?;
+        stream.flush().await map_err(|e| format!("Flush error: {}", e))?;
 
         let mut buffer = vec![0u8; 1024 * 1024];
-        let n = stream.read(&mut buffer).await.map_err(|e| format!("Read error: {}", e))?;
+        let n = stream.read(&mut buffer).await map_err(|e| format!("Read error: {}", e))?;
         let block_response: BlockResponseType = deserialize(&buffer[..n])
             .map_err(|e| format!("Deserialization error: {}", e))?;
         
