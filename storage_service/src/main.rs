@@ -156,6 +156,19 @@ struct GetBlockByHashResponse {
 }
 
 #[derive(Serialize, Deserialize, Debug)]
+struct StoreBlockRequest {
+    block: Block,
+    height: u64,
+    timestamp: i64,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct StoreBlockResponse {
+    success: bool,
+    error: String,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
 enum StorageRequestType {
     QueryUtxo { request: QueryUtxoRequest, token: String },
     AddUtxo { request: AddUtxoRequest, token: String },
@@ -165,6 +178,7 @@ enum StorageRequestType {
     GetBlocksByTimestamp { request: GetBlocksByTimestampRequest, token: String },
     GetBlocksByHeight { request: GetBlocksByHeightRequest, token: String },
     GetBlockByHash { request: GetBlockByHashRequest, token: String },
+    StoreBlock { request: StoreBlockRequest, token: String },
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -177,12 +191,14 @@ enum StorageResponseType {
     GetBlocksByTimestamp(GetBlocksByTimestampResponse),
     GetBlocksByHeight(GetBlocksByHeightResponse),
     GetBlockByHash(GetBlockByHashResponse),
+    StoreBlock(StoreBlockResponse),
 }
 
 #[derive(Debug)]
 struct StorageService {
     tb_client: Arc<Mutex<tigerbeetle::Client>>,
     script_db: Arc<Db>,
+    block_db: Arc<Db>,  // New DB for blocks
     auth_service_addr: String,
     alert_service_addr: String,
     registry: Arc<Registry>,
@@ -220,6 +236,7 @@ impl StorageService {
         tb_client.create_accounts(&[sink]).await.ok(); // Ignore if exists
 
         let script_db = sled::open("utxo_scripts.db").expect("Failed to open sled DB");
+        let block_db = sled::open("blocks.db").expect("Failed to open block sled DB");
 
         let config_str = include_str!("../../tests/config.toml");
         let config: toml::Value = toml::from_str(config_str).expect("Failed to parse config");
@@ -240,6 +257,7 @@ impl StorageService {
         StorageService {
             tb_client: Arc::new(Mutex::new(tb_client)),
             script_db: Arc::new(script_db),
+            block_db: Arc::new(block_db),
             auth_service_addr: env::var("AUTH_ADDR").unwrap_or("127.0.0.1:50060".to_string()),
             alert_service_addr: env::var("ALERT_ADDR").unwrap_or("127.0.0.1:50061".to_string()),
             registry,
@@ -287,13 +305,13 @@ impl StorageService {
             method: method.to_string(),
         };
         let encoded = serialize(&request).map_err(|e| format!("Serialization error: {}", e))?;
-        stream.write_all(&encoded).await map_err(|e| format("Write error: {}", e))?;
-        stream.flush().await map_err(|e| format("Flush error: {}", e))?;
+        stream.write_all(&encoded).await map_err(|e| format!("Write error: {}", e))?;
+        stream.flush().await map_err(|e| format!("Flush error: {}", e))?;
 
         let mut buffer = vec![0u8; 1024 * 1024];
-        let n = stream.read(&mut buffer).await map_err(|e| format("Read error: {}", e))?;
+        let n = stream.read(&mut buffer).await map_err(|e| format!("Read error: {}", e))?;
         let response: AuthorizeResponse = deserialize(&buffer[..n])
-            .map_err(|e| format("Deserialization error: {}", e))?;
+            .map_err(|e| format!("Deserialization error: {}", e))?;
         
         if response.allowed {
             Ok(())
@@ -364,7 +382,7 @@ impl StorageService {
                 let user_id = self.authenticate(&token).await
                     .map_err(|e| format!("Authentication failed: {}", e))?;
                 self.authorize(&user_id, "AddUtxo").await
-                    .map_err(|e| format("Authorization failed: {}", e))?;
+                    .map_err(|e| format!("Authorization failed: {}", e))?;
                 self.rate_limiter.until_ready().await;
 
                 let key = format!("{}:{}", request.txid, request.vout);
@@ -491,7 +509,7 @@ impl StorageService {
                 let user_id = self.authenticate(&token).await
                     .map_err(|e| format!("Authentication failed: {}", e))?;
                 self.authorize(&user_id, "GetMetrics").await
-                    .map_err(|e| format!("Authorization failed: {}", e))?;
+                    .map_err(|e| format("Authorization failed: {}", e))?;
 
                 self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
                 Ok(StorageResponseType::GetMetrics(GetMetricsResponse {
@@ -508,11 +526,21 @@ impl StorageService {
                 let user_id = self.authenticate(&token).await
                     .map_err(|e| format!("Authentication failed: {}", e))?;
                 self.authorize(&user_id, "GetBlocksByTimestamp").await
-                    .map_err(|e| format!("Authorization failed: {}", e))?;
+                    .map_err(|e| format("Authorization failed: {}", e))?;
                 self.rate_limiter.until_ready().await;
 
-                // Replaced placeholder with dummy block
-                let blocks = vec![Block::new()];
+                let mut blocks = vec![];
+                let db = self.block_db.lock().await;
+                for result in db.scan_prefix(b"block:timestamp:") {
+                    let (key, value) = result.map_err(|e| format!("Sled error: {}", e))?;
+                    let timestamp_str = String::from_utf8(key[16..].to_vec()).map_err(|e| format!("UTF8 error: {}", e))?;
+                    let timestamp = timestamp_str.parse::<i64>().map_err(|e| format!("Parse error: {}", e))?;
+                    if timestamp < request.before_timestamp {
+                        let block = deserialize(&value).map_err(|e| format!("Deserialization error: {}", e))?;
+                        blocks.push(block);
+                    }
+                }
+                blocks.sort_by_key(|b| b.header.time);
 
                 self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
                 Ok(StorageResponseType::GetBlocksByTimestamp(GetBlocksByTimestampResponse { blocks, error: "".to_string() }))
@@ -521,27 +549,65 @@ impl StorageService {
                 let user_id = self.authenticate(&token).await
                     .map_err(|e| format!("Authentication failed: {}", e))?;
                 self.authorize(&user_id, "GetBlocksByHeight").await
-                    .map_err(|e| format!("Authorization failed: {}", e))?;
+                    .map_err(|e| format("Authorization failed: {}", e))?;
                 self.rate_limiter.until_ready().await;
 
-                // Replaced placeholder with dummy block
-                let blocks = vec![Block::new()];
+                let mut blocks = vec![];
+                let db = self.block_db.lock().await;
+                for result in db.scan_prefix(b"block:height:") {
+                    let (key, value) = result.map_err(|e| format!("Sled error: {}", e))?;
+                    let height_str = String::from_utf8(key[13..].to_vec()).map_err(|e| format("UTF8 error: {}", e))?;
+                    let height = height_str.parse::<u64>().map_err(|e| format("Parse error: {}", e))?;
+                    if height <= request.max_height {
+                        let block = deserialize(&value).map_err(|e| format("Deserialization error: {}", e))?;
+                        blocks.push(block);
+                    }
+                }
+                blocks.sort_by_key(|b| b.header.time); // Sort by time as proxy for height
 
                 self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
                 Ok(StorageResponseType::GetBlocksByHeight(GetBlocksByHeightResponse { blocks, error: "".to_string() }))
             }
             StorageRequestType::GetBlockByHash { request, token } => {
                 let user_id = self.authenticate(&token).await
-                    .map_err(|e| format!("Authentication failed: {}", e))?;
+                    .map_err(|e| format("Authentication failed: {}", e))?;
                 self.authorize(&user_id, "GetBlockByHash").await
-                    .map_err(|e| format!("Authorization failed: {}", e))?;
+                    .map_err(|e| format("Authorization failed: {}", e))?;
                 self.rate_limiter.until_ready().await;
 
-                // Placeholder dummy block
-                let block = Block::new();
+                let db = self.block_db.lock().await;
+                let key = format!("block:hash:{}", request.block_hash);
+                let block_data = db.get(key.as_bytes()).map_err(|e| format("Sled error: {}", e))?;
+                let block = if let Some(data) = block_data {
+                    Some(deserialize(&data).map_err(|e| format("Deserialization error: {}", e))?)
+                } else {
+                    None
+                };
 
                 self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
                 Ok(StorageResponseType::GetBlockByHash(GetBlockByHashResponse { block, error: "".to_string() }))
+            }
+            StorageRequestType::StoreBlock { request, token } => {
+                let user_id = self.authenticate(&token).await
+                    .map_err(|e| format("Authentication failed: {}", e))?;
+                self.authorize(&user_id, "StoreBlock").await
+                    .map_err(|e| format("Authorization failed: {}", e))?;
+                self.rate_limiter.until_ready().await;
+
+                let db = self.block_db.lock().await;
+                let serialized = serialize(&request.block).map_err(|e| format("Serialization error: {}", e))?;
+                let hash_key = format("block:hash:{}", hex::encode(request.block.header.hash().0));
+                db.insert(hash_key.as_bytes(), &serialized).map_err(|e| format("Sled error: {}", e))?;
+                let height_key = format("block:height:{}", request.height);
+                db.insert(height_key.as_bytes(), &serialized).map_err(|e| format("Sled error: {}", e))?;
+                let timestamp_key = format("block:timestamp:{}", request.timestamp);
+                db.insert(timestamp_key.as_bytes(), &serialized).map_err(|e| format("Sled error: {}", e))?;
+
+                self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
+                Ok(StorageResponseType::StoreBlock(StoreBlockResponse {
+                    success: true,
+                    error: "".to_string(),
+                }))
             }
         }
     }
