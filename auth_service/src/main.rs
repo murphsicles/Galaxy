@@ -1,17 +1,20 @@
-use bincode::{deserialize, serialize};
-use serde::{Deserialize, Serialize};
-use tokio::net::{TcpListener, TcpStream};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tracing::{info, warn, error};
-use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation};
-use prometheus::{Counter, Gauge, Registry};
 use std::collections::HashMap;
+use std::env;
 use std::num::NonZeroU32;
 use std::sync::Arc;
+
+use bincode::{deserialize, serialize};
+use dotenv::dotenv;
+use governor::{Quota, RateLimiter};
+use jsonwebtoken::{decode, Validation};
+use prometheus::{Counter, Gauge, Registry};
+use serde::{Deserialize, Serialize};
+use shared::ShardManager;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Mutex;
 use toml;
-use governor::{Quota, RateLimiter};
-use shared::ShardManager;
+use tracing::{error, info, warn};
 
 #[derive(Serialize, Deserialize, Debug)]
 struct AuthenticateRequest {
@@ -70,30 +73,53 @@ enum AuthResponseType {
 struct AuthService {
     users: Arc<Mutex<HashMap<String, String>>>,
     roles: Arc<Mutex<HashMap<String, Vec<String>>>>,
-    secret_key: EncodingKey,
     decoding_key: DecodingKey,
     registry: Arc<Registry>,
     requests_total: Counter,
     latency_ms: Gauge,
     errors_total: Counter,
-    rate_limiter: Arc<RateLimiter<String, governor::state::direct::NotKeyed, governor::clock::DefaultClock>>,
+    rate_limiter: Arc<RateLimiter<gov::state::NotKeyed, gov::state::InMemoryState, gov::clock::DefaultClock>>,
     shard_manager: Arc<ShardManager>,
 }
 
 impl AuthService {
     async fn new() -> Self {
+        dotenv().ok();
+
         let config_str = include_str!("../../tests/config.toml");
         let config: toml::Value = toml::from_str(config_str).expect("Failed to parse config");
         let shard_id = config["sharding"]["shard_id"].as_integer().unwrap_or(0) as u32;
-        let jwt_secret = config["auth"]["jwt_secret"]
+        let jwt_secret = env::var("JWT_SECRET").unwrap_or_else(|_| config["auth"]["jwt_secret"]
             .as_str()
             .unwrap_or("secret")
-            .to_string();
+            .to_string());
 
         let users = Arc::new(Mutex::new(HashMap::new()));
         let roles = Arc::new(Mutex::new(HashMap::new()));
-        let secret_key = EncodingKey::from_secret(jwt_secret.as_bytes());
+
+        // Load roles from config
+        if let Some(roles_table) = config.get("roles") {
+            if let Some(roles_map) = roles_table.as_table() {
+                for (user, user_roles) in roles_map {
+                    if let Some(roles_array) = user_roles.as_array() {
+                        let roles_vec: Vec<String> = roles_array.iter().map(|r| r.as_str().unwrap().to_string()).collect();
+                        roles.lock().await.insert(user.clone(), roles_vec);
+                    }
+                }
+            }
+        } else {
+            // Default roles if not in config
+            let default_roles = vec![
+                "block_service:*".to_string(),
+                "transaction_service:*".to_string(),
+                "consensus_service:*".to_string(),
+                // Add more as needed
+            ];
+            roles.lock().await.insert("admin".to_string(), default_roles);
+        }
+
         let decoding_key = DecodingKey::from_secret(jwt_secret.as_bytes());
+
         let registry = Arc::new(Registry::new());
         let requests_total = Counter::new("auth_requests_total", "Total auth requests").unwrap();
         let latency_ms = Gauge::new("auth_latency_ms", "Average auth request latency").unwrap();
@@ -108,7 +134,6 @@ impl AuthService {
         AuthService {
             users,
             roles,
-            secret_key,
             decoding_key,
             registry,
             requests_total,
@@ -130,7 +155,7 @@ impl AuthService {
                     &self.decoding_key,
                     &Validation::new(jsonwebtoken::Algorithm::HS256),
                 ) {
-                    Ok(claims) => claims,
+                    Ok(claims) => claims.claims,
                     Err(e) => {
                         warn!("Invalid token: {}", e);
                         self.errors_total.inc();
@@ -138,7 +163,7 @@ impl AuthService {
                     }
                 };
 
-                let user_id = match claims.claims.get("sub").cloned() {
+                let user_id = match claims.get("sub").cloned() {
                     Some(id) => id,
                     None => {
                         self.errors_total.inc();
@@ -268,8 +293,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_max_level(tracing::Level::INFO)
         .init();
 
-    let addr = "127.0.0.1:50060";
+    let addr = env::var("AUTH_ADDR").unwrap_or("127.0.0.1:50060".to_string());
     let auth_service = AuthService::new().await;
-    auth_service.run(addr).await?;
+    auth_service.run(&addr).await?;
     Ok(())
 }
