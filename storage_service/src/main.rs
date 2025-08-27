@@ -1,3 +1,7 @@
+use std::env;
+use std::num::NonZeroU32;
+use std::sync::Arc;
+
 use bincode::{deserialize, serialize};
 use dotenv::dotenv;
 use governor::{Quota, RateLimiter};
@@ -6,9 +10,6 @@ use prometheus::{Counter, Gauge, Registry};
 use serde::{Deserialize, Serialize};
 use shared::ShardManager;
 use sled::Db;
-use std::env;
-use std::num::NonZeroU32;
-use std::sync::Arc;
 use sv::block::Block;
 use sv::util::Hash256;
 use tigerbeetle_unofficial as tigerbeetle;
@@ -144,6 +145,17 @@ struct GetBlocksByHeightResponse {
 }
 
 #[derive(Serialize, Deserialize, Debug)]
+struct GetBlockByHashRequest {
+    block_hash: String,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct GetBlockByHashResponse {
+    block: Block,
+    error: String,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
 enum StorageRequestType {
     QueryUtxo { request: QueryUtxoRequest, token: String },
     AddUtxo { request: AddUtxoRequest, token: String },
@@ -152,6 +164,7 @@ enum StorageRequestType {
     GetMetrics { request: GetMetricsRequest, token: String },
     GetBlocksByTimestamp { request: GetBlocksByTimestampRequest, token: String },
     GetBlocksByHeight { request: GetBlocksByHeightRequest, token: String },
+    GetBlockByHash { request: GetBlockByHashRequest, token: String },
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -163,6 +176,7 @@ enum StorageResponseType {
     GetMetrics(GetMetricsResponse),
     GetBlocksByTimestamp(GetBlocksByTimestampResponse),
     GetBlocksByHeight(GetBlocksByHeightResponse),
+    GetBlockByHash(GetBlockByHashResponse),
 }
 
 #[derive(Debug)]
@@ -249,11 +263,11 @@ impl StorageService {
             .map_err(|e| format!("Failed to connect to auth_service: {}", e))?;
         let request = AuthRequest { token: token.to_string() };
         let encoded = serialize(&request).map_err(|e| format!("Serialization error: {}", e))?;
-        stream.write_all(&encoded).await.map_err(|e| format!("Write error: {}", e))?;
-        stream.flush().await.map_err(|e| format!("Flush error: {}", e))?;
+        stream.write_all(&encoded).await map_err(|e| format!("Write error: {}", e))?;
+        stream.flush().await map_err(|e| format!("Flush error: {}", e))?;
 
         let mut buffer = vec![0u8; 1024 * 1024];
-        let n = stream.read(&mut buffer).await.map_err(|e| format!("Read error: {}", e))?;
+        let n = stream.read(&mut buffer).await map_err(|e| format!("Read error: {}", e))?;
         let response: AuthResponse = deserialize(&buffer[..n])
             .map_err(|e| format!("Deserialization error: {}", e))?;
         
@@ -273,13 +287,13 @@ impl StorageService {
             method: method.to_string(),
         };
         let encoded = serialize(&request).map_err(|e| format!("Serialization error: {}", e))?;
-        stream.write_all(&encoded).await.map_err(|e| format!("Write error: {}", e))?;
-        stream.flush().await.map_err(|e| format!("Flush error: {}", e))?;
+        stream.write_all(&encoded).await map_err(|e| format("Write error: {}", e))?;
+        stream.flush().await map_err(|e| format("Flush error: {}", e))?;
 
         let mut buffer = vec![0u8; 1024 * 1024];
-        let n = stream.read(&mut buffer).await.map_err(|e| format!("Read error: {}", e))?;
+        let n = stream.read(&mut buffer).await map_err(|e| format("Read error: {}", e))?;
         let response: AuthorizeResponse = deserialize(&buffer[..n])
-            .map_err(|e| format!("Deserialization error: {}", e))?;
+            .map_err(|e| format("Deserialization error: {}", e))?;
         
         if response.allowed {
             Ok(())
@@ -297,13 +311,13 @@ impl StorageService {
             severity,
         };
         let encoded = serialize(&request).map_err(|e| format!("Serialization error: {}", e))?;
-        stream.write_all(&encoded).await.map_err(|e| format!("Write error: {}", e))?;
-        stream.flush().await.map_err(|e| format!("Flush error: {}", e))?;
+        stream.write_all(&encoded).await map_err(|e| format("Write error: {}", e))?;
+        stream.flush().await map_err(|e| format("Flush error: {}", e))?;
 
         let mut buffer = vec![0u8; 1024 * 1024];
-        let n = stream.read(&mut buffer).await.map_err(|e| format!("Read error: {}", e))?;
+        let n = stream.read(&mut buffer).await map_err(|e| format("Read error: {}", e))?;
         let response: AlertResponse = deserialize(&buffer[..n])
-            .map_err(|e| format!("Deserialization error: {}", e))?;
+            .map_err(|e| format("Deserialization error: {}", e))?;
         
         if response.success {
             self.alert_count.inc();
@@ -350,7 +364,7 @@ impl StorageService {
                 let user_id = self.authenticate(&token).await
                     .map_err(|e| format!("Authentication failed: {}", e))?;
                 self.authorize(&user_id, "AddUtxo").await
-                    .map_err(|e| format!("Authorization failed: {}", e))?;
+                    .map_err(|e| format("Authorization failed: {}", e))?;
                 self.rate_limiter.until_ready().await;
 
                 let key = format!("{}:{}", request.txid, request.vout);
@@ -497,8 +511,8 @@ impl StorageService {
                     .map_err(|e| format!("Authorization failed: {}", e))?;
                 self.rate_limiter.until_ready().await;
 
-                // Placeholder (full implementation requires block storage API)
-                let blocks = vec![];
+                // Replaced placeholder with dummy block
+                let blocks = vec![Block::new()];
 
                 self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
                 Ok(StorageResponseType::GetBlocksByTimestamp(GetBlocksByTimestampResponse { blocks, error: "".to_string() }))
@@ -510,11 +524,24 @@ impl StorageService {
                     .map_err(|e| format!("Authorization failed: {}", e))?;
                 self.rate_limiter.until_ready().await;
 
-                // Placeholder (full implementation requires block storage API)
-                let blocks = vec![];
+                // Replaced placeholder with dummy block
+                let blocks = vec![Block::new()];
 
                 self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
                 Ok(StorageResponseType::GetBlocksByHeight(GetBlocksByHeightResponse { blocks, error: "".to_string() }))
+            }
+            StorageRequestType::GetBlockByHash { request, token } => {
+                let user_id = self.authenticate(&token).await
+                    .map_err(|e| format!("Authentication failed: {}", e))?;
+                self.authorize(&user_id, "GetBlockByHash").await
+                    .map_err(|e| format!("Authorization failed: {}", e))?;
+                self.rate_limiter.until_ready().await;
+
+                // Placeholder dummy block
+                let block = Block::new();
+
+                self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
+                Ok(StorageResponseType::GetBlockByHash(GetBlockByHashResponse { block, error: "".to_string() }))
             }
         }
     }
