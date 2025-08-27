@@ -67,6 +67,17 @@ struct ValidateBlockResponse {
 }
 
 #[derive(Serialize, Deserialize, Debug)]
+struct GetBlockByHashRequest {
+    block_hash: String,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct GetBlockByHashResponse {
+    block: Option<Block>,
+    error: String,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
 struct GetMetricsRequest {}
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -95,6 +106,7 @@ struct GetAgedBlocksResponse {
 #[derive(Serialize, Deserialize, Debug)]
 enum BlockRequestType {
     ValidateBlock { request: ValidateBlockRequest, token: String },
+    GetBlockByHash { request: GetBlockByHashRequest, token: String },
     GetMetrics { request: GetMetricsRequest, token: String },
     GetAgedBlocks(GetAgedBlocksRequest),
 }
@@ -102,6 +114,7 @@ enum BlockRequestType {
 #[derive(Serialize, Deserialize, Debug)]
 enum BlockResponseType {
     ValidateBlock(ValidateBlockResponse),
+    GetBlockByHash(GetBlockByHashResponse),
     GetMetrics(GetMetricsResponse),
     GetAgedBlocks(GetAgedBlocksResponse),
 }
@@ -144,15 +157,28 @@ struct GetBlocksByHeightResponse {
 }
 
 #[derive(Serialize, Deserialize, Debug)]
+struct GetBlockByHashStorageRequest {
+    block_hash: String,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct GetBlockByHashStorageResponse {
+    block: Option<Block>,
+    error: String,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
 enum StorageRequestType {
     GetBlocksByTimestamp { request: GetBlocksByTimestampRequest, token: String },
     GetBlocksByHeight { request: GetBlocksByHeightRequest, token: String },
+    GetBlockByHash { request: GetBlockByHashStorageRequest, token: String },
 }
 
 #[derive(Serialize, Deserialize, Debug)]
 enum StorageResponseType {
     GetBlocksByTimestamp(GetBlocksByTimestampResponse),
     GetBlocksByHeight(GetBlocksByHeightResponse),
+    GetBlockByHash(GetBlockByHashStorageResponse),
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -221,7 +247,7 @@ impl BlockService {
         stream.flush().await.map_err(|e| format!("Flush error: {}", e))?;
 
         let mut buffer = vec![0u8; 1024 * 1024];
-        let n = stream.read(&mut buffer).await.map_err(|e| format!("Read error: {}", e))?;
+        let n = stream.read(&mut buffer).await map_err(|e| format!("Read error: {}", e))?;
         let response: AuthResponse = deserialize(&buffer[..n])
             .map_err(|e| format!("Deserialization error: {}", e))?;
         
@@ -241,11 +267,11 @@ impl BlockService {
             method: method.to_string(),
         };
         let encoded = serialize(&request).map_err(|e| format!("Serialization error: {}", e))?;
-        stream.write_all(&encoded).await.map_err(|e| format!("Write error: {}", e))?;
-        stream.flush().await.map_err(|e| format!("Flush error: {}", e))?;
+        stream.write_all(&encoded).await map_err(|e| format!("Write error: {}", e))?;
+        stream.flush().await map_err(|e| format!("Flush error: {}", e))?;
 
         let mut buffer = vec![0u8; 1024 * 1024];
-        let n = stream.read(&mut buffer).await.map_err(|e| format!("Read error: {}", e))?;
+        let n = stream.read(&mut buffer).await map_err(|e| format!("Read error: {}", e))?;
         let response: AuthorizeResponse = deserialize(&buffer[..n])
             .map_err(|e| format!("Deserialization error: {}", e))?;
         
@@ -265,11 +291,11 @@ impl BlockService {
             severity,
         };
         let encoded = serialize(&request).map_err(|e| format!("Serialization error: {}", e))?;
-        stream.write_all(&encoded).await.map_err(|e| format!("Write error: {}", e))?;
-        stream.flush().await.map_err(|e| format!("Flush error: {}", e))?;
+        stream.write_all(&encoded).await map_err(|e| format!("Write error: {}", e))?;
+        stream.flush().await map_err(|e| format!("Flush error: {}", e))?;
 
         let mut buffer = vec![0u8; 1024 * 1024];
-        let n = stream.read(&mut buffer).await.map_err(|e| format!("Read error: {}", e))?;
+        let n = stream.read(&mut buffer).await map_err(|e| format!("Read error: {}", e))?;
         let response: AlertResponse = deserialize(&buffer[..n])
             .map_err(|e| format!("Deserialization error: {}", e))?;
         
@@ -289,11 +315,11 @@ impl BlockService {
             before_timestamp,
         }, token: token.to_string() };
         let encoded = serialize(&request).map_err(|e| format!("Serialization error: {}", e))?;
-        stream.write_all(&encoded).await.map_err(|e| format!("Write error: {}", e))?;
-        stream.flush().await.map_err(|e| format!("Flush error: {}", e))?;
+        stream.write_all(&encoded).await map_err(|e| format!("Write error: {}", e))?;
+        stream.flush().await map_err(|e| format!("Flush error: {}", e))?;
 
         let mut buffer = vec![0u8; 1024 * 1024];
-        let n = stream.read(&mut buffer).await.map_err(|e| format!("Read error: {}", e))?;
+        let n = stream.read(&mut buffer).await map_err(|e| format!("Read error: {}", e))?;
         let response: StorageResponseType = deserialize(&buffer[..n])
             .map_err(|e| format!("Deserialization error: {}", e))?;
         
@@ -386,7 +412,7 @@ impl BlockService {
                 let block: Block = sv_deserialize(&block_bytes).map_err(|e| {
                     warn!("Invalid block: {}", e);
                     let _ = self.send_alert("validate_invalid_block_deserialization", &format!("Invalid block: {}", e), 2);
-                    format!("Invalid block: {}", e)
+                    format("Invalid block: {}", e)
                 })?;
 
                 let resp = self.validate_block_consensus(&request.block_hex, &token).await?;
