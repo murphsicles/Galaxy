@@ -14,6 +14,7 @@ use sv::transaction::Transaction as SvTransaction;
 use sv::util::{deserialize as sv_deserialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::Mutex;
 use toml;
 use tracing::{error, info, warn};
 
@@ -159,7 +160,7 @@ enum ConsensusResponseType {
 
 #[derive(Serialize, Deserialize, Debug)]
 enum IndexRequestType {
-    IndexTransaction(IndexTransactionRequest),
+    IndexTransaction { request: IndexTransactionRequest, token: String },
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -181,8 +182,9 @@ struct TransactionService {
     alert_count: Counter,
     index_throughput: Gauge,
     errors_total: Counter,
-    rate_limiter: Arc<RateLimiter<NotKeyed, governor::state::InMemoryState, governor::clock::DefaultClock>>,
+    rate_limiter: Arc<RateLimiter<gov::state::NotKeyed, gov::state::InMemoryState, gov::clock::DefaultClock>>,
     shard_manager: Arc<ShardManager>,
+    indexed_count: Arc<Mutex<u64>>,
 }
 
 impl TransactionService {
@@ -222,6 +224,7 @@ impl TransactionService {
             errors_total,
             rate_limiter,
             shard_manager: Arc::new(ShardManager::new()),
+            indexed_count: Arc::new(Mutex::new(0)),
         }
     }
 
@@ -230,11 +233,11 @@ impl TransactionService {
             .map_err(|e| format!("Failed to connect to auth_service: {}", e))?;
         let request = AuthRequest { token: token.to_string() };
         let encoded = serialize(&request).map_err(|e| format!("Serialization error: {}", e))?;
-        stream.write_all(&encoded).await.map_err(|e| format!("Write error: {}", e))?;
-        stream.flush().await.map_err(|e| format!("Flush error: {}", e))?;
+        stream.write_all(&encoded).await map_err(|e| format!("Write error: {}", e))?;
+        stream.flush().await map_err(|e| format!("Flush error: {}", e))?;
 
         let mut buffer = vec![0u8; 1024 * 1024];
-        let n = stream.read(&mut buffer).await.map_err(|e| format!("Read error: {}", e))?;
+        let n = stream.read(&mut buffer).await map_err(|e| format!("Read error: {}", e))?;
         let response: AuthResponse = deserialize(&buffer[..n])
             .map_err(|e| format!("Deserialization error: {}", e))?;
         
@@ -254,11 +257,11 @@ impl TransactionService {
             method: method.to_string(),
         };
         let encoded = serialize(&request).map_err(|e| format!("Serialization error: {}", e))?;
-        stream.write_all(&encoded).await.map_err(|e| format!("Write error: {}", e))?;
-        stream.flush().await.map_err(|e| format!("Flush error: {}", e))?;
+        stream.write_all(&encoded).await map_err(|e| format!("Write error: {}", e))?;
+        stream.flush().await map_err(|e| format!("Flush error: {}", e))?;
 
         let mut buffer = vec![0u8; 1024 * 1024];
-        let n = stream.read(&mut buffer).await.map_err(|e| format!("Read error: {}", e))?;
+        let n = stream.read(&mut buffer).await map_err(|e| format!("Read error: {}", e))?;
         let response: AuthorizeResponse = deserialize(&buffer[..n])
             .map_err(|e| format!("Deserialization error: {}", e))?;
         
@@ -278,11 +281,11 @@ impl TransactionService {
             severity,
         };
         let encoded = serialize(&request).map_err(|e| format!("Serialization error: {}", e))?;
-        stream.write_all(&encoded).await.map_err(|e| format!("Write error: {}", e))?;
-        stream.flush().await.map_err(|e| format!("Flush error: {}", e))?;
+        stream.write_all(&encoded).await map_err(|e| format!("Write error: {}", e))?;
+        stream.flush().await map_err(|e| format!("Flush error: {}", e))?;
 
         let mut buffer = vec![0u8; 1024 * 1024];
-        let n = stream.read(&mut buffer).await.map_err(|e| format!("Read error: {}", e))?;
+        let n = stream.read(&mut buffer).await map_err(|e| format!("Read error: {}", e))?;
         let response: AlertResponse = deserialize(&buffer[..n])
             .map_err(|e| format!("Deserialization error: {}", e))?;
         
@@ -311,11 +314,11 @@ impl TransactionService {
             .map_err(|e| format!("Failed to connect to consensus_service: {}", e))?;
         let consensus_request = ConsensusRequestType::ValidateTransaction { request: ValidateTransactionConsensusRequest { tx_hex: tx_hex.to_string() }, token: token.to_string() };
         let encoded = serialize(&consensus_request).map_err(|e| format!("Serialization error: {}", e))?;
-        stream.write_all(&encoded).await.map_err(|e| format!("Write error: {}", e))?;
-        stream.flush().await.map_err(|e| format!("Flush error: {}", e))?;
+        stream.write_all(&encoded).await map_err(|e| format!("Write error: {}", e))?;
+        stream.flush().await map_err(|e| format!("Flush error: {}", e))?;
 
         let mut buffer = vec![0u8; 1024 * 1024];
-        let n = stream.read(&mut buffer).await.map_err(|e| format!("Read error: {}", e))?;
+        let n = stream.read(&mut buffer).await map_err(|e| format!("Read error: {}", e))?;
         let consensus_response: ConsensusResponseType = deserialize(&buffer[..n])
             .map_err(|e| format!("Deserialization error: {}", e))?;
 
@@ -351,11 +354,11 @@ impl TransactionService {
             amount: output.value,
         }).collect() }, token: token.to_string() };
         let encoded = serialize(&storage_request).map_err(|e| format!("Serialization error: {}", e))?;
-        stream.write_all(&encoded).await.map_err(|e| format!("Write error: {}", e))?;
-        stream.flush().await.map_err(|e| format!("Flush error: {}", e))?;
+        stream.write_all(&encoded).await map_err(|e| format!("Write error: {}", e))?;
+        stream.flush().await map_err(|e| format!("Flush error: {}", e))?;
 
         let mut buffer = vec![0u8; 1024 * 1024];
-        let n = stream.read(&mut buffer).await.map_err(|e| format!("Read error: {}", e))?;
+        let n = stream.read(&mut buffer).await map_err(|e| format!("Read error: {}", e))?;
         let storage_response: StorageResponseType = deserialize(&buffer[..n])
             .map_err(|e| format!("Deserialization error: {}", e))?;
 
@@ -370,7 +373,7 @@ impl TransactionService {
             return Err("Unexpected response type".to_string());
         }
 
-        self.tx_queue.send(tx_hex.to_string()).await.map_err(|e| format!("Queue error: {}", e))?;
+        self.tx_queue.send(tx_hex.to_string()).await map_err(|e| format!("Queue error: {}", e))?;
 
         Ok(ProcessTransactionResponse {
             success: true,
@@ -381,17 +384,20 @@ impl TransactionService {
     async fn index_transaction(&self, tx_hex: &str, token: &str) -> Result<IndexTransactionResponse, String> {
         let mut stream = TcpStream::connect(&self.index_service_addr).await
             .map_err(|e| format!("Failed to connect to index_service: {}", e))?;
-        let index_request = IndexRequestType::IndexTransaction(IndexTransactionRequest { tx_hex: tx_hex.to_string() });
+        let index_request = IndexRequestType::IndexTransaction { request: IndexTransactionRequest { tx_hex: tx_hex.to_string() }, token: token.to_string() };
         let encoded = serialize(&index_request).map_err(|e| format!("Serialization error: {}", e))?;
-        stream.write_all(&encoded).await.map_err(|e| format!("Write error: {}", e))?;
-        stream.flush().await.map_err(|e| format!("Flush error: {}", e))?;
+        stream.write_all(&encoded).await map_err(|e| format!("Write error: {}", e))?;
+        stream.flush().await map_err(|e| format!("Flush error: {}", e))?;
 
         let mut buffer = vec![0u8; 1024 * 1024];
-        let n = stream.read(&mut buffer).await.map_err(|e| format!("Read error: {}", e))?;
+        let n = stream.read(&mut buffer).await map_err(|e| format!("Read error: {}", e))?;
         let index_response: IndexResponseType = deserialize(&buffer[..n])
             .map_err(|e| format!("Deserialization error: {}", e))?;
 
         if let IndexResponseType::IndexTransaction(resp) = index_response {
+            let mut count = self.indexed_count.lock().await;
+            *count += 1;
+            self.index_throughput.set(*count as f64 / 60.0); // Approximate TPS over 1 min
             Ok(resp)
         } else {
             Err("Unexpected response type".to_string())
@@ -452,7 +458,6 @@ impl TransactionService {
 
                 let resp = self.index_transaction(&request.tx_hex, &token).await?;
 
-                self.index_throughput.set(1.0); // Update with actual throughput calculation if needed
                 self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
                 Ok(TransactionResponseType::IndexTransaction(resp))
             }
