@@ -1,21 +1,25 @@
-use bincode::{deserialize, serialize};
-use serde::{Deserialize, Serialize};
-use tokio::net::{TcpListener, TcpStream};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use async_stream::try_stream;
-use futures::Stream;
-use std::pin::Pin;
-use tracing::{info, warn, error};
-use prometheus::{Counter, Gauge, Registry};
+use std::env;
+use std::io::Cursor;
 use std::num::NonZeroU32;
+use std::pin::Pin;
 use std::sync::Arc;
-use tokio::sync::Mutex;
-use toml;
+
+use async_stream::try_stream;
+use bincode::{deserialize, serialize};
+use dotenv::dotenv;
+use futures::Stream;
 use governor::{Quota, RateLimiter};
+use prometheus::{Counter, Gauge, Registry};
+use serde::{Deserialize, Serialize};
 use shared::ShardManager;
 use sv::messages::Tx;
 use sv::util::Serializable;
-use std::io::Cursor;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::Mutex;
+use toml;
+use tracing::{error, info, warn};
+use async_channel::Receiver;
 
 #[derive(Serialize, Deserialize, Debug)]
 struct AuthRequest {
@@ -129,8 +133,8 @@ struct ValidateBlockResponse {
 
 #[derive(Serialize, Deserialize, Debug)]
 enum BlockRequestType {
-    AssembleBlock { request: AssembleBlockRequest },
-    ValidateBlock { request: ValidateBlockRequest },
+    AssembleBlock { request: AssembleBlockRequest, token: String },
+    ValidateBlock { request: ValidateBlockRequest, token: String },
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -165,12 +169,14 @@ struct MiningService {
     latency_ms: Gauge,
     alert_count: Counter,
     errors_total: Counter,
-    rate_limiter: Arc<RateLimiter<String, governor::state::direct::NotKeyed, governor::clock::DefaultClock>>,
+    rate_limiter: Arc<RateLimiter<gov::state::NotKeyed, gov::state::InMemoryState, gov::clock::DefaultClock>>,
     shard_manager: Arc<ShardManager>,
 }
 
 impl MiningService {
     async fn new() -> Self {
+        dotenv().ok();
+
         let config_str = include_str!("../../tests/config.toml");
         let config: toml::Value = toml::from_str(config_str).expect("Failed to parse config");
         let shard_id = config["sharding"]["shard_id"].as_integer().unwrap_or(0) as u32;
@@ -189,9 +195,9 @@ impl MiningService {
         )));
 
         MiningService {
-            block_service_addr: "127.0.0.1:50054".to_string(),
-            auth_service_addr: "127.0.0.1:50060".to_string(),
-            alert_service_addr: "127.0.0.1:50061".to_string(),
+            block_service_addr: env::var("BLOCK_ADDR").unwrap_or("127.0.0.1:50054".to_string()),
+            auth_service_addr: env::var("AUTH_ADDR").unwrap_or("127.0.0.1:50060".to_string()),
+            alert_service_addr: env::var("ALERT_ADDR").unwrap_or("127.0.0.1:50061".to_string()),
             registry,
             requests_total,
             latency_ms,
@@ -206,14 +212,14 @@ impl MiningService {
         let mut stream = TcpStream::connect(&self.auth_service_addr).await
             .map_err(|e| format!("Failed to connect to auth_service: {}", e))?;
         let request = AuthRequest { token: token.to_string() };
-        let encoded = serialize(&request).map_err(|e| format("Serialization error: {}", e))?;
-        stream.write_all(&encoded).await.map_err(|e| format("Write error: {}", e))?;
-        stream.flush().await.map_err(|e| format("Flush error: {}", e))?;
+        let encoded = serialize(&request).map_err(|e| format!("Serialization error: {}", e))?;
+        stream.write_all(&encoded).await.map_err(|e| format!("Write error: {}", e))?;
+        stream.flush().await.map_err(|e| format!("Flush error: {}", e))?;
 
         let mut buffer = vec![0u8; 1024 * 1024];
-        let n = stream.read(&mut buffer).await.map_err(|e| format("Read error: {}", e))?;
+        let n = stream.read(&mut buffer).await.map_err(|e| format!("Read error: {}", e))?;
         let response: AuthResponse = deserialize(&buffer[..n])
-            .map_err(|e| format("Deserialization error: {}", e))?;
+            .map_err(|e| format!("Deserialization error: {}", e))?;
         
         if response.success {
             Ok(response.user_id)
@@ -224,20 +230,20 @@ impl MiningService {
 
     async fn authorize(&self, user_id: &str, method: &str) -> Result<(), String> {
         let mut stream = TcpStream::connect(&self.auth_service_addr).await
-            .map_err(|e| format("Failed to connect to auth_service: {}", e))?;
+            .map_err(|e| format!("Failed to connect to auth_service: {}", e))?;
         let request = AuthorizeRequest {
             user_id: user_id.to_string(),
             service: "mining_service".to_string(),
             method: method.to_string(),
         };
-        let encoded = serialize(&request).map_err(|e| format("Serialization error: {}", e))?;
-        stream.write_all(&encoded).await.map_err(|e| format("Write error: {}", e))?;
-        stream.flush().await.map_err(|e| format("Flush error: {}", e))?;
+        let encoded = serialize(&request).map_err(|e| format!("Serialization error: {}", e))?;
+        stream.write_all(&encoded).await.map_err(|e| format!("Write error: {}", e))?;
+        stream.flush().await.map_err(|e| format!("Flush error: {}", e))?;
 
         let mut buffer = vec![0u8; 1024 * 1024];
-        let n = stream.read(&mut buffer).await.map_err(|e| format("Read error: {}", e))?;
+        let n = stream.read(&mut buffer).await.map_err(|e| format!("Read error: {}", e))?;
         let response: AuthorizeResponse = deserialize(&buffer[..n])
-            .map_err(|e| format("Deserialization error: {}", e))?;
+            .map_err(|e| format!("Deserialization error: {}", e))?;
         
         if response.allowed {
             Ok(())
@@ -248,20 +254,20 @@ impl MiningService {
 
     async fn send_alert(&self, event_type: &str, message: &str, severity: u32) -> Result<(), String> {
         let mut stream = TcpStream::connect(&self.alert_service_addr).await
-            .map_err(|e| format("Failed to connect to alert_service: {}", e))?;
+            .map_err(|e| format!("Failed to connect to alert_service: {}", e))?;
         let request = AlertRequest {
             event_type: event_type.to_string(),
             message: message.to_string(),
             severity,
         };
-        let encoded = serialize(&request).map_err(|e| format("Serialization error: {}", e))?;
-        stream.write_all(&encoded).await.map_err(|e| format("Write error: {}", e))?;
-        stream.flush().await.map_err(|e| format("Flush error: {}", e))?;
+        let encoded = serialize(&request).map_err(|e| format!("Serialization error: {}", e))?;
+        stream.write_all(&encoded).await.map_err(|e| format!("Write error: {}", e))?;
+        stream.flush().await.map_err(|e| format!("Flush error: {}", e))?;
 
         let mut buffer = vec![0u8; 1024 * 1024];
-        let n = stream.read(&mut buffer).await.map_err(|e| format("Read error: {}", e))?;
+        let n = stream.read(&mut buffer).await.map_err(|e| format!("Read error: {}", e))?;
         let response: AlertResponse = deserialize(&buffer[..n])
-            .map_err(|e| format("Deserialization error: {}", e))?;
+            .map_err(|e| format!("Deserialization error: {}", e))?;
         
         if response.success {
             self.alert_count.inc();
@@ -279,22 +285,22 @@ impl MiningService {
         match request {
             MiningRequestType::GenerateBlockTemplate { request, token } => {
                 let user_id = self.authenticate(&token).await
-                    .map_err(|e| format("Authentication failed: {}", e))?;
+                    .map_err(|e| format!("Authentication failed: {}", e))?;
                 self.authorize(&user_id, "GenerateBlockTemplate").await
-                    .map_err(|e| format("Authorization failed: {}", e))?;
+                    .map_err(|e| format!("Authorization failed: {}", e))?;
                 self.rate_limiter.until_ready().await;
 
                 let mut stream = TcpStream::connect(&self.block_service_addr).await
-                    .map_err(|e| format("Failed to connect to block_service: {}", e))?;
-                let block_request = BlockRequestType::AssembleBlock { request: AssembleBlockRequest { tx_hexes: request.tx_hexes } };
-                let encoded = serialize(&block_request).map_err(|e| format("Serialization error: {}", e))?;
-                stream.write_all(&encoded).await.map_err(|e| format("Write error: {}", e))?;
-                stream.flush().await.map_err(|e| format("Flush error: {}", e))?;
+                    .map_err(|e| format!("Failed to connect to block_service: {}", e))?;
+                let block_request = BlockRequestType::AssembleBlock { request: AssembleBlockRequest { tx_hexes: request.tx_hexes }, token: token.to_string() };
+                let encoded = serialize(&block_request).map_err(|e| format!("Serialization error: {}", e))?;
+                stream.write_all(&encoded).await.map_err(|e| format!("Write error: {}", e))?;
+                stream.flush().await.map_err(|e| format!("Flush error: {}", e))?;
 
                 let mut buffer = vec![0u8; 1024 * 1024];
-                let n = stream.read(&mut buffer).await.map_err(|e| format("Read error: {}", e))?;
+                let n = stream.read(&mut buffer).await.map_err(|e| format!("Read error: {}", e))?;
                 let block_response: BlockResponseType = deserialize(&buffer[..n])
-                    .map_err(|e| format("Deserialization error: {}", e))?;
+                    .map_err(|e| format!("Deserialization error: {}", e))?;
                 
                 let block_response = match block_response {
                     BlockResponseType::AssembleBlock(response) => response,
@@ -311,7 +317,7 @@ impl MiningService {
 
                 if !block_response.success {
                     warn!("Block assembly failed: {}", block_response.error);
-                    let _ = self.send_alert("generate_block_template_failed", &format("Block assembly failed: {}", block_response.error), 2);
+                    let _ = self.send_alert("generate_block_template_failed", &format!("Block assembly failed: {}", block_response.error), 2);
                     return Ok(MiningResponseType::GenerateBlockTemplate(GenerateBlockTemplateResponse {
                         success: false,
                         block_hex: "".to_string(),
@@ -321,7 +327,7 @@ impl MiningService {
 
                 if block_response.block_hex.len() > 34_359_738_368 {
                     warn!("Block size exceeds 32GB: {}", block_response.block_hex.len());
-                    let _ = self.send_alert("generate_block_template_size_exceeded", &format("Block size exceeds 32GB: {}", block_response.block_hex.len()), 3);
+                    let _ = self.send_alert("generate_block_template_size_exceeded", &format!("Block size exceeds 32GB: {}", block_response.block_hex.len()), 3);
                     return Ok(MiningResponseType::GenerateBlockTemplate(GenerateBlockTemplateResponse {
                         success: false,
                         block_hex: "".to_string(),
@@ -338,20 +344,20 @@ impl MiningService {
             }
             MiningRequestType::SubmitMinedBlock { request, token } => {
                 let user_id = self.authenticate(&token).await
-                    .map_err(|e| format("Authentication failed: {}", e))?;
+                    .map_err(|e| format!("Authentication failed: {}", e))?;
                 self.authorize(&user_id, "SubmitMinedBlock").await
-                    .map_err(|e| format("Authorization failed: {}", e))?;
+                    .map_err(|e| format!("Authorization failed: {}", e))?;
                 self.rate_limiter.until_ready().await;
 
                 let block_bytes = hex::decode(&request.block_hex).map_err(|e| {
                     warn!("Invalid block hex: {}", e);
-                    let _ = self.send_alert("submit_mined_block_invalid_hex", &format("Invalid block hex: {}", e), 2);
-                    format("Invalid block hex: {}", e)
+                    let _ = self.send_alert("submit_mined_block_invalid_hex", &format!("Invalid block hex: {}", e), 2);
+                    format!("Invalid block hex: {}", e)
                 })?;
                 let block: Block = Serializable::read(&mut Cursor::new(&block_bytes)).map_err(|e| {
                     warn!("Invalid block: {}", e);
-                    let _ = self.send_alert("submit_mined_block_invalid_deserialization", &format("Invalid block: {}", e), 2);
-                    format("Invalid block: {}", e)
+                    let _ = self.send_alert("submit_mined_block_invalid_deserialization", &format!("Invalid block: {}", e), 2);
+                    format!("Invalid block: {}", e)
                 })?;
 
                 if block.size() > 34_359_738_368 {
@@ -364,16 +370,16 @@ impl MiningService {
                 }
 
                 let mut stream = TcpStream::connect(&self.block_service_addr).await
-                    .map_err(|e| format("Failed to connect to block_service: {}", e))?;
-                let block_request = BlockRequestType::ValidateBlock { request: ValidateBlockRequest { block_hex: request.block_hex.clone() } };
-                let encoded = serialize(&block_request).map_err(|e| format("Serialization error: {}", e))?;
-                stream.write_all(&encoded).await.map_err(|e| format("Write error: {}", e))?;
-                stream.flush().await.map_err(|e| format("Flush error: {}", e))?;
+                    .map_err(|e| format!("Failed to connect to block_service: {}", e))?;
+                let block_request = BlockRequestType::ValidateBlock { request: ValidateBlockRequest { block_hex: request.block_hex.clone() }, token: token.to_string() };
+                let encoded = serialize(&block_request).map_err(|e| format!("Serialization error: {}", e))?;
+                stream.write_all(&encoded).await map_err(|e| format!("Write error: {}", e))?;
+                stream.flush().await map_err(|e| format!("Flush error: {}", e))?;
 
                 let mut buffer = vec![0u8; 1024 * 1024];
-                let n = stream.read(&mut buffer).await.map_err(|e| format("Read error: {}", e))?;
+                let n = stream.read(&mut buffer).await map_err(|e| format!("Read error: {}", e))?;
                 let block_response: BlockResponseType = deserialize(&buffer[..n])
-                    .map_err(|e| format("Deserialization error: {}", e))?;
+                    .map_err(|e| format!("Deserialization error: {}", e))?;
                 
                 let block_response = match block_response {
                     BlockResponseType::ValidateBlock(response) => response,
@@ -389,7 +395,7 @@ impl MiningService {
 
                 if !block_response.success {
                     warn!("Block validation failed: {}", block_response.error);
-                    let _ = self.send_alert("submit_mined_block_failed", &format("Block validation failed: {}", block_response.error), 2);
+                    let _ = self.send_alert("submit_mined_block_failed", &format!("Block validation failed: {}", block_response.error), 2);
                     return Ok(MiningResponseType::SubmitMinedBlock(SubmitMinedBlockResponse {
                         success: false,
                         error: block_response.error,
@@ -404,22 +410,22 @@ impl MiningService {
             }
             MiningRequestType::StreamMiningWork { request, token } => {
                 let user_id = self.authenticate(&token).await
-                    .map_err(|e| format("Authentication failed: {}", e))?;
+                    .map_err(|e| format!("Authentication failed: {}", e))?;
                 self.authorize(&user_id, "StreamMiningWork").await
-                    .map_err(|e| format("Authorization failed: {}", e))?;
+                    .map_err(|e| format!("Authorization failed: {}", e))?;
                 self.rate_limiter.until_ready().await;
 
                 let mut stream = TcpStream::connect(&self.block_service_addr).await
-                    .map_err(|e| format("Failed to connect to block_service: {}", e))?;
-                let block_request = BlockRequestType::AssembleBlock { request: AssembleBlockRequest { tx_hexes: request.tx_hexes } };
-                let encoded = serialize(&block_request).map_err(|e| format("Serialization error: {}", e))?;
-                stream.write_all(&encoded).await.map_err(|e| format("Write error: {}", e))?;
-                stream.flush().await.map_err(|e| format("Flush error: {}", e))?;
+                    .map_err(|e| format!("Failed to connect to block_service: {}", e))?;
+                let block_request = BlockRequestType::AssembleBlock { request: AssembleBlockRequest { tx_hexes: request.tx_hexes }, token: token.to_string() };
+                let encoded = serialize(&block_request).map_err(|e| format!("Serialization error: {}", e))?;
+                stream.write_all(&encoded).await map_err(|e| format!("Write error: {}", e))?;
+                stream.flush().await map_err(|e| format!("Flush error: {}", e))?;
 
                 let mut buffer = vec![0u8; 1024 * 1024];
-                let n = stream.read(&mut buffer).await.map_err(|e| format("Read error: {}", e))?;
+                let n = stream.read(&mut buffer).await map_err(|e| format!("Read error: {}", e))?;
                 let block_response: BlockResponseType = deserialize(&buffer[..n])
-                    .map_err(|e| format("Deserialization error: {}", e))?;
+                    .map_err(|e| format!("Deserialization error: {}", e))?;
                 
                 let block_response = match block_response {
                     BlockResponseType::AssembleBlock(response) => response,
@@ -436,7 +442,7 @@ impl MiningService {
 
                 if !block_response.success {
                     warn!("Block assembly failed: {}", block_response.error);
-                    let _ = self.send_alert("stream_mining_work_failed", &format("Block assembly failed: {}", block_response.error), 2);
+                    let _ = self.send_alert("stream_mining_work_failed", &format!("Block assembly failed: {}", block_response.error), 2);
                     return Ok(MiningResponseType::StreamMiningWork(StreamMiningWorkResponse {
                         success: false,
                         block_hex: "".to_string(),
@@ -446,7 +452,7 @@ impl MiningService {
 
                 if block_response.block_hex.len() > 34_359_738_368 {
                     warn!("Block size exceeds 32GB: {}", block_response.block_hex.len());
-                    let _ = self.send_alert("stream_mining_work_size_exceeded", &format("Block size exceeds 32GB: {}", block_response.block_hex.len()), 3);
+                    let _ = self.send_alert("stream_mining_work_size_exceeded", &format!("Block size exceeds 32GB: {}", block_response.block_hex.len()), 3);
                     return Ok(MiningResponseType::StreamMiningWork(StreamMiningWorkResponse {
                         success: false,
                         block_hex: "".to_string(),
@@ -463,9 +469,9 @@ impl MiningService {
             }
             MiningRequestType::GetMetrics { request, token } => {
                 let user_id = self.authenticate(&token).await
-                    .map_err(|e| format("Authentication failed: {}", e))?;
+                    .map_err(|e| format!("Authentication failed: {}", e))?;
                 self.authorize(&user_id, "GetMetrics").await
-                    .map_err(|e| format("Authorization failed: {}", e))?;
+                    .map_err(|e| format!("Authorization failed: {}", e))?;
 
                 self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
                 Ok(MiningResponseType::GetMetrics(GetMetricsResponse {
@@ -496,7 +502,7 @@ impl MiningService {
 
                 let mut stream = TcpStream::connect(&service.block_service_addr).await
                     .map_err(|e| format("Failed to connect to block_service: {}", e))?;
-                let block_request = BlockRequestType::AssembleBlock { request: AssembleBlockRequest { tx_hexes: req.tx_hexes } };
+                let block_request = BlockRequestType::AssembleBlock { request: AssembleBlockRequest { tx_hexes: req.tx_hexes }, token: token.to_string() };
                 let encoded = serialize(&block_request).map_err(|e| format("Serialization error: {}", e))?;
                 stream.write_all(&encoded).await.map_err(|e| format("Write error: {}", e))?;
                 stream.flush().await.map_err(|e| format("Flush error: {}", e))?;
@@ -621,8 +627,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_max_level(tracing::Level::INFO)
         .init();
 
-    let addr = "127.0.0.1:50058";
+    let addr = env::var("MINING_ADDR").unwrap_or("127.0.0.1:50058".to_string());
     let mining_service = MiningService::new().await;
-    mining_service.run(addr).await?;
+    mining_service.run(&addr).await?;
     Ok(())
 }
