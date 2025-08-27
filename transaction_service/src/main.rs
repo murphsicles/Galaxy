@@ -168,6 +168,24 @@ enum IndexResponseType {
     IndexTransaction(IndexTransactionResponse),
 }
 
+#[derive(Serialize, Deserialize, Debug)]
+enum TransactionRequestType {
+    ValidateTransaction { request: ValidateTransactionRequest, token: String },
+    ProcessTransaction { request: ProcessTransactionRequest, token: String },
+    BatchValidateTransaction { request: BatchValidateTransactionRequest, token: String },
+    IndexTransaction { request: IndexTransactionRequest, token: String },
+    GetMetrics { request: GetMetricsRequest, token: String },
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+enum TransactionResponseType {
+    ValidateTransaction(ValidateTransactionResponse),
+    ProcessTransaction(ProcessTransactionResponse),
+    BatchValidateTransaction(BatchValidateTransactionResponse),
+    IndexTransaction(IndexTransactionResponse),
+    GetMetrics(GetMetricsResponse),
+}
+
 #[derive(Debug)]
 struct TransactionService {
     storage_service_addr: String,
@@ -336,7 +354,7 @@ impl TransactionService {
         let tx_bytes = hex::decode(tx_hex).map_err(|e| {
             warn!("Invalid transaction hex: {}", e);
             let _ = self.send_alert("process_invalid_tx", &format!("Invalid transaction hex: {}", e), 2);
-            format!("Invalid transaction hex: {}", e)
+            format!("Invalid transaction: {}", e)
         })?;
         let tx: SvTransaction = sv_deserialize(&tx_bytes).map_err(|e| {
             warn!("Invalid transaction: {}", e);
