@@ -45,7 +45,7 @@
   - Batching for transactions, blocks, and UTXOs.
   - Lean message structures with 4GB buffer hints for large blocks.
   - Transaction queuing and SPV proof caching.
-  - Scalable UTXO storage with Tiger Beetle DB. (Local Hashmap by default).
+  - Scalable UTXO storage with Tiger Beetle DB.
   - Dynamic chunk sizing for efficient data transfer in torrent-like protocol.
   - Prometheus metrics for performance monitoring.
   - Structured logging with tracing for observability.
@@ -160,7 +160,7 @@ Test services using a TCP client or custom scripts with `bincode` serialization,
 ### Testnet Integration
 Galaxy is configured to connect to BSV testnet nodes. See `tests/config.toml` for settings:
 - Testnet nodes for `network_service`.
-- Tiger Beetle server address for `storage_service`. (Default in memory Hashmap for testing purposes)
+- Tiger Beetle server address for `storage_service`.
 - Sharding parameters and node mappings.
 - Authentication settings.
 - Alert and indexing configurations.
