@@ -213,11 +213,11 @@ impl MiningService {
             .map_err(|e| format!("Failed to connect to auth_service: {}", e))?;
         let request = AuthRequest { token: token.to_string() };
         let encoded = serialize(&request).map_err(|e| format!("Serialization error: {}", e))?;
-        stream.write_all(&encoded).await.map_err(|e| format!("Write error: {}", e))?;
-        stream.flush().await.map_err(|e| format!("Flush error: {}", e))?;
+        stream.write_all(&encoded).await map_err(|e| format!("Write error: {}", e))?;
+        stream.flush().await map_err(|e| format!("Flush error: {}", e))?;
 
         let mut buffer = vec![0u8; 1024 * 1024];
-        let n = stream.read(&mut buffer).await.map_err(|e| format!("Read error: {}", e))?;
+        let n = stream.read(&mut buffer).await map_err(|e| format!("Read error: {}", e))?;
         let response: AuthResponse = deserialize(&buffer[..n])
             .map_err(|e| format!("Deserialization error: {}", e))?;
         
@@ -237,11 +237,11 @@ impl MiningService {
             method: method.to_string(),
         };
         let encoded = serialize(&request).map_err(|e| format!("Serialization error: {}", e))?;
-        stream.write_all(&encoded).await.map_err(|e| format!("Write error: {}", e))?;
-        stream.flush().await.map_err(|e| format!("Flush error: {}", e))?;
+        stream.write_all(&encoded).await map_err(|e| format!("Write error: {}", e))?;
+        stream.flush().await map_err(|e| format!("Flush error: {}", e))?;
 
         let mut buffer = vec![0u8; 1024 * 1024];
-        let n = stream.read(&mut buffer).await.map_err(|e| format!("Read error: {}", e))?;
+        let n = stream.read(&mut buffer).await map_err(|e| format!("Read error: {}", e))?;
         let response: AuthorizeResponse = deserialize(&buffer[..n])
             .map_err(|e| format!("Deserialization error: {}", e))?;
         
@@ -261,13 +261,13 @@ impl MiningService {
             severity,
         };
         let encoded = serialize(&request).map_err(|e| format!("Serialization error: {}", e))?;
-        stream.write_all(&encoded).await.map_err(|e| format!("Write error: {}", e))?;
-        stream.flush().await.map_err(|e| format!("Flush error: {}", e))?;
+        stream.write_all(&encoded).await map_err(|e| format!("Write error: {}", e))?;
+        stream.flush().await map_err(|e| format!("Flush error: {}", e))?;
 
         let mut buffer = vec![0u8; 1024 * 1024];
-        let n = stream.read(&mut buffer).await.map_err(|e| format!("Read error: {}", e))?;
+        let n = stream.read(&mut buffer).await map_err(|e| format("Read error: {}", e))?;
         let response: AlertResponse = deserialize(&buffer[..n])
-            .map_err(|e| format!("Deserialization error: {}", e))?;
+            .map_err(|e| format("Deserialization error: {}", e))?;
         
         if response.success {
             self.alert_count.inc();
@@ -287,20 +287,20 @@ impl MiningService {
                 let user_id = self.authenticate(&token).await
                     .map_err(|e| format!("Authentication failed: {}", e))?;
                 self.authorize(&user_id, "GenerateBlockTemplate").await
-                    .map_err(|e| format!("Authorization failed: {}", e))?;
+                    .map_err(|e| format("Authorization failed: {}", e))?;
                 self.rate_limiter.until_ready().await;
 
                 let mut stream = TcpStream::connect(&self.block_service_addr).await
-                    .map_err(|e| format!("Failed to connect to block_service: {}", e))?;
+                    .map_err(|e| format("Failed to connect to block_service: {}", e))?;
                 let block_request = BlockRequestType::AssembleBlock { request: AssembleBlockRequest { tx_hexes: request.tx_hexes }, token: token.to_string() };
-                let encoded = serialize(&block_request).map_err(|e| format!("Serialization error: {}", e))?;
-                stream.write_all(&encoded).await.map_err(|e| format!("Write error: {}", e))?;
-                stream.flush().await.map_err(|e| format!("Flush error: {}", e))?;
+                let encoded = serialize(&block_request).map_err(|e| format("Serialization error: {}", e))?;
+                stream.write_all(&encoded).await map_err(|e| format("Write error: {}", e))?;
+                stream.flush().await map_err(|e| format("Flush error: {}", e))?;
 
                 let mut buffer = vec![0u8; 1024 * 1024];
-                let n = stream.read(&mut buffer).await.map_err(|e| format!("Read error: {}", e))?;
+                let n = stream.read(&mut buffer).await map_err(|e| format("Read error: {}", e))?;
                 let block_response: BlockResponseType = deserialize(&buffer[..n])
-                    .map_err(|e| format!("Deserialization error: {}", e))?;
+                    .map_err(|e| format("Deserialization error: {}", e))?;
                 
                 let block_response = match block_response {
                     BlockResponseType::AssembleBlock(response) => response,
@@ -317,7 +317,7 @@ impl MiningService {
 
                 if !block_response.success {
                     warn!("Block assembly failed: {}", block_response.error);
-                    let _ = self.send_alert("generate_block_template_failed", &format!("Block assembly failed: {}", block_response.error), 2);
+                    let _ = self.send_alert("generate_block_template_failed", &format("Block assembly failed: {}", block_response.error), 2);
                     return Ok(MiningResponseType::GenerateBlockTemplate(GenerateBlockTemplateResponse {
                         success: false,
                         block_hex: "".to_string(),
@@ -327,7 +327,7 @@ impl MiningService {
 
                 if block_response.block_hex.len() > 34_359_738_368 {
                     warn!("Block size exceeds 32GB: {}", block_response.block_hex.len());
-                    let _ = self.send_alert("generate_block_template_size_exceeded", &format!("Block size exceeds 32GB: {}", block_response.block_hex.len()), 3);
+                    let _ = self.send_alert("generate_block_template_size_exceeded", &format("Block size exceeds 32GB: {}", block_response.block_hex.len()), 3);
                     return Ok(MiningResponseType::GenerateBlockTemplate(GenerateBlockTemplateResponse {
                         success: false,
                         block_hex: "".to_string(),
@@ -344,14 +344,14 @@ impl MiningService {
             }
             MiningRequestType::SubmitMinedBlock { request, token } => {
                 let user_id = self.authenticate(&token).await
-                    .map_err(|e| format!("Authentication failed: {}", e))?;
+                    .map_err(|e| format("Authentication failed: {}", e))?;
                 self.authorize(&user_id, "SubmitMinedBlock").await
-                    .map_err(|e| format!("Authorization failed: {}", e))?;
+                    .map_err(|e| format("Authorization failed: {}", e))?;
                 self.rate_limiter.until_ready().await;
 
                 let block_bytes = hex::decode(&request.block_hex).map_err(|e| {
                     warn!("Invalid block hex: {}", e);
-                    let _ = self.send_alert("submit_mined_block_invalid_hex", &format!("Invalid block hex: {}", e), 2);
+                    let _ = self.send_alert("submit_mined_block_invalid_hex", &format("Invalid block hex: {}", e), 2);
                     format("Invalid block hex: {}", e)
                 })?;
                 let block: Block = Serializable::read(&mut Cursor::new(&block_bytes)).map_err(|e| {
@@ -373,11 +373,11 @@ impl MiningService {
                     .map_err(|e| format("Failed to connect to block_service: {}", e))?;
                 let block_request = BlockRequestType::ValidateBlock { request: ValidateBlockRequest { block_hex: request.block_hex.clone() }, token: token.to_string() };
                 let encoded = serialize(&block_request).map_err(|e| format("Serialization error: {}", e))?;
-                stream.write_all(&encoded).await.map_err(|e| format("Write error: {}", e))?;
-                stream.flush().await.map_err(|e| format("Flush error: {}", e))?;
+                stream.write_all(&encoded).await map_err(|e| format("Write error: {}", e))?;
+                stream.flush().await map_err(|e| format("Flush error: {}", e))?;
 
                 let mut buffer = vec![0u8; 1024 * 1024];
-                let n = stream.read(&mut buffer).await.map_err(|e| format("Read error: {}", e))?;
+                let n = stream.read(&mut buffer).await map_err(|e| format("Read error: {}", e))?;
                 let block_response: BlockResponseType = deserialize(&buffer[..n])
                     .map_err(|e| format("Deserialization error: {}", e))?;
                 
@@ -419,11 +419,11 @@ impl MiningService {
                     .map_err(|e| format("Failed to connect to block_service: {}", e))?;
                 let block_request = BlockRequestType::AssembleBlock { request: AssembleBlockRequest { tx_hexes: request.tx_hexes }, token: token.to_string() };
                 let encoded = serialize(&block_request).map_err(|e| format("Serialization error: {}", e))?;
-                stream.write_all(&encoded).await.map_err(|e| format("Write error: {}", e))?;
-                stream.flush().await.map_err(|e| format("Flush error: {}", e))?;
+                stream.write_all(&encoded).await map_err(|e| format("Write error: {}", e))?;
+                stream.flush().await map_err(|e| format("Flush error: {}", e))?;
 
                 let mut buffer = vec![0u8; 1024 * 1024];
-                let n = stream.read(&mut buffer).await.map_err(|e| format("Read error: {}", e))?;
+                let n = stream.read(&mut buffer).await map_err(|e| format("Read error: {}", e))?;
                 let block_response: BlockResponseType = deserialize(&buffer[..n])
                     .map_err(|e| format("Deserialization error: {}", e))?;
                 
@@ -504,11 +504,11 @@ impl MiningService {
                     .map_err(|e| format("Failed to connect to block_service: {}", e))?;
                 let block_request = BlockRequestType::AssembleBlock { request: AssembleBlockRequest { tx_hexes: req.tx_hexes }, token: token.to_string() };
                 let encoded = serialize(&block_request).map_err(|e| format("Serialization error: {}", e))?;
-                stream.write_all(&encoded).await.map_err(|e| format("Write error: {}", e))?;
-                stream.flush().await.map_err(|e| format("Flush error: {}", e))?;
+                stream.write_all(&encoded).await map_err(|e| format("Write error: {}", e))?;
+                stream.flush().await map_err(|e| format("Flush error: {}", e))?;
 
                 let mut buffer = vec![0u8; 1024 * 1024];
-                let n = stream.read(&mut buffer).await.map_err(|e| format("Read error: {}", e))?;
+                let n = stream.read(&mut buffer).await map_err(|e| format("Read error: {}", e))?;
                 let block_response: BlockResponseType = deserialize(&buffer[..n])
                     .map_err(|e| format("Deserialization error: {}", e))?;
                 
