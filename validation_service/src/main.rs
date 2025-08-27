@@ -1,3 +1,9 @@
+use std::env;
+use std::io::Cursor;
+use std::num::NonZeroU32;
+use std::pin::Pin;
+use std::sync::Arc;
+
 use async_stream::try_stream;
 use bincode::{deserialize, serialize};
 use dotenv::dotenv;
@@ -8,11 +14,7 @@ use lru::LruCache;
 use prometheus::{Counter, Gauge, Registry};
 use serde::{Deserialize, Serialize};
 use shared::ShardManager;
-use std::env;
-use std::io::Cursor;
-use std::num::NonZeroU32;
-use std::pin::Pin;
-use std::sync::Arc;
+use sv::block::Block;
 use sv::block::Header;
 use sv::messages::Tx;
 use sv::util::{Hash256, Serializable};
@@ -21,6 +23,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Mutex;
 use toml;
 use tracing::{error, info, warn};
+use async_channel::Receiver;
 
 #[derive(Serialize, Deserialize, Debug)]
 struct AuthRequest {
@@ -148,13 +151,40 @@ struct QueryUtxoResponse {
 }
 
 #[derive(Serialize, Deserialize, Debug)]
+struct GetTxStatusRequest {
+    txid: String,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct GetTxStatusResponse {
+    status: String,
+    block_hash: Option<String>,
+    block_height: Option<u64>,
+    merkle_path: Option<String>,
+    error: String,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct GetBlockByHashRequest {
+    block_hash: String,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct GetBlockByHashResponse {
+    block: Block,
+    error: String,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
 enum BlockRequestType {
-    GetBlockHeaders { request: GetBlockHeadersRequest },
+    GetBlockHeaders { request: GetBlockHeadersRequest, token: String },
+    GetBlockByHash { request: GetBlockByHashRequest, token: String },
 }
 
 #[derive(Serialize, Deserialize, Debug)]
 enum BlockResponseType {
     GetBlockHeaders(GetBlockHeadersResponse),
+    GetBlockByHash(GetBlockByHashResponse),
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -165,6 +195,16 @@ enum StorageRequestType {
 #[derive(Serialize, Deserialize, Debug)]
 enum StorageResponseType {
     QueryUtxo(QueryUtxoResponse),
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+enum IndexRequestType {
+    GetTxStatus { request: GetTxStatusRequest, token: String },
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+enum IndexResponseType {
+    GetTxStatus(GetTxStatusResponse),
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -189,6 +229,7 @@ enum ValidationResponseType {
 struct ValidationService {
     block_service_addr: String,
     storage_service_addr: String,
+    index_service_addr: String,
     auth_service_addr: String,
     alert_service_addr: String,
     proof_cache: Arc<Mutex<LruCache<String, (String, Vec<String>)>>>,
@@ -198,7 +239,7 @@ struct ValidationService {
     cache_hits: Counter,
     alert_count: Counter,
     errors_total: Counter,
-    rate_limiter: Arc<RateLimiter<String, governor::state::direct::NotKeyed, governor::clock::DefaultClock>>,
+    rate_limiter: Arc<RateLimiter<gov::state::NotKeyed, gov::state::InMemoryState, gov::clock::DefaultClock>>,
     shard_manager: Arc<ShardManager>,
 }
 
@@ -229,6 +270,7 @@ impl ValidationService {
         ValidationService {
             block_service_addr: env::var("BLOCK_ADDR").unwrap_or("127.0.0.1:50054".to_string()),
             storage_service_addr: env::var("STORAGE_ADDR").unwrap_or("127.0.0.1:50053".to_string()),
+            index_service_addr: env::var("INDEX_ADDR").unwrap_or("127.0.0.1:50059".to_string()),
             auth_service_addr: env::var("AUTH_ADDR").unwrap_or("127.0.0.1:50060".to_string()),
             alert_service_addr: env::var("ALERT_ADDR").unwrap_or("127.0.0.1:50061".to_string()),
             proof_cache,
@@ -248,11 +290,11 @@ impl ValidationService {
             .map_err(|e| format!("Failed to connect to auth_service: {}", e))?;
         let request = AuthRequest { token: token.to_string() };
         let encoded = serialize(&request).map_err(|e| format!("Serialization error: {}", e))?;
-        stream.write_all(&encoded).await.map_err(|e| format!("Write error: {}", e))?;
-        stream.flush().await.map_err(|e| format!("Flush error: {}", e))?;
+        stream.write_all(&encoded).await map_err(|e| format!("Write error: {}", e))?;
+        stream.flush().await map_err(|e| format!("Flush error: {}", e))?;
 
         let mut buffer = vec![0u8; 1024 * 1024];
-        let n = stream.read(&mut buffer).await.map_err(|e| format!("Read error: {}", e))?;
+        let n = stream.read(&mut buffer).await map_err(|e| format!("Read error: {}", e))?;
         let response: AuthResponse = deserialize(&buffer[..n])
             .map_err(|e| format!("Deserialization error: {}", e))?;
         
@@ -272,13 +314,13 @@ impl ValidationService {
             method: method.to_string(),
         };
         let encoded = serialize(&request).map_err(|e| format!("Serialization error: {}", e))?;
-        stream.write_all(&encoded).await.map_err(|e| format!("Write error: {}", e))?;
-        stream.flush().await.map_err(|e| format!("Flush error: {}", e))?;
+        stream.write_all(&encoded).await map_err(|e| format!("Write error: {}", e))?;
+        stream.flush().await map_err(|e| format("Flush error: {}", e))?;
 
         let mut buffer = vec![0u8; 1024 * 1024];
-        let n = stream.read(&mut buffer).await.map_err(|e| format!("Read error: {}", e))?;
+        let n = stream.read(&mut buffer).await map_err(|e| format("Read error: {}", e))?;
         let response: AuthorizeResponse = deserialize(&buffer[..n])
-            .map_err(|e| format!("Deserialization error: {}", e))?;
+            .map_err(|e| format("Deserialization error: {}", e))?;
         
         if response.allowed {
             Ok(())
@@ -295,14 +337,14 @@ impl ValidationService {
             message: message.to_string(),
             severity,
         };
-        let encoded = serialize(&request).map_err(|e| format!("Serialization error: {}", e))?;
-        stream.write_all(&encoded).await.map_err(|e| format!("Write error: {}", e))?;
-        stream.flush().await.map_err(|e| format!("Flush error: {}", e))?;
+        let encoded = serialize(&request).map_err(|e| format("Serialization error: {}", e))?;
+        stream.write_all(&encoded).await map_err(|e| format("Write error: {}", e))?;
+        stream.flush().await map_err(|e| format("Flush error: {}", e))?;
 
         let mut buffer = vec![0u8; 1024 * 1024];
-        let n = stream.read(&mut buffer).await.map_err(|e| format!("Read error: {}", e))?;
+        let n = stream.read(&mut buffer).await map_err(|e| format("Read error: {}", e))?;
         let response: AlertResponse = deserialize(&buffer[..n])
-            .map_err(|e| format!("Deserialization error: {}", e))?;
+            .map_err(|e| format("Deserialization error: {}", e))?;
         
         if response.success {
             self.alert_count.inc();
@@ -313,7 +355,27 @@ impl ValidationService {
         }
     }
 
-    async fn generate_spv_proof(&self, txid: &str) -> Result<(String, Vec<String>), String> {
+    async fn get_tx_status(&self, txid: &str, token: &str) -> Result<GetTxStatusResponse, String> {
+        let mut stream = TcpStream::connect(&self.index_service_addr).await
+            .map_err(|e| format!("Failed to connect to index_service: {}", e))?;
+        let request = IndexRequestType::GetTxStatus { request: GetTxStatusRequest { txid: txid.to_string() }, token: token.to_string() };
+        let encoded = serialize(&request).map_err(|e| format!("Serialization error: {}", e))?;
+        stream.write_all(&encoded).await map_err(|e| format!("Write error: {}", e))?;
+        stream.flush().await map_err(|e| format("Flush error: {}", e))?;
+
+        let mut buffer = vec![0u8; 1024 * 1024];
+        let n = stream.read(&mut buffer).await map_err(|e| format("Read error: {}", e))?;
+        let response: IndexResponseType = deserialize(&buffer[..n])
+            .map_err(|e| format("Deserialization error: {}", e))?;
+
+        if let IndexResponseType::GetTxStatus(resp) = response {
+            Ok(resp)
+        } else {
+            Err("Unexpected response type".to_string())
+        }
+    }
+
+    async fn generate_spv_proof(&self, txid: &str, token: &str) -> Result<(String, Vec<String>), String> {
         self.proof_requests.inc();
         let start = std::time::Instant::now();
 
@@ -335,20 +397,25 @@ impl ValidationService {
             format!("Invalid transaction: {}", e)
         })?;
 
-        // TODO: Fetch block_hash from index_service using txid
-        let block_hash = "0000000000000000000000000000000000000000000000000000000000000000".to_string();
+        let status = self.get_tx_status(txid, token).await?;
+        if status.error.is_empty() && status.block_hash.is_none() {
+            warn!("No block hash found for txid: {}", txid);
+            let _ = self.send_alert("spv_no_block_hash", &format!("No block hash found for txid: {}", txid), 3);
+            return Err("No block hash found".to_string());
+        }
+        let block_hash = status.block_hash.unwrap_or_default();
 
         let mut stream = TcpStream::connect(&self.block_service_addr).await
             .map_err(|e| format!("Failed to connect to block_service: {}", e))?;
-        let block_request = BlockRequestType::GetBlockHeaders { request: GetBlockHeadersRequest { block_hash } };
+        let block_request = BlockRequestType::GetBlockHeaders { request: GetBlockHeadersRequest { block_hash: block_hash.clone() }, token: token.to_string() };
         let encoded = serialize(&block_request).map_err(|e| format!("Serialization error: {}", e))?;
-        stream.write_all(&encoded).await.map_err(|e| format!("Write error: {}", e))?;
-        stream.flush().await.map_err(|e| format!("Flush error: {}", e))?;
+        stream.write_all(&encoded).await map_err(|e| format!("Write error: {}", e))?;
+        stream.flush().await map_err(|e| format("Flush error: {}", e))?;
 
         let mut buffer = vec![0u8; 1024 * 1024];
-        let n = stream.read(&mut buffer).await.map_err(|e| format!("Read error: {}", e))?;
+        let n = stream.read(&mut buffer).await map_err(|e| format("Read error: {}", e))?;
         let block_response: BlockResponseType = deserialize(&buffer[..n])
-            .map_err(|e| format!("Deserialization error: {}", e))?;
+            .map_err(|e| format("Deserialization error: {}", e))?;
         
         let headers = match block_response {
             BlockResponseType::GetBlockHeaders(response) => response.headers,
@@ -365,16 +432,42 @@ impl ValidationService {
             return Err("No block headers found".to_string());
         }
 
-        // TODO: Fetch actual block and its tx_hashes from block_service or index
-        let dummy_tx_hashes = vec![tx.hash(), Hash256::default()];
-        let path = self.calculate_merkle_path(&tx.hash().0, &dummy_tx_hashes);
+        // Fetch the full block using GetBlockByHash from block_service
+        let mut stream = TcpStream::connect(&self.block_service_addr).await
+            .map_err(|e| format!("Failed to connect to block_service: {}", e))?;
+        let block_request = BlockRequestType::GetBlockByHash { request: GetBlockByHashRequest { block_hash }, token: token.to_string() };
+        let encoded = serialize(&block_request).map_err(|e| format!("Serialization error: {}", e))?;
+        stream.write_all(&encoded).await map_err(|e| format("Write error: {}", e))?;
+        stream.flush().await map_err(|e| format("Flush error: {}", e))?;
 
-        let merkle_path_hex = hex::encode(path.iter().flatten().cloned().collect::<Vec<u8>>());
+        let mut buffer = vec![0u8; 1024 * 1024];
+        let n = stream.read(&mut buffer).await map_err(|e| format("Read error: {}", e))?;
+        let block_response: BlockResponseType = deserialize(&buffer[..n])
+            .map_err(|e| format("Deserialization error: {}", e))?;
+        
+        let block = match block_response {
+            BlockResponseType::GetBlockByHash(response) => response.block,
+            _ => {
+                warn!("Unexpected response from block_service");
+                let _ = self.send_alert("spv_block_fetch_failed", "Unexpected response from block_service", 2);
+                return Err("Unexpected response from block_service".to_string());
+            }
+        };
 
-        proof_cache.put(txid.to_string(), (merkle_path_hex.clone(), headers.clone()));
-        self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
+        if let Some(block) = block {
+            let tx_hashes = block.transactions.iter().map(|tx| tx.hash()).collect::<Vec<Hash256>>();
+            let path = self.calculate_merkle_path(&tx.hash().0, &tx_hashes);
+            let merkle_path_hex = hex::encode(path.iter().flatten().cloned().collect::<Vec<u8>>());
 
-        Ok((merkle_path_hex, headers))
+            proof_cache.put(txid.to_string(), (merkle_path_hex.clone(), headers.clone()));
+            self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
+
+            Ok((merkle_path_hex, headers))
+        } else {
+            warn!("Block not found for hash: {}", block_hash);
+            let _ = self.send_alert("spv_block_not_found", &format!("Block not found for hash: {}", block_hash), 3);
+            Err("Block not found".to_string())
+        }
     }
 
     fn calculate_merkle_path(&self, tx_hash: &[u8; 32], tx_hashes: &Vec<Hash256>) -> Vec<[u8; 32]> {
@@ -416,8 +509,8 @@ impl ValidationService {
 
         let path_bytes = hex::decode(merkle_path).map_err(|e| {
             warn!("Invalid merkle path: {}", e);
-            let _ = self.send_alert("spv_verify_invalid_merkle_path", &format!("Invalid merkle path: {}", e), 2);
-            format!("Invalid merkle path: {}", e)
+            let _ = self.send_alert("spv_verify_invalid_merkle_path", &format("Invalid merkle path: {}", e), 2);
+            format("Invalid merkle path: {}", e)
         })?;
         let path: Vec<[u8; 32]> = path_bytes.chunks(32).map(|chunk| chunk.try_into().unwrap()).collect();
 
@@ -432,13 +525,13 @@ impl ValidationService {
         // Assume first header is the block header
         let header_bytes = hex::decode(&block_headers[0]).map_err(|e| {
             warn!("Invalid header: {}", e);
-            let _ = self.send_alert("spv_verify_invalid_header", &format!("Invalid header: {}", e), 2);
-            format!("Invalid header: {}", e)
+            let _ = self.send_alert("spv_verify_invalid_header", &format("Invalid header: {}", e), 2);
+            format("Invalid header: {}", e)
         })?;
         let header: Header = Serializable::read(&mut Cursor::new(&header_bytes)).map_err(|e| {
             warn!("Invalid header deserialization: {}", e);
-            let _ = self.send_alert("spv_verify_header_deserialization", &format!("Invalid header: {}", e), 2);
-            format!("Invalid header deserialization: {}", e)
+            let _ = self.send_alert("spv_verify_header_deserialization", &format("Invalid header: {}", e), 2);
+            format("Invalid header deserialization: {}", e)
         })?;
 
         let is_valid = current_hash == header.merkle_root.0;
@@ -460,10 +553,10 @@ impl ValidationService {
                 let user_id = self.authenticate(&token).await
                     .map_err(|e| format!("Authentication failed: {}", e))?;
                 self.authorize(&user_id, "GenerateSPVProof").await
-                    .map_err(|e| format!("Authorization failed: {}", e))?;
+                    .map_err(|e| format("Authorization failed: {}", e))?;
                 self.rate_limiter.until_ready().await;
 
-                let (merkle_path, block_headers) = self.generate_spv_proof(&request.txid).await?;
+                let (merkle_path, block_headers) = self.generate_spv_proof(&request.txid, &token).await?;
 
                 self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
                 Ok(ValidationResponseType::GenerateSPVProof(GenerateSPVProofResponse {
@@ -477,7 +570,7 @@ impl ValidationService {
                 let user_id = self.authenticate(&token).await
                     .map_err(|e| format!("Authentication failed: {}", e))?;
                 self.authorize(&user_id, "VerifySPVProof").await
-                    .map_err(|e| format!("Authorization failed: {}", e))?;
+                    .map_err(|e| format("Authorization failed: {}", e))?;
                 self.rate_limiter.until_ready().await;
 
                 let is_valid = self.verify_spv_proof(&request.txid, &request.merkle_path, &request.block_headers).await?;
@@ -492,14 +585,14 @@ impl ValidationService {
                 let user_id = self.authenticate(&token).await
                     .map_err(|e| format!("Authentication failed: {}", e))?;
                 self.authorize(&user_id, "BatchGenerateSPVProof").await
-                    .map_err(|e| format!("Authorization failed: {}", e))?;
+                    .map_err(|e| format("Authorization failed: {}", e))?;
                 self.rate_limiter.until_ready().await;
 
                 let mut results = vec![];
                 let mut proof_cache = self.proof_cache.lock().await;
 
                 for txid in request.txids {
-                    let result = self.generate_spv_proof(&txid).await;
+                    let result = self.generate_spv_proof(&txid, &token).await;
                     match result {
                         Ok((merkle_path_hex, block_headers)) => {
                             proof_cache.put(txid.clone(), (merkle_path_hex.clone(), block_headers.clone()));
@@ -526,12 +619,12 @@ impl ValidationService {
             }
             ValidationRequestType::StreamSPVProofs { request, token } => {
                 let user_id = self.authenticate(&token).await
-                    .map_err(|e| format!("Authentication failed: {}", e))?;
+                    .map_err(|e| format("Authentication failed: {}", e))?;
                 self.authorize(&user_id, "StreamSPVProofs").await
-                    .map_err(|e| format!("Authorization failed: {}", e))?;
+                    .map_err(|e| format("Authorization failed: {}", e))?;
                 self.rate_limiter.until_ready().await;
 
-                let result = self.generate_spv_proof(&request.txid).await;
+                let result = self.generate_spv_proof(&request.txid, &token).await;
                 match result {
                     Ok((merkle_path_hex, block_headers)) => {
                         let mut proof_cache = self.proof_cache.lock().await;
@@ -559,9 +652,9 @@ impl ValidationService {
             }
             ValidationRequestType::GetMetrics { request, token } => {
                 let user_id = self.authenticate(&token).await
-                    .map_err(|e| format!("Authentication failed: {}", e))?;
+                    .map_err(|e| format("Authentication failed: {}", e))?;
                 self.authorize(&user_id, "GetMetrics").await
-                    .map_err(|e| format!("Authorization failed: {}", e))?;
+                    .map_err(|e| format("Authorization failed: {}", e))?;
 
                 self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
                 Ok(ValidationResponseType::GetMetrics(GetMetricsResponse {
@@ -581,16 +674,16 @@ impl ValidationService {
         let service = self;
         try_stream! {
             let user_id = service.authenticate(&token).await
-                .map_err(|e| format!("Authentication failed: {}", e))?;
+                .map_err(|e| format("Authentication failed: {}", e))?;
             service.authorize(&user_id, "StreamSPVProofs").await
-                .map_err(|e| format!("Authorization failed: {}", e))?;
+                .map_err(|e| format("Authorization failed: {}", e))?;
             service.rate_limiter.until_ready().await;
 
             while let Ok(req) = requests.recv().await {
                 service.proof_requests.inc();
                 let start = std::time::Instant::now();
 
-                let result = service.generate_spv_proof(&req.txid).await;
+                let result = service.generate_spv_proof(&req.txid, &token).await;
                 match result {
                     Ok((merkle_path_hex, block_headers)) => {
                         let mut proof_cache = service.proof_cache.lock().await;
@@ -605,7 +698,7 @@ impl ValidationService {
                     }
                     Err(e) => {
                         warn!("Failed to generate SPV proof: {}", e);
-                        let _ = service.send_alert("spv_proof_generation_failed", &format!("Failed to generate SPV proof: {}", e), 2);
+                        let _ = service.send_alert("spv_proof_generation_failed", &format("Failed to generate SPV proof: {}", e), 2);
                         service.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
                         yield StreamSPVProofsResponse {
                             success: false,

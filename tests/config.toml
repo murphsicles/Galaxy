@@ -1,24 +1,24 @@
 # Configuration for Galaxy node testing
-# Version: 0.1.0
-# Updated: 2025-07-30
+# Version: 0.3.0
+# Updated: 2025-08-27
 
 [sharding]
 shard_id = 0  # Default shard ID for single-node testing
 shard_count = 4  # Number of shards for distributed testing
 
 [testnet]
-nodes = ["127.0.0.1:8333", "192.168.1.100:8333"]  # Testnet peer nodes for network_service
+nodes = ["testnet-seed.bitcoinsv.io", "testnet-seed.bitcoincloud.net", "testnet-seed.bitcoinunlimited.info"]  # BSV testnet DNS seeds
 
 [test_cases]
 # Example transaction for testing broadcast and validation
 [broadcast_transaction]
-tx_hex = "01000000010000000000000000000000000000000000000000000000000000000000000000ffffffff04deadbeef0100000001000000000000000000000000"
+tx_hex = "010000000138c7c61c14ffb063c3bb2664041a3e29ea6ea0412a0c18ff725ba4e9e12afae2030000006a47304402203e9ab8e4c14addf3b4741540b556cfb0e0efb67dc1a7b5ce84c3ac56b3fd447802203c9f49f7bd893ebd7060176dfc36bcaff9d2c443d9a0dd6cd2d59b372c024d20412102798913bc057b344de675dac34faafe3dc2f312c758cd9068209f810877306d66ffffffff02dc050000000000002076a914eb0bd5edba389198e73f8efabddfc61666969ff788ac6a0568656c6faa0d0000000000001976a914eb0bd5edba389198e73f8efabddfc61666969ff788ac00000000"
 
 # Overlay-specific consensus settings
 [overlay_consensus]
 # Default rules for overlay transactions
-restrict_op_return = true  # Restrict OP_RETURN data size to 4.3GB
-max_op_return_size = 4294967296  # Maximum OP_RETURN size in bytes (4.3GB)
+restrict_op_return = true  # Restrict OP_RETURN data size to 4.294GB
+max_op_return_size = 4294967296  # Maximum OP_RETURN size in bytes (4.294GB)
 
 # Metrics configuration
 [metrics]
@@ -27,10 +27,14 @@ prometheus_port = 9090  # Port for Prometheus metrics scraping
 alert_threshold = 5  # Maximum severity level for alerts
 log_level = "info"  # Tracing log level (debug, info, warn, error)
 
-# Merchant confuguration
+# Merchant configuration
 [merchant]
 port = 50063
 callback_retries = 5
 rate_limit = 10000  # req/s, higher for merchant volume
 log_level = "info"
 auth_token_rotation_interval_secs = 3600  # Align with torrent_service
+
+# Auth configuration
+[auth]
+jwt_secret = "a_secure_secret"

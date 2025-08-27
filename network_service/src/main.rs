@@ -1,4 +1,9 @@
-use async_channel::{Receiver, Sender, unbounded};
+use std::collections::HashSet;
+use std::env;
+use std::io::Cursor;
+use std::num::NonZeroU32;
+use std::sync::Arc;
+
 use bincode::{deserialize, serialize};
 use dotenv::dotenv;
 use governor::{Quota, RateLimiter};
@@ -6,12 +11,7 @@ use hex;
 use prometheus::{Counter, Gauge, Registry};
 use serde::{Deserialize, Serialize};
 use shared::ShardManager;
-use std::collections::HashSet;
-use std::env;
-use std::num::NonZeroU32;
-use std::sync::Arc;
-use sv::messages::{Inv, InvVect, Version, VerAck};
-use sv::network::Network as SvNetwork;
+use sv::messages::{Inv, InvVect, VerAck, Version};
 use sv::util::{Hash256, Serializable};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -172,7 +172,7 @@ struct NetworkService {
     latency_ms: Gauge,
     alert_count: Counter,
     errors_total: Counter,
-    rate_limiter: Arc<RateLimiter<NotKeyed, governor::state::InMemoryState, DefaultClock>>,
+    rate_limiter: Arc<RateLimiter<gov::state::NotKeyed, gov::state::InMemoryState, gov::clock::DefaultClock>>,
     shard_manager: Arc<ShardManager>,
 }
 
@@ -182,13 +182,6 @@ impl NetworkService {
 
         let config_str = include_str!("../../tests/config.toml");
         let config: toml::Value = toml::from_str(config_str).expect("Failed to parse config");
-
-        let initial_peers = config["testnet"]["nodes"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter_map(|v| v.as_str().map(|s| s.to_string()))
-            .collect::<HashSet<_>>();
 
         let registry = Arc::new(Registry::new());
         let requests_total = Counter::new("network_requests_total", "Total network requests").unwrap();
@@ -208,7 +201,7 @@ impl NetworkService {
             block_service_addr: env::var("BLOCK_ADDR").unwrap_or("127.0.0.1:50054".to_string()),
             auth_service_addr: env::var("AUTH_ADDR").unwrap_or("127.0.0.1:50060".to_string()),
             alert_service_addr: env::var("ALERT_ADDR").unwrap_or("127.0.0.1:50061".to_string()),
-            peers: Arc::new(Mutex::new(initial_peers)),
+            peers: Arc::new(Mutex::new(HashSet::new())),
             registry,
             requests_total,
             latency_ms,
@@ -227,19 +220,16 @@ impl NetworkService {
     }
 
     async fn discover_peers(&self) {
-        // BSV testnet DNS seeds
-        let seeds = vec![
-            "testnet-seed.bitcoinsv.io".to_string(),
-            "testnet-seed.bitcoincloud.net".to_string(),
+        let testnet_ips = vec![
+            "52.16.212.66:18333".to_string(),
+            "23.22.19.204:18333".to_string(),
+            "3.123.101.88:18333".to_string(),
+            "54.152.215.212:18333".to_string(),
         ];
 
-        for seed in seeds {
-            // Resolve DNS to IPs (placeholder: use tokio-resolver or hardcode for now)
-            let ips = vec!["127.0.0.1:18333".to_string()]; // Dummy
-            let mut peers = self.peers.lock().await;
-            for ip in ips {
-                peers.insert(ip);
-            }
+        let mut peers = self.peers.lock().await;
+        for ip in testnet_ips {
+            peers.insert(ip);
         }
     }
 
@@ -265,12 +255,20 @@ impl NetworkService {
         stream.write_all(&encoded).await.map_err(|e| format!("Write error: {}", e))?;
         stream.flush().await.map_err(|e| format!("Flush error: {}", e))?;
 
-        // Receive Version and VerAck
+        // Receive Version
         let mut buffer = vec![0u8; 1024];
         let n = stream.read(&mut buffer).await.map_err(|e| format!("Read error: {}", e))?;
-        // Parse Version (skip for now)
+        let _received_version: Version = Serializable::read(&mut Cursor::new(&buffer[..n])).map_err(|e| format!("Parse error: {}", e))?;
+
+        // Send VerAck
+        let verack = VerAck {};
+        let encoded = verack.serialize();
+        stream.write_all(&encoded).await.map_err(|e| format!("Write error: {}", e))?;
+        stream.flush().await.map_err(|e| format!("Flush error: {}", e))?;
+
+        // Receive VerAck
         let n = stream.read(&mut buffer).await.map_err(|e| format!("Read error: {}", e))?;
-        // Parse VerAck
+        let _received_verack: VerAck = Serializable::read(&mut Cursor::new(&buffer[..n])).map_err(|e| format!("Parse error: {}", e))?;
 
         Ok(stream)
     }
@@ -407,11 +405,11 @@ impl NetworkService {
                 .map_err(|e| format!("Failed to connect to transaction_service: {}", e))?;
             let tx_request = TransactionRequest { tx_hex: broadcast_transaction.tx_hex.clone() };
             let encoded = serialize(&tx_request).map_err(|e| format!("Serialization error: {}", e))?;
-            stream.write_all(&encoded).await.map_err(|e| format!("Write error: {}", e))?;
-            stream.flush().await.map_err(|e| format!("Flush error: {}", e))?;
+            stream.write_all(&encoded).await map_err(|e| format!("Write error: {}", e))?;
+            stream.flush().await map_err(|e| format!("Flush error: {}", e))?;
 
             let mut buffer = vec![0u8; 1024 * 1024];
-            let n = stream.read(&mut buffer).await.map_err(|e| format!("Read error: {}", e))?;
+            let n = stream.read(&mut buffer).await map_err(|e| format!("Read error: {}", e))?;
             let tx_response: TransactionResponse = deserialize(&buffer[..n])
                 .map_err(|e| format!("Deserialization error: {}", e))?;
 
@@ -454,11 +452,11 @@ impl NetworkService {
                 .map_err(|e| format!("Failed to connect to block_service: {}", e))?;
             let block_request = BlockRequest { block_hex: broadcast_block.block_hex.clone() };
             let encoded = serialize(&block_request).map_err(|e| format!("Serialization error: {}", e))?;
-            stream.write_all(&encoded).await.map_err(|e| format!("Write error: {}", e))?;
-            stream.flush().await.map_err(|e| format!("Flush error: {}", e))?;
+            stream.write_all(&encoded).await map_err(|e| format!("Write error: {}", e))?;
+            stream.flush().await map_err(|e| format!("Flush error: {}", e))?;
 
             let mut buffer = vec![0u8; 1024 * 1024];
-            let n = stream.read(&mut buffer).await.map_err(|e| format!("Read error: {}", e))?;
+            let n = stream.read(&mut buffer).await map_err(|e| format!("Read error: {}", e))?;
             let block_response: BlockResponse = deserialize(&buffer[..n])
                 .map_err(|e| format!("Deserialization error: {}", e))?;
 
