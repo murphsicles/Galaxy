@@ -1,23 +1,26 @@
-use bincode::{deserialize, serialize};
-use serde::{Deserialize, Serialize};
-use tokio::net::{TcpListener, TcpStream};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use async_stream::try_stream;
-use futures::Stream;
-use std::pin::Pin;
-use tracing::{info, warn, error};
-use prometheus::{Counter, Gauge, Registry};
+use std::env;
+use std::io::Cursor;
 use std::num::NonZeroU32;
+use std::pin::Pin;
 use std::sync::Arc;
+
+use async_stream::try_stream;
+use bincode::{deserialize, serialize};
+use dotenv::dotenv;
+use futures::Stream;
+use governor::{Quota, RateLimiter};
+use prometheus::{Counter, Gauge, Registry};
+use serde::{Deserialize, Serialize};
+use shared::ShardManager;
+use sled::Db;
+use sv::block::Block;
+use sv::messages::{Tx, TxOut};
+use sv::util::Serializable;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Mutex;
 use toml;
-use governor::{Quota, RateLimiter};
-use shared::ShardManager;
-use sv::messages::{Tx, TxOut};
-use sv::block::Block;
-use sv::util::Serializable;
-use sled::Db;
-use std::io::Cursor;
+use tracing::{error, info, warn};
 use async_channel::Receiver;
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -173,12 +176,14 @@ struct OverlayService {
     latency_ms: Gauge,
     alert_count: Counter,
     errors_total: Counter,
-    rate_limiter: Arc<RateLimiter<String, governor::state::direct::NotKeyed, governor::clock::DefaultClock>>,
+    rate_limiter: Arc<RateLimiter<gov::state::NotKeyed, gov::state::InMemoryState, gov::clock::DefaultClock>>,
     shard_manager: Arc<ShardManager>,
 }
 
 impl OverlayService {
     async fn new() -> Self {
+        dotenv().ok();
+
         let config_str = include_str!("../../tests/config.toml");
         let config: toml::Value = toml::from_str(config_str).expect("Failed to parse config");
         let shard_id = config["sharding"]["shard_id"].as_integer().unwrap_or(0) as u32;
@@ -200,8 +205,8 @@ impl OverlayService {
         )));
 
         OverlayService {
-            auth_service_addr: "127.0.0.1:50060".to_string(),
-            alert_service_addr: "127.0.0.1:50061".to_string(),
+            auth_service_addr: env::var("AUTH_ADDR").unwrap_or("127.0.0.1:50060".to_string()),
+            alert_service_addr: env::var("ALERT_ADDR").unwrap_or("127.0.0.1:50061".to_string()),
             db,
             registry,
             requests_total,
@@ -217,14 +222,14 @@ impl OverlayService {
         let mut stream = TcpStream::connect(&self.auth_service_addr).await
             .map_err(|e| format!("Failed to connect to auth_service: {}", e))?;
         let request = AuthRequest { token: token.to_string() };
-        let encoded = serialize(&request).map_err(|e| format("Serialization error: {}", e))?;
-        stream.write_all(&encoded).await.map_err(|e| format("Write error: {}", e))?;
-        stream.flush().await.map_err(|e| format("Flush error: {}", e))?;
+        let encoded = serialize(&request).map_err(|e| format!("Serialization error: {}", e))?;
+        stream.write_all(&encoded).await.map_err(|e| format!("Write error: {}", e))?;
+        stream.flush().await.map_err(|e| format!("Flush error: {}", e))?;
 
         let mut buffer = vec![0u8; 1024 * 1024];
-        let n = stream.read(&mut buffer).await.map_err(|e| format("Read error: {}", e))?;
+        let n = stream.read(&mut buffer).await.map_err(|e| format!("Read error: {}", e))?;
         let response: AuthResponse = deserialize(&buffer[..n])
-            .map_err(|e| format("Deserialization error: {}", e))?;
+            .map_err(|e| format!("Deserialization error: {}", e))?;
         
         if response.success {
             Ok(response.user_id)
@@ -235,20 +240,20 @@ impl OverlayService {
 
     async fn authorize(&self, user_id: &str, method: &str) -> Result<(), String> {
         let mut stream = TcpStream::connect(&self.auth_service_addr).await
-            .map_err(|e| format("Failed to connect to auth_service: {}", e))?;
+            .map_err(|e| format!("Failed to connect to auth_service: {}", e))?;
         let request = AuthorizeRequest {
             user_id: user_id.to_string(),
             service: "overlay_service".to_string(),
             method: method.to_string(),
         };
-        let encoded = serialize(&request).map_err(|e| format("Serialization error: {}", e))?;
-        stream.write_all(&encoded).await.map_err(|e| format("Write error: {}", e))?;
-        stream.flush().await.map_err(|e| format("Flush error: {}", e))?;
+        let encoded = serialize(&request).map_err(|e| format!("Serialization error: {}", e))?;
+        stream.write_all(&encoded).await.map_err(|e| format!("Write error: {}", e))?;
+        stream.flush().await.map_err(|e| format!("Flush error: {}", e))?;
 
         let mut buffer = vec![0u8; 1024 * 1024];
-        let n = stream.read(&mut buffer).await.map_err(|e| format("Read error: {}", e))?;
+        let n = stream.read(&mut buffer).await.map_err(|e| format!("Read error: {}", e))?;
         let response: AuthorizeResponse = deserialize(&buffer[..n])
-            .map_err(|e| format("Deserialization error: {}", e))?;
+            .map_err(|e| format!("Deserialization error: {}", e))?;
         
         if response.allowed {
             Ok(())
@@ -259,20 +264,20 @@ impl OverlayService {
 
     async fn send_alert(&self, event_type: &str, message: &str, severity: u32) -> Result<(), String> {
         let mut stream = TcpStream::connect(&self.alert_service_addr).await
-            .map_err(|e| format("Failed to connect to alert_service: {}", e))?;
+            .map_err(|e| format!("Failed to connect to alert_service: {}", e))?;
         let request = AlertRequest {
             event_type: event_type.to_string(),
             message: message.to_string(),
             severity,
         };
-        let encoded = serialize(&request).map_err(|e| format("Serialization error: {}", e))?;
-        stream.write_all(&encoded).await.map_err(|e| format("Write error: {}", e))?;
-        stream.flush().await.map_err(|e| format("Flush error: {}", e))?;
+        let encoded = serialize(&request).map_err(|e| format!("Serialization error: {}", e))?;
+        stream.write_all(&encoded).await.map_err(|e| format!("Write error: {}", e))?;
+        stream.flush().await.map_err(|e| format!("Flush error: {}", e))?;
 
         let mut buffer = vec![0u8; 1024 * 1024];
-        let n = stream.read(&mut buffer).await.map_err(|e| format("Read error: {}", e))?;
+        let n = stream.read(&mut buffer).await.map_err(|e| format!("Read error: {}", e))?;
         let response: AlertResponse = deserialize(&buffer[..n])
-            .map_err(|e| format("Deserialization error: {}", e))?;
+            .map_err(|e| format!("Deserialization error: {}", e))?;
         
         if response.success {
             self.alert_count.inc();
@@ -304,17 +309,17 @@ impl OverlayService {
         match request {
             OverlayRequestType::CreateOverlay { request, token } => {
                 let user_id = self.authenticate(&token).await
-                    .map_err(|e| format("Authentication failed: {}", e))?;
+                    .map_err(|e| format!("Authentication failed: {}", e))?;
                 self.authorize(&user_id, "CreateOverlay").await
-                    .map_err(|e| format("Authorization failed: {}", e))?;
+                    .map_err(|e| format!("Authorization failed: {}", e))?;
                 self.rate_limiter.until_ready().await;
 
                 let db = self.db.lock().await;
                 let key = format!("overlay:{}", request.overlay_id);
                 db.insert(key.as_bytes(), request.consensus_rules.as_bytes()).map_err(|e| {
                     warn!("Failed to create overlay: {}", e);
-                    let _ = self.send_alert("create_overlay_failed", &format("Failed to create overlay: {}", e), 2);
-                    format("Failed to create overlay: {}", e)
+                    let _ = self.send_alert("create_overlay_failed", &format!("Failed to create overlay: {}", e), 2);
+                    format!("Failed to create overlay: {}", e)
                 })?;
 
                 self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
@@ -325,20 +330,20 @@ impl OverlayService {
             }
             OverlayRequestType::JoinOverlay { request, token } => {
                 let user_id = self.authenticate(&token).await
-                    .map_err(|e| format("Authentication failed: {}", e))?;
+                    .map_err(|e| format!("Authentication failed: {}", e))?;
                 self.authorize(&user_id, "JoinOverlay").await
-                    .map_err(|e| format("Authorization failed: {}", e))?;
+                    .map_err(|e| format!("Authorization failed: {}", e))?;
                 self.rate_limiter.until_ready().await;
 
                 let db = self.db.lock().await;
                 let key = format!("overlay:{}", request.overlay_id);
                 if db.get(key.as_bytes()).map_err(|e| {
                     warn!("Failed to access overlay: {}", e);
-                    let _ = self.send_alert("join_overlay_failed", &format("Failed to access overlay: {}", e), 2);
-                    format("Failed to access overlay: {}", e)
+                    let _ = self.send_alert("join_overlay_failed", &format!("Failed to access overlay: {}", e), 2);
+                    format!("Failed to access overlay: {}", e)
                 })?.is_none() {
                     warn!("Overlay not found: {}", request.overlay_id);
-                    let _ = self.send_alert("join_overlay_not_found", &format("Overlay not found: {}", request.overlay_id), 2);
+                    let _ = self.send_alert("join_overlay_not_found", &format!("Overlay not found: {}", request.overlay_id), 2);
                     return Ok(OverlayResponseType::JoinOverlay(JoinOverlayResponse {
                         success: false,
                         error: "Overlay not found".to_string(),
@@ -353,20 +358,20 @@ impl OverlayService {
             }
             OverlayRequestType::LeaveOverlay { request, token } => {
                 let user_id = self.authenticate(&token).await
-                    .map_err(|e| format("Authentication failed: {}", e))?;
+                    .map_err(|e| format!("Authentication failed: {}", e))?;
                 self.authorize(&user_id, "LeaveOverlay").await
-                    .map_err(|e| format("Authorization failed: {}", e))?;
+                    .map_err(|e| format!("Authorization failed: {}", e))?;
                 self.rate_limiter.until_ready().await;
 
                 let db = self.db.lock().await;
                 let key = format!("overlay:{}", request.overlay_id);
                 if db.get(key.as_bytes()).map_err(|e| {
                     warn!("Failed to access overlay: {}", e);
-                    let _ = self.send_alert("leave_overlay_failed", &format("Failed to access overlay: {}", e), 2);
-                    format("Failed to access overlay: {}", e)
+                    let _ = self.send_alert("leave_overlay_failed", &format!("Failed to access overlay: {}", e), 2);
+                    format!("Failed to access overlay: {}", e)
                 })?.is_none() {
                     warn!("Overlay not found: {}", request.overlay_id);
-                    let _ = self.send_alert("leave_overlay_not_found", &format("Overlay not found: {}", request.overlay_id), 2);
+                    let _ = self.send_alert("leave_overlay_not_found", &format!("Overlay not found: {}", request.overlay_id), 2);
                     return Ok(OverlayResponseType::LeaveOverlay(LeaveOverlayResponse {
                         success: false,
                         error: "Overlay not found".to_string(),
@@ -381,9 +386,9 @@ impl OverlayService {
             }
             OverlayRequestType::StreamOverlayData { request, token } => {
                 let user_id = self.authenticate(&token).await
-                    .map_err(|e| format("Authentication failed: {}", e))?;
+                    .map_err(|e| format!("Authentication failed: {}", e))?;
                 self.authorize(&user_id, "StreamOverlayData").await
-                    .map_err(|e| format("Authorization failed: {}", e))?;
+                    .map_err(|e| format!("Authorization failed: {}", e))?;
                 self.rate_limiter.until_ready().await;
 
                 let db = self.db.lock().await;
@@ -399,7 +404,7 @@ impl OverlayService {
                     }
                     Ok(None) => {
                         warn!("Overlay not found: {}", request.overlay_id);
-                        let _ = self.send_alert("stream_overlay_not_found", &format("Overlay not found: {}", request.overlay_id), 2);
+                        let _ = self.send_alert("stream_overlay_not_found", &format!("Overlay not found: {}", request.overlay_id), 2);
                         Ok(OverlayResponseType::StreamOverlayData(StreamOverlayDataResponse {
                             success: false,
                             data: vec![],
@@ -408,50 +413,46 @@ impl OverlayService {
                     }
                     Err(e) => {
                         warn!("Failed to access overlay: {}", e);
-                        let _ = self.send_alert("stream_overlay_failed", &format("Failed to access overlay: {}", e), 2);
+                        let _ = self.send_alert("stream_overlay_failed", &format!("Failed to access overlay: {}", e), 2);
                         Ok(OverlayResponseType::StreamOverlayData(StreamOverlayDataResponse {
                             success: false,
                             data: vec![],
-                            error: format("Failed to access overlay: {}", e),
+                            error: format!("Failed to access overlay: {}", e),
                         }))
                     }
                 }
             }
             OverlayRequestType::ValidateOverlayConsensus { request, token } => {
                 let user_id = self.authenticate(&token).await
-                    .map_err(|e| format("Authentication failed: {}", e))?;
+                    .map_err(|e| format!("Authentication failed: {}", e))?;
                 self.authorize(&user_id, "ValidateOverlayConsensus").await
-                    .map_err(|e| format("Authorization failed: {}", e))?;
+                    .map_err(|e| format!("Authorization failed: {}", e))?;
                 self.rate_limiter.until_ready().await;
 
                 let block_bytes = hex::decode(&request.block_hex).map_err(|e| {
                     warn!("Invalid block hex: {}", e);
-                    let _ = self.send_alert("validate_overlay_invalid_hex", &format("Invalid block hex: {}", e), 2);
-                    format("Invalid block hex: {}", e)
+                    let _ = self.send_alert("validate_overlay_invalid_hex", &format!("Invalid block hex: {}", e), 2);
+                    format!("Invalid block hex: {}", e)
                 })?;
                 let block: Block = Serializable::read(&mut Cursor::new(&block_bytes)).map_err(|e| {
                     warn!("Invalid block: {}", e);
-                    let _ = self.send_alert("validate_overlay_invalid_deserialization", &format("Invalid block: {}", e), 2);
-                    format("Invalid block: {}", e)
+                    let _ = self.send_alert("validate_overlay_invalid_deserialization", &format!("Invalid block: {}", e), 2);
+                    format!("Invalid block: {}", e)
                 })?;
 
-                let result = self.validate_overlay_consensus(&block).await.map_err(|e| {
-                    warn!("Overlay validation failed: {}", e);
-                    let _ = self.send_alert("validate_overlay_failed", &format("Overlay validation failed: {}", e), 2);
-                    e
-                })?;
+                let result = self.validate_overlay_consensus(&block).await;
 
                 self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
                 Ok(OverlayResponseType::ValidateOverlayConsensus(ValidateOverlayConsensusResponse {
                     success: result.is_ok(),
-                    error: result.err().unwrap_or_default(),
+                    error: result.unwrap_or_else(|e| e),
                 }))
             }
             OverlayRequestType::AssembleOverlayBlock { request, token } => {
                 let user_id = self.authenticate(&token).await
-                    .map_err(|e| format("Authentication failed: {}", e))?;
+                    .map_err(|e| format!("Authentication failed: {}", e))?;
                 self.authorize(&user_id, "AssembleOverlayBlock").await
-                    .map_err(|e| format("Authorization failed: {}", e))?;
+                    .map_err(|e| format!("Authorization failed: {}", e))?;
                 self.rate_limiter.until_ready().await;
 
                 let mut block = Block::new();
@@ -460,18 +461,18 @@ impl OverlayService {
                 for tx_hex in request.tx_hexes {
                     let tx_bytes = hex::decode(&tx_hex).map_err(|e| {
                         warn!("Invalid transaction hex: {}", e);
-                        let _ = self.send_alert("assemble_overlay_invalid_tx", &format("Invalid transaction hex: {}", e), 2);
-                        format("Invalid transaction hex: {}", e)
+                        let _ = self.send_alert("assemble_overlay_invalid_tx", &format!("Invalid transaction hex: {}", e), 2);
+                        format!("Invalid transaction hex: {}", e)
                     })?;
                     let tx: Tx = Serializable::read(&mut Cursor::new(&tx_bytes)).map_err(|e| {
                         warn!("Invalid transaction: {}", e);
-                        let _ = self.send_alert("assemble_overlay_invalid_tx_deserialization", &format("Invalid transaction: {}", e), 2);
-                        format("Invalid transaction: {}", e)
+                        let _ = self.send_alert("assemble_overlay_invalid_tx_deserialization", &format!("Invalid transaction: {}", e), 2);
+                        format!("Invalid transaction: {}", e)
                     })?;
                     total_size += tx.size();
                     if total_size > 34_359_738_368 {
                         warn!("Block size exceeds 32GB: {}", total_size);
-                        let _ = self.send_alert("assemble_overlay_block_size_exceeded", &format("Block size exceeds 32GB: {}", total_size), 3);
+                        let _ = self.send_alert("assemble_overlay_block_size_exceeded", &format!("Block size exceeds 32GB: {}", total_size), 3);
                         return Ok(OverlayResponseType::AssembleOverlayBlock(AssembleOverlayBlockResponse {
                             success: false,
                             block_hex: "".to_string(),
@@ -493,9 +494,9 @@ impl OverlayService {
             }
             OverlayRequestType::GetMetrics { request, token } => {
                 let user_id = self.authenticate(&token).await
-                    .map_err(|e| format("Authentication failed: {}", e))?;
+                    .map_err(|e| format!("Authentication failed: {}", e))?;
                 self.authorize(&user_id, "GetMetrics").await
-                    .map_err(|e| format("Authorization failed: {}", e))?;
+                    .map_err(|e| format!("Authorization failed: {}", e))?;
 
                 self.latency_ms.set(start.elapsed().as_secs_f64() * 1000.0);
                 Ok(OverlayResponseType::GetMetrics(GetMetricsResponse {
@@ -515,9 +516,9 @@ impl OverlayService {
         let service = self;
         try_stream! {
             let user_id = service.authenticate(&token).await
-                .map_err(|e| format("Authentication failed: {}", e))?;
+                .map_err(|e| format!("Authentication failed: {}", e))?;
             service.authorize(&user_id, "StreamOverlayData").await
-                .map_err(|e| format("Authorization failed: {}", e))?;
+                .map_err(|e| format!("Authorization failed: {}", e))?;
             service.rate_limiter.until_ready().await;
 
             while let Ok(req) = requests.recv().await {
@@ -536,7 +537,7 @@ impl OverlayService {
                     }
                     Ok(None) => {
                         warn!("Overlay not found: {}", req.overlay_id);
-                        let _ = service.send_alert("stream_overlay_not_found", &format("Overlay not found: {}", req.overlay_id), 2);
+                        let _ = service.send_alert("stream_overlay_not_found", &format!("Overlay not found: {}", req.overlay_id), 2);
                         yield StreamOverlayDataResponse {
                             success: false,
                             data: vec![],
@@ -545,11 +546,11 @@ impl OverlayService {
                     }
                     Err(e) => {
                         warn!("Failed to access overlay: {}", e);
-                        let _ = service.send_alert("stream_overlay_failed", &format("Failed to access overlay: {}", e), 2);
+                        let _ = service.send_alert("stream_overlay_failed", &format!("Failed to access overlay: {}", e), 2);
                         yield StreamOverlayDataResponse {
                             success: false,
                             data: vec![],
-                            error: format("Failed to access overlay: {}", e),
+                            error: format!("Failed to access overlay: {}", e),
                         };
                     }
                 }
@@ -625,8 +626,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_max_level(tracing::Level::INFO)
         .init();
 
-    let addr = "127.0.0.1:50056";
+    let addr = env::var("OVERLAY_ADDR").unwrap_or("127.0.0.1:50056".to_string());
     let overlay_service = OverlayService::new().await;
-    overlay_service.run(addr).await?;
+    overlay_service.run(&addr).await?;
     Ok(())
 }
